@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "xearthlayer",
+    "xearthlayer-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["XEarthLayer Contributors"]
+license = "MIT"
+repository = "https://github.com/yourusername/xearthlayer"
+
+[workspace.dependencies]
+# Shared dependencies will be added here as needed
