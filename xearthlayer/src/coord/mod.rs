@@ -182,4 +182,130 @@ mod tests {
             );
         }
     }
+
+    // Property-based tests using proptest
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn test_roundtrip_property(
+                lat in -85.05..85.05_f64,
+                lon in -180.0..180.0_f64,
+                zoom in 0u8..=18
+            ) {
+                // Convert to tile and back
+                let tile = to_tile_coords(lat, lon, zoom)?;
+                let (converted_lat, converted_lon) = tile_to_lat_lon(&tile);
+
+                // Calculate expected precision at this zoom level
+                let tile_size = 360.0 / (2.0_f64.powi(zoom as i32));
+
+                // Converted coordinates should be within one tile of original
+                prop_assert!(
+                    (converted_lat - lat).abs() < tile_size,
+                    "Latitude roundtrip failed: {} -> {} (diff: {}, tile_size: {})",
+                    lat, converted_lat, (converted_lat - lat).abs(), tile_size
+                );
+                prop_assert!(
+                    (converted_lon - lon).abs() < tile_size,
+                    "Longitude roundtrip failed: {} -> {} (diff: {}, tile_size: {})",
+                    lon, converted_lon, (converted_lon - lon).abs(), tile_size
+                );
+            }
+
+            #[test]
+            fn test_tile_coords_in_bounds(
+                lat in -85.05..85.05_f64,
+                lon in -180.0..180.0_f64,
+                zoom in 0u8..=18
+            ) {
+                let tile = to_tile_coords(lat, lon, zoom)?;
+
+                // Tile coordinates should be within valid range
+                let max_tile = 2u32.pow(zoom as u32);
+                prop_assert!(
+                    tile.row < max_tile,
+                    "Row {} exceeds maximum {} at zoom {}",
+                    tile.row, max_tile, zoom
+                );
+                prop_assert!(
+                    tile.col < max_tile,
+                    "Col {} exceeds maximum {} at zoom {}",
+                    tile.col, max_tile, zoom
+                );
+                prop_assert_eq!(tile.zoom, zoom);
+            }
+
+            #[test]
+            fn test_longitude_monotonic(
+                lat in 0.0..1.0_f64,
+                lon1 in -180.0..-90.0_f64,
+                lon2 in -90.0..0.0_f64,
+                zoom in 10u8..=15
+            ) {
+                // For fixed latitude, increasing longitude should increase column
+                let tile1 = to_tile_coords(lat, lon1, zoom)?;
+                let tile2 = to_tile_coords(lat, lon2, zoom)?;
+
+                prop_assert!(
+                    tile1.col < tile2.col,
+                    "Longitude not monotonic: lon {} (col {}) >= lon {} (col {})",
+                    lon1, tile1.col, lon2, tile2.col
+                );
+            }
+
+            #[test]
+            fn test_tile_to_lat_lon_in_bounds(
+                row_raw in 0u32..65536,
+                col_raw in 0u32..65536,
+                zoom in 0u8..=16
+            ) {
+                let max_coord = 2u32.pow(zoom as u32);
+                // Constrain row/col to valid range for this zoom
+                let row = row_raw % max_coord;
+                let col = col_raw % max_coord;
+
+                let tile = TileCoord { row, col, zoom };
+                let (lat, lon) = tile_to_lat_lon(&tile);
+
+                // Results should be in valid geographic bounds
+                prop_assert!(
+                    lat >= MIN_LAT && lat <= MAX_LAT,
+                    "Latitude {} out of bounds [{}, {}]",
+                    lat, MIN_LAT, MAX_LAT
+                );
+                prop_assert!(
+                    lon >= -180.0 && lon <= 180.0,
+                    "Longitude {} out of bounds [-180, 180]",
+                    lon
+                );
+            }
+
+            #[test]
+            fn test_reject_invalid_latitude(
+                lat in -90.0..-85.06_f64,
+                lon in -180.0..180.0_f64,
+                zoom in 0u8..=18
+            ) {
+                // Latitudes outside Web Mercator range should error
+                let result = to_tile_coords(lat, lon, zoom);
+                prop_assert!(result.is_err());
+                prop_assert!(matches!(result.unwrap_err(), CoordError::InvalidLatitude(_)));
+            }
+
+            #[test]
+            fn test_reject_invalid_longitude(
+                lat in -85.0..85.0_f64,
+                lon in 180.01..360.0_f64,
+                zoom in 0u8..=18
+            ) {
+                // Longitudes outside valid range should error
+                let result = to_tile_coords(lat, lon, zoom);
+                prop_assert!(result.is_err());
+                prop_assert!(matches!(result.unwrap_err(), CoordError::InvalidLongitude(_)));
+            }
+        }
+    }
 }

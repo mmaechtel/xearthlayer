@@ -11,3 +11,6 @@ name = "xearthlayer"
 path = "src/lib.rs"
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1.4"
