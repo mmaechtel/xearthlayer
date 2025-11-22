@@ -27,6 +27,63 @@ pub struct TileCoord {
     pub zoom: u8,
 }
 
+impl TileCoord {
+    /// Returns an iterator over all 256 chunks in this tile.
+    ///
+    /// Chunks are yielded in row-major order (row 0 columns 0-15, row 1 columns 0-15, etc.).
+    #[inline]
+    pub fn chunks(&self) -> TileChunksIterator {
+        TileChunksIterator {
+            tile: *self,
+            current: 0,
+        }
+    }
+}
+
+/// Iterator over all chunks in a tile.
+///
+/// Yields 256 chunks (16×16) in row-major order.
+#[derive(Debug, Clone)]
+pub struct TileChunksIterator {
+    tile: TileCoord,
+    current: u16,
+}
+
+impl Iterator for TileChunksIterator {
+    type Item = ChunkCoord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= 256 {
+            return None;
+        }
+
+        // Calculate chunk position in row-major order
+        let chunk_row = (self.current / 16) as u8;
+        let chunk_col = (self.current % 16) as u8;
+
+        self.current += 1;
+
+        Some(ChunkCoord {
+            tile_row: self.tile.row,
+            tile_col: self.tile.col,
+            chunk_row,
+            chunk_col,
+            zoom: self.tile.zoom,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = (256 - self.current) as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for TileChunksIterator {
+    fn len(&self) -> usize {
+        (256 - self.current) as usize
+    }
+}
+
 /// Chunk coordinates within a tile.
 ///
 /// Represents a 256×256 pixel chunk within a 4096×4096 tile.
