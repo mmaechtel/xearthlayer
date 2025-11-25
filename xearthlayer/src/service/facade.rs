@@ -147,7 +147,7 @@ impl XEarthLayerService {
     ///
     /// * `lat` - Latitude in decimal degrees
     /// * `lon` - Longitude in decimal degrees
-    /// * `zoom` - Zoom level
+    /// * `zoom` - Zoom level (chunk resolution, like Ortho4XP: 12-19 for Bing, 12-22 for Google)
     ///
     /// # Returns
     ///
@@ -160,34 +160,33 @@ impl XEarthLayerService {
     /// - Zoom level is out of range for the provider
     /// - Tile generation fails
     pub fn download_tile(&self, lat: f64, lon: f64, zoom: u8) -> Result<Vec<u8>, ServiceError> {
-        // Validate zoom level
-        if !(1..=19).contains(&zoom) {
+        // Zoom level represents chunk resolution (like Ortho4XP).
+        // Each tile is composed of 16x16 chunks, so tile zoom = chunk zoom - 4.
+        // Valid chunk zoom range: 12 (min usable) to provider's max_zoom.
+        let min_chunk_zoom: u8 = 12;
+
+        if zoom < min_chunk_zoom || zoom > self.max_zoom {
             return Err(ServiceError::InvalidZoom {
                 zoom,
-                min: 1,
-                max: 19,
+                min: min_chunk_zoom,
+                max: self.max_zoom,
             });
         }
 
-        // Check zoom against provider's maximum (accounting for chunk zoom offset)
-        if zoom + 4 > self.max_zoom {
-            return Err(ServiceError::InvalidZoom {
-                zoom,
-                min: 1,
-                max: self.max_zoom.saturating_sub(4),
-            });
-        }
+        // Convert chunk zoom to tile zoom for coordinate conversion
+        let tile_zoom = zoom - 4;
 
-        // Convert lat/lon to tile coordinates
+        // Convert lat/lon to tile coordinates at the tile zoom level
         let tile =
-            to_tile_coords(lat, lon, zoom).map_err(|e| ServiceError::InvalidCoordinates {
+            to_tile_coords(lat, lon, tile_zoom).map_err(|e| ServiceError::InvalidCoordinates {
                 lat,
                 lon,
                 reason: e.to_string(),
             })?;
 
-        // Create tile request with tile row/col coordinates
-        let request = TileRequest::new(tile.row as i32, tile.col as i32, zoom);
+        // Create tile request with tile row/col coordinates and tile zoom
+        // (TileGenerator will add 4 to get chunk zoom for downloads)
+        let request = TileRequest::new(tile.row as i32, tile.col as i32, tile_zoom);
 
         // Generate tile
         self.generator
