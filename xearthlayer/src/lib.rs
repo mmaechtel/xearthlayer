@@ -10,6 +10,8 @@ pub mod fuse;
 pub mod logging;
 pub mod orchestrator;
 pub mod provider;
+pub mod texture;
+pub mod tile;
 
 /// Version of the XEarthLayer library and CLI.
 ///

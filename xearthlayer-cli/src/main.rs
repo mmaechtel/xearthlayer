@@ -13,6 +13,8 @@ use xearthlayer::fuse::XEarthLayerFS;
 use xearthlayer::logging::{default_log_dir, default_log_file, init_logging};
 use xearthlayer::orchestrator::TileOrchestrator;
 use xearthlayer::provider::{BingMapsProvider, GoogleMapsProvider, Provider, ReqwestClient};
+use xearthlayer::texture::{DdsTextureEncoder, TextureEncoder};
+use xearthlayer::tile::{DefaultTileGenerator, TileGenerator};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ProviderType {
@@ -409,6 +411,12 @@ fn handle_serve(
         DdsCompressionFormat::Bc3 => DdsFormat::BC3,
     };
 
+    // Create texture encoder
+    let encoder: Arc<dyn TextureEncoder> =
+        Arc::new(DdsTextureEncoder::new(format).with_mipmap_count(mipmap_count));
+    info!("Using texture encoder: {}", encoder.name());
+    println!("Encoder: {} ({} mipmaps)", encoder.name(), mipmap_count);
+
     // Create provider and start FUSE based on selection
     match provider {
         ProviderType::Bing => {
@@ -420,6 +428,11 @@ fn handle_serve(
             println!();
 
             let orchestrator = TileOrchestrator::new(provider, timeout, retries as u32, parallel);
+
+            // Create tile generator (combines orchestrator + encoder)
+            let generator: Arc<dyn TileGenerator> =
+                Arc::new(DefaultTileGenerator::new(orchestrator, encoder.clone()));
+            info!("Tile generator created");
 
             // Create cache system or no-op cache
             let cache: Arc<dyn Cache> = if no_cache {
@@ -443,7 +456,7 @@ fn handle_serve(
             };
             println!();
 
-            let fs = XEarthLayerFS::new(orchestrator, cache, format, mipmap_count);
+            let fs = XEarthLayerFS::new(generator, cache, format);
 
             info!("Mounting FUSE filesystem at {}", mountpoint);
             println!("Mounting filesystem...");
@@ -499,6 +512,11 @@ fn handle_serve(
 
             let orchestrator = TileOrchestrator::new(provider, timeout, retries as u32, parallel);
 
+            // Create tile generator (combines orchestrator + encoder)
+            let generator: Arc<dyn TileGenerator> =
+                Arc::new(DefaultTileGenerator::new(orchestrator, encoder.clone()));
+            info!("Tile generator created");
+
             // Create cache system or no-op cache
             let cache: Arc<dyn Cache> = if no_cache {
                 info!("Caching disabled (--no-cache)");
@@ -521,7 +539,7 @@ fn handle_serve(
             };
             println!();
 
-            let fs = XEarthLayerFS::new(orchestrator, cache, format, mipmap_count);
+            let fs = XEarthLayerFS::new(generator, cache, format);
 
             info!("Mounting FUSE filesystem at {}", mountpoint);
             println!("Mounting filesystem...");

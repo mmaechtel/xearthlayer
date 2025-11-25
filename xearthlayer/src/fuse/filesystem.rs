@@ -5,10 +5,9 @@
 
 use crate::cache::{Cache, CacheKey};
 use crate::coord::to_tile_coords;
-use crate::dds::{DdsEncoder, DdsFormat};
+use crate::dds::DdsFormat;
 use crate::fuse::{generate_default_placeholder, parse_dds_filename, DdsFilename};
-use crate::orchestrator::TileOrchestrator;
-use crate::provider::Provider;
+use crate::tile::{TileGenerator, TileRequest};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
 };
@@ -37,62 +36,67 @@ const TTL: Duration = Duration::from_secs(1);
 ///     ├── +37-122_BI16.dds (generated on-demand)
 ///     └── ...
 /// ```
-pub struct XEarthLayerFS<P: Provider> {
-    /// Tile orchestrator for downloading imagery
-    orchestrator: Arc<TileOrchestrator<P>>,
+pub struct XEarthLayerFS {
+    /// Tile generator (handles download + encoding)
+    generator: Arc<dyn TileGenerator>,
     /// Cache implementation (can be CacheSystem, NoOpCache, or custom)
     cache: Arc<dyn Cache>,
-    /// DDS compression format
+    /// DDS compression format (used for cache key generation)
     dds_format: DdsFormat,
-    /// Number of mipmap levels
-    mipmap_count: usize,
     /// Cache mapping inode numbers to DDS filenames for FUSE operations
     inode_cache: Arc<Mutex<HashMap<u64, DdsFilename>>>,
 }
 
-impl<P: Provider + 'static> XEarthLayerFS<P> {
+impl XEarthLayerFS {
     /// Create a new XEarthLayer filesystem.
     ///
     /// # Arguments
     ///
-    /// * `orchestrator` - Tile orchestrator for downloading imagery
+    /// * `generator` - Tile generator (handles downloading and encoding)
     /// * `cache` - Cache implementation (CacheSystem, NoOpCache, or custom)
-    /// * `dds_format` - DDS compression format (BC1 or BC3)
-    /// * `mipmap_count` - Number of mipmap levels (typically 5)
+    /// * `dds_format` - DDS compression format for cache key generation
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use xearthlayer::fuse::XEarthLayerFS;
     /// use xearthlayer::cache::{CacheSystem, CacheConfig, NoOpCache};
+    /// use xearthlayer::tile::{DefaultTileGenerator, TileGenerator};
     /// use xearthlayer::orchestrator::TileOrchestrator;
-    /// use xearthlayer::provider::BingMapsProvider;
+    /// use xearthlayer::provider::{BingMapsProvider, ReqwestClient};
+    /// use xearthlayer::texture::{TextureEncoder, DdsTextureEncoder};
     /// use xearthlayer::dds::DdsFormat;
     /// use std::sync::Arc;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create tile generator (requires network access)
+    /// let http_client = ReqwestClient::new()?;
+    /// let provider = BingMapsProvider::new(http_client);
+    /// let orchestrator = TileOrchestrator::new(provider, 30, 3, 32);
+    /// let encoder: Arc<dyn TextureEncoder> = Arc::new(
+    ///     DdsTextureEncoder::new(DdsFormat::BC1).with_mipmap_count(5)
+    /// );
+    /// let generator: Arc<dyn TileGenerator> = Arc::new(
+    ///     DefaultTileGenerator::new(orchestrator, encoder)
+    /// );
+    ///
     /// // With caching
     /// let cache_config = CacheConfig::new("bing");
     /// let cache = CacheSystem::new(cache_config)?;
-    /// // let fs = XEarthLayerFS::new(orchestrator, Arc::new(cache), DdsFormat::BC1, 5);
+    /// let fs = XEarthLayerFS::new(generator.clone(), Arc::new(cache), DdsFormat::BC1);
     ///
     /// // Without caching (for testing)
     /// let no_cache = NoOpCache::new("bing");
-    /// // let fs = XEarthLayerFS::new(orchestrator, Arc::new(no_cache), DdsFormat::BC1, 5);
-    /// # Ok(())
-    /// # }
+    /// let fs = XEarthLayerFS::new(generator, Arc::new(no_cache), DdsFormat::BC1);
     /// ```
     pub fn new(
-        orchestrator: TileOrchestrator<P>,
+        generator: Arc<dyn TileGenerator>,
         cache: Arc<dyn Cache>,
         dds_format: DdsFormat,
-        mipmap_count: usize,
     ) -> Self {
         Self {
-            orchestrator: Arc::new(orchestrator),
+            generator,
             cache,
             dds_format,
-            mipmap_count,
             inode_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -138,11 +142,8 @@ impl<P: Provider + 'static> XEarthLayerFS<P> {
             }),
             _ if ino >= TILE_FILE_INODE_BASE => {
                 // This is a tile file - report as a regular file
-                // Size is approximate (actual size varies by content)
-                let estimated_size = match self.dds_format {
-                    DdsFormat::BC1 => 11_174_016, // 4096×4096 BC1 with 5 mipmaps
-                    DdsFormat::BC3 => 22_347_904, // 4096×4096 BC3 with 5 mipmaps
-                };
+                // Use generator to get expected size for 4096×4096 tile
+                let estimated_size = self.generator.expected_size() as u64;
 
                 Some(FileAttr {
                     ino,
@@ -190,77 +191,15 @@ impl<P: Provider + 'static> XEarthLayerFS<P> {
         }
     }
 
-    /// Generate DDS file on-demand for the given coordinates.
-    fn generate_tile_dds(&self, coords: &DdsFilename) -> Vec<u8> {
-        info!(
-            "Generating DDS for tile: lat={}, lon={}, zoom={}",
-            coords.row, coords.col, coords.zoom
-        );
+    /// Generate tile texture on-demand for the given coordinates.
+    fn generate_tile(&self, coords: &DdsFilename) -> Vec<u8> {
+        let request = TileRequest::from(coords);
 
-        // Convert DDS filename coords (lat/lon in degrees) to TileCoord
-        // The DDS filename format is: +LAT+LON_MAPTYPE_ZOOM.dds
-        // For example: +37-123_BI16.dds means lat=37°, lon=-123°, zoom=16
-        let lat = coords.row as f64;
-        let lon = coords.col as f64;
-
-        let tile = match to_tile_coords(lat, lon, coords.zoom) {
-            Ok(t) => {
-                info!(
-                    "Converted lat={}, lon={}, zoom={} to tile row={}, col={}",
-                    lat, lon, coords.zoom, t.row, t.col
-                );
-                t
-            }
+        match self.generator.generate(&request) {
+            Ok(data) => data,
             Err(e) => {
-                error!("Failed to convert coordinates: {}", e);
-                warn!("Returning magenta placeholder for invalid coordinates");
-                return match generate_default_placeholder() {
-                    Ok(placeholder) => placeholder,
-                    Err(placeholder_err) => {
-                        error!("Failed to generate placeholder: {}", placeholder_err);
-                        Vec::new()
-                    }
-                };
-            }
-        };
-
-        // Download tile imagery
-        let image = match self.orchestrator.download_tile(&tile) {
-            Ok(img) => {
-                info!(
-                    "Downloaded tile successfully: {}×{} pixels",
-                    img.width(),
-                    img.height()
-                );
-                img
-            }
-            Err(e) => {
-                error!("Failed to download tile: {}", e);
-                warn!("Returning magenta placeholder for failed tile");
-
-                // Return placeholder instead of failing
-                return match generate_default_placeholder() {
-                    Ok(placeholder) => placeholder,
-                    Err(placeholder_err) => {
-                        error!("Failed to generate placeholder: {}", placeholder_err);
-                        // Return empty vec as last resort
-                        Vec::new()
-                    }
-                };
-            }
-        };
-
-        // Encode to DDS
-        let encoder = DdsEncoder::new(self.dds_format).with_mipmap_count(self.mipmap_count);
-
-        match encoder.encode(&image) {
-            Ok(dds_data) => {
-                info!("DDS encoding completed: {} bytes", dds_data.len());
-                dds_data
-            }
-            Err(e) => {
-                error!("Failed to encode DDS: {}", e);
-                warn!("Returning magenta placeholder for failed encoding");
+                error!("Failed to generate tile: {}", e);
+                warn!("Returning magenta placeholder");
 
                 // Return placeholder instead of failing
                 match generate_default_placeholder() {
@@ -275,7 +214,7 @@ impl<P: Provider + 'static> XEarthLayerFS<P> {
     }
 }
 
-impl<P: Provider + 'static> Filesystem for XEarthLayerFS<P> {
+impl Filesystem for XEarthLayerFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup: parent={}, name={:?}", parent, name);
 
@@ -354,7 +293,7 @@ impl<P: Provider + 'static> Filesystem for XEarthLayerFS<P> {
             }
         };
 
-        // Convert coordinates to tile coordinates
+        // Convert coordinates to tile coordinates for cache key
         let tile = match to_tile_coords(coords.row as f64, coords.col as f64, coords.zoom) {
             Ok(t) => t,
             Err(e) => {
@@ -381,9 +320,9 @@ impl<P: Provider + 'static> Filesystem for XEarthLayerFS<P> {
             info!("Cache hit for tile {:?}", tile);
             data
         } else {
-            // Cache miss - generate tile
+            // Cache miss - generate tile using injected generator
             info!("Cache miss for tile {:?}, generating...", tile);
-            let data = self.generate_tile_dds(&coords);
+            let data = self.generate_tile(&coords);
 
             // Cache the generated tile
             if let Err(e) = self.cache.put(cache_key, data.clone()) {
