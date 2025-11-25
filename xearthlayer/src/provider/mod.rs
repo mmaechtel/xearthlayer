@@ -4,10 +4,12 @@
 //! imagery from various providers (Bing Maps, Google, NAIP, etc.).
 
 mod bing;
+mod google;
 mod http;
 mod types;
 
 pub use bing::BingMapsProvider;
+pub use google::GoogleMapsProvider;
 pub use http::{HttpClient, ReqwestClient};
 pub use types::{Provider, ProviderError};
 
