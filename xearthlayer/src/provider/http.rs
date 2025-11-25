@@ -17,6 +17,18 @@ pub trait HttpClient: Send + Sync {
     ///
     /// The response body as bytes or an error.
     fn get(&self, url: &str) -> Result<Vec<u8>, ProviderError>;
+
+    /// Performs an HTTP POST request with JSON body.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL to request
+    /// * `json_body` - JSON body as a string
+    ///
+    /// # Returns
+    ///
+    /// The response body as bytes or an error.
+    fn post_json(&self, url: &str, json_body: &str) -> Result<Vec<u8>, ProviderError>;
 }
 
 /// Real HTTP client implementation using reqwest.
@@ -79,6 +91,31 @@ impl HttpClient for ReqwestClient {
             .map(|b| b.to_vec())
             .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
     }
+
+    fn post_json(&self, url: &str, json_body: &str) -> Result<Vec<u8>, ProviderError> {
+        let response = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(json_body.to_string())
+            .send()
+            .map_err(|e| ProviderError::HttpError(format!("POST request failed: {}", e)))?;
+
+        // Check HTTP status
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpError(format!(
+                "HTTP {} from POST {}",
+                response.status(),
+                url
+            )));
+        }
+
+        // Read response body
+        response
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +129,10 @@ pub mod tests {
 
     impl HttpClient for MockHttpClient {
         fn get(&self, _url: &str) -> Result<Vec<u8>, ProviderError> {
+            self.response.clone()
+        }
+
+        fn post_json(&self, _url: &str, _json_body: &str) -> Result<Vec<u8>, ProviderError> {
             self.response.clone()
         }
     }

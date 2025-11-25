@@ -109,7 +109,20 @@ fn main() {
         }
         ProviderType::Google => {
             let api_key = args.google_api_key.clone().unwrap(); // Safe: required_if_eq
-            let provider = GoogleMapsProvider::new(http_client, api_key);
+
+            println!("Creating Google Maps session...");
+            let provider = match GoogleMapsProvider::new(http_client, api_key) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error creating Google Maps provider: {}", e);
+                    eprintln!("Make sure:");
+                    eprintln!("  1. Map Tiles API is enabled in Google Cloud Console");
+                    eprintln!("  2. Billing is enabled for your project");
+                    eprintln!("  3. Your API key is valid and unrestricted");
+                    process::exit(1);
+                }
+            };
+
             let name = provider.name().to_string();
             let max = provider.max_zoom();
 
@@ -126,7 +139,7 @@ fn main() {
                 process::exit(1);
             }
 
-            println!("Using provider: {} (authenticated)", name);
+            println!("Using provider: {} (session created successfully)", name);
 
             // Create orchestrator
             let orchestrator = TileOrchestrator::new(provider, 30, 3, 32);

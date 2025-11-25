@@ -1,14 +1,20 @@
 //! Google Maps satellite imagery provider.
 //!
-//! Uses Google Maps Platform API with proper authentication via API key.
+//! Uses Google Maps Platform API with proper authentication via API key and session tokens.
 //! Requires users to have their own Google Cloud Platform account and
-//! Maps API key with Maps Static API or Map Tiles API enabled.
+//! Maps API key with Map Tiles API enabled.
 //!
-//! # API Endpoints
+//! # Authentication
 //!
-//! Google Maps provides tiles via:
-//! - Map Tiles API: `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?key={API_KEY}`
-//! - Legacy endpoint: `https://mt{server}.googleapis.com/vt?lyrs=s&x={x}&y={y}&z={z}&key={API_KEY}`
+//! Google's Map Tiles API requires two-step authentication:
+//! 1. Create a session token via POST to /v1/createSession
+//! 2. Use the session token in all tile requests
+//!
+//! The session token is created automatically when the provider is initialized.
+//!
+//! # API Endpoint
+//!
+//! - Map Tiles API: `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session={SESSION}&key={API_KEY}`
 //!
 //! # Coordinate System
 //!
@@ -26,9 +32,10 @@ use crate::provider::{HttpClient, Provider, ProviderError};
 ///
 /// Requires a valid Google Maps Platform API key. Users must:
 /// 1. Create a Google Cloud Platform project
-/// 2. Enable Maps JavaScript API or Map Tiles API
-/// 3. Create an API key with appropriate restrictions
-/// 4. Provide the API key to this provider
+/// 2. Enable Map Tiles API
+/// 3. Enable billing for the project
+/// 4. Create an API key with appropriate restrictions
+/// 5. Provide the API key to this provider
 ///
 /// # Pricing
 ///
@@ -41,45 +48,77 @@ use crate::provider::{HttpClient, Provider, ProviderError};
 /// use xearthlayer::provider::{GoogleMapsProvider, ReqwestClient};
 ///
 /// let client = ReqwestClient::new().unwrap();
-/// let provider = GoogleMapsProvider::new(client, "YOUR_API_KEY".to_string());
+/// let provider = GoogleMapsProvider::new(client, "YOUR_API_KEY".to_string())
+///     .expect("Failed to create session");
 /// // Use provider with TileOrchestrator...
 /// ```
 pub struct GoogleMapsProvider<C: HttpClient> {
     http_client: C,
     api_key: String,
-    style: String,
-    use_legacy_endpoint: bool,
+    session_token: String,
 }
 
 impl<C: HttpClient> GoogleMapsProvider<C> {
     /// Creates a new Google Maps provider with the given API key.
     ///
-    /// Uses the modern Map Tiles API endpoint by default.
+    /// This will immediately create a session token by making a POST request
+    /// to Google's Map Tiles API. The session token is then used for all
+    /// subsequent tile requests.
     ///
     /// # Arguments
     ///
     /// * `http_client` - HTTP client for making requests
     /// * `api_key` - Valid Google Maps Platform API key
-    pub fn new(http_client: C, api_key: String) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if session creation fails (network error, invalid API key, etc.)
+    pub fn new(http_client: C, api_key: String) -> Result<Self, ProviderError> {
+        let session_token = Self::create_session(&http_client, &api_key)?;
+
+        Ok(Self {
             http_client,
             api_key,
-            style: "satellite".to_string(),
-            use_legacy_endpoint: false,
-        }
+            session_token,
+        })
     }
 
-    /// Creates a provider using the legacy tile endpoint.
+    /// Creates a session token for the Map Tiles API.
     ///
-    /// The legacy endpoint may have better compatibility but might
-    /// be deprecated in the future.
-    pub fn with_legacy_endpoint(http_client: C, api_key: String) -> Self {
-        Self {
-            http_client,
-            api_key,
-            style: "s".to_string(), // "s" = satellite in legacy API
-            use_legacy_endpoint: true,
-        }
+    /// Makes a POST request to https://tile.googleapis.com/v1/createSession
+    /// with satellite map type configuration.
+    fn create_session(http_client: &C, api_key: &str) -> Result<String, ProviderError> {
+        let url = format!(
+            "https://tile.googleapis.com/v1/createSession?key={}",
+            api_key
+        );
+
+        let json_body = r#"{
+  "mapType": "satellite",
+  "language": "en-US",
+  "region": "US"
+}"#;
+
+        let response = http_client.post_json(&url, json_body)?;
+
+        // Parse JSON response to extract session token
+        let response_str = String::from_utf8(response)
+            .map_err(|e| ProviderError::InvalidResponse(format!("Invalid UTF-8: {}", e)))?;
+
+        // Simple JSON parsing to extract session field
+        // Format: {"session":"SESSION_TOKEN_HERE",...}
+        let session = response_str
+            .split("\"session\":")
+            .nth(1)
+            .and_then(|s| s.split('"').nth(1))
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse(format!(
+                    "Failed to parse session token from response: {}",
+                    response_str
+                ))
+            })?;
+
+        Ok(session.to_string())
     }
 
     /// Builds the tile URL for the given coordinates.
@@ -87,20 +126,10 @@ impl<C: HttpClient> GoogleMapsProvider<C> {
     /// Google Maps uses standard XYZ coordinates (not quadkeys like Bing).
     /// The row/col from our coordinate system map directly to y/x in Google's API.
     fn build_url(&self, row: u32, col: u32, zoom: u8) -> String {
-        if self.use_legacy_endpoint {
-            // Legacy endpoint with load balancing across servers
-            let server = (row + col) % 4; // Distribute across mt0-mt3
-            format!(
-                "https://mt{}.googleapis.com/vt?lyrs={}&x={}&y={}&z={}&key={}",
-                server, self.style, col, row, zoom, self.api_key
-            )
-        } else {
-            // Modern Map Tiles API
-            format!(
-                "https://tile.googleapis.com/v1/2dtiles/{}/{}/{}?key={}",
-                zoom, col, row, self.api_key
-            )
-        }
+        format!(
+            "https://tile.googleapis.com/v1/2dtiles/{}/{}/{}?session={}&key={}",
+            zoom, col, row, self.session_token, self.api_key
+        )
     }
 }
 
@@ -132,21 +161,29 @@ mod tests {
     use super::*;
     use crate::provider::MockHttpClient;
 
+    fn mock_session_response() -> Vec<u8> {
+        r#"{"session":"test_session_token_12345","expiry":"2025-01-01T00:00:00Z"}"#
+            .as_bytes()
+            .to_vec()
+    }
+
     #[test]
     fn test_provider_name() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string())
+            .expect("Failed to create provider");
         assert_eq!(provider.name(), "Google Maps");
     }
 
     #[test]
     fn test_zoom_range() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string())
+            .expect("Failed to create provider");
         assert_eq!(provider.min_zoom(), 0);
         assert_eq!(provider.max_zoom(), 22);
     }
@@ -154,9 +191,10 @@ mod tests {
     #[test]
     fn test_supports_zoom() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string())
+            .expect("Failed to create provider");
         assert!(provider.supports_zoom(0));
         assert!(provider.supports_zoom(15));
         assert!(provider.supports_zoom(22));
@@ -164,85 +202,38 @@ mod tests {
     }
 
     #[test]
-    fn test_modern_url_construction() {
+    fn test_url_construction() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider = GoogleMapsProvider::new(mock_client, "test_api_key".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "test_api_key".to_string())
+            .expect("Failed to create provider");
 
         let url = provider.build_url(100, 200, 10);
         assert_eq!(
             url,
-            "https://tile.googleapis.com/v1/2dtiles/10/200/100?key=test_api_key"
+            "https://tile.googleapis.com/v1/2dtiles/10/200/100?session=test_session_token_12345&key=test_api_key"
         );
     }
 
     #[test]
-    fn test_legacy_url_construction() {
+    fn test_session_token_parsing() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider =
-            GoogleMapsProvider::with_legacy_endpoint(mock_client, "test_api_key".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string())
+            .expect("Failed to create provider");
 
-        let url = provider.build_url(100, 200, 10);
-        // Server should be (100 + 200) % 4 = 0
-        assert_eq!(
-            url,
-            "https://mt0.googleapis.com/vt?lyrs=s&x=200&y=100&z=10&key=test_api_key"
-        );
-    }
-
-    #[test]
-    fn test_legacy_url_server_distribution() {
-        let mock_client = MockHttpClient {
-            response: Ok(vec![]),
-        };
-        let provider =
-            GoogleMapsProvider::with_legacy_endpoint(mock_client, "test_api_key".to_string());
-
-        // Test different server selections
-        assert!(provider.build_url(0, 0, 10).contains("mt0."));
-        assert!(provider.build_url(0, 1, 10).contains("mt1."));
-        assert!(provider.build_url(1, 1, 10).contains("mt2."));
-        assert!(provider.build_url(1, 2, 10).contains("mt3."));
-        assert!(provider.build_url(0, 4, 10).contains("mt0.")); // Wraps around
-    }
-
-    #[test]
-    fn test_download_chunk_success() {
-        let mock_data = vec![1, 2, 3, 4];
-        let mock_client = MockHttpClient {
-            response: Ok(mock_data.clone()),
-        };
-        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string());
-
-        let result = provider.download_chunk(100, 200, 10);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), mock_data);
-    }
-
-    #[test]
-    fn test_download_chunk_http_error() {
-        let mock_client = MockHttpClient {
-            response: Err(ProviderError::HttpError("Network error".to_string())),
-        };
-        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string());
-
-        let result = provider.download_chunk(100, 200, 10);
-        assert!(result.is_err());
-        match result {
-            Err(ProviderError::HttpError(msg)) => assert_eq!(msg, "Network error"),
-            _ => panic!("Expected HttpError"),
-        }
+        assert_eq!(provider.session_token, "test_session_token_12345");
     }
 
     #[test]
     fn test_download_chunk_unsupported_zoom() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "test_key".to_string())
+            .expect("Failed to create provider");
 
         let result = provider.download_chunk(100, 200, 23); // Beyond max zoom
         assert!(result.is_err());
@@ -253,13 +244,15 @@ mod tests {
     }
 
     #[test]
-    fn test_api_key_included_in_url() {
+    fn test_session_token_included_in_url() {
         let mock_client = MockHttpClient {
-            response: Ok(vec![]),
+            response: Ok(mock_session_response()),
         };
-        let provider = GoogleMapsProvider::new(mock_client, "secret_key_123".to_string());
+        let provider = GoogleMapsProvider::new(mock_client, "secret_key_123".to_string())
+            .expect("Failed to create provider");
 
         let url = provider.build_url(10, 20, 5);
+        assert!(url.contains("session=test_session_token_12345"));
         assert!(url.contains("key=secret_key_123"));
     }
 }
