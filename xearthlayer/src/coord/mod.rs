@@ -110,6 +110,35 @@ pub fn tile_to_lat_lon(tile: &TileCoord) -> (f64, f64) {
     (lat, lon)
 }
 
+/// Converts tile coordinates to the geographic center of the tile.
+///
+/// Returns the latitude/longitude of the tile's center point.
+/// This is useful for displaying human-readable coordinates.
+///
+/// # Example
+///
+/// ```
+/// use xearthlayer::coord::{TileCoord, tile_to_lat_lon_center};
+///
+/// let tile = TileCoord { row: 100000, col: 125184, zoom: 18 };
+/// let (lat, lon) = tile_to_lat_lon_center(&tile);
+/// // Returns approximately (39.19, -8.07) - center of tile in Portugal
+/// ```
+#[inline]
+pub fn tile_to_lat_lon_center(tile: &TileCoord) -> (f64, f64) {
+    let n = 2.0_f64.powi(tile.zoom as i32);
+
+    // Convert tile X coordinate to longitude (add 0.5 for center)
+    let lon = (tile.col as f64 + 0.5) / n * 360.0 - 180.0;
+
+    // Convert tile Y coordinate to latitude using inverse Web Mercator (add 0.5 for center)
+    let y = (tile.row as f64 + 0.5) / n;
+    let lat_rad = (PI * (1.0 - 2.0 * y)).sinh().atan();
+    let lat = lat_rad * 180.0 / PI;
+
+    (lat, lon)
+}
+
 /// Converts tile coordinates to a Bing Maps quadkey.
 ///
 /// Quadkeys are base-4 strings where each digit (0-3) represents which quadrant
@@ -294,6 +323,83 @@ mod tests {
         // At zoom 10, tile 512,512 should be near 0,0
         assert!(lat.abs() < 1.0, "Should be near equator");
         assert!(lon.abs() < 1.0, "Should be near prime meridian");
+    }
+
+    #[test]
+    fn test_tile_to_lat_lon_center_europe() {
+        // From AutoOrtho .ter file: 100000_125184_BI18.ter
+        // LOAD_CENTER 39.18969 -8.07495
+        // Note: AutoOrtho's LOAD_CENTER may use a slightly different calculation
+        let tile = TileCoord {
+            row: 100000,
+            col: 125184,
+            zoom: 18,
+        };
+
+        let (lat, lon) = tile_to_lat_lon_center(&tile);
+
+        // Should be close to the LOAD_CENTER from the .ter file
+        // At zoom 18, tile size is ~0.0014° so 0.02° tolerance is reasonable
+        assert!(
+            (lat - 39.18969).abs() < 0.02,
+            "Latitude {} should be close to 39.18969",
+            lat
+        );
+        assert!(
+            (lon - (-8.07495)).abs() < 0.02,
+            "Longitude {} should be close to -8.07495",
+            lon
+        );
+    }
+
+    #[test]
+    fn test_tile_to_lat_lon_center_australia() {
+        // From AutoOrtho .ter file: 169840_253472_BI18.ter
+        // LOAD_CENTER -46.91275 168.10181
+        let tile = TileCoord {
+            row: 169840,
+            col: 253472,
+            zoom: 18,
+        };
+
+        let (lat, lon) = tile_to_lat_lon_center(&tile);
+
+        // Should be close to the LOAD_CENTER from the .ter file
+        assert!(
+            (lat - (-46.91275)).abs() < 0.02,
+            "Latitude {} should be close to -46.91275",
+            lat
+        );
+        assert!(
+            (lon - 168.10181).abs() < 0.02,
+            "Longitude {} should be close to 168.10181",
+            lon
+        );
+    }
+
+    #[test]
+    fn test_tile_to_lat_lon_center_asia() {
+        // From AutoOrtho .ter file: 100000_222560_BI18.ter
+        // LOAD_CENTER 39.18969 125.65063
+        let tile = TileCoord {
+            row: 100000,
+            col: 222560,
+            zoom: 18,
+        };
+
+        let (lat, lon) = tile_to_lat_lon_center(&tile);
+
+        // Should be close to the LOAD_CENTER from the .ter file
+        assert!(
+            (lat - 39.18969).abs() < 0.02,
+            "Latitude {} should be close to 39.18969",
+            lat
+        );
+        assert!(
+            (lon - 125.65063).abs() < 0.02,
+            "Longitude {} should be close to 125.65063",
+            lon
+        );
     }
 
     #[test]

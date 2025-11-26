@@ -11,26 +11,28 @@
 ///
 /// # Note
 ///
-/// The row/col values are tile indices in the Web Mercator grid, NOT
-/// latitude/longitude in degrees. These typically come from parsed FUSE
-/// filenames like `+37-123_BI16.dds`.
+/// The row/col values are unsigned tile indices in the Web Mercator grid:
+/// - Row increases southward (equator ≈ 2^(zoom-1))
+/// - Col increases eastward (prime meridian ≈ 2^(zoom-1))
+///
+/// These come from parsed FUSE filenames like `100000_125184_BI18.dds`.
 ///
 /// # Example
 ///
 /// ```
 /// use xearthlayer::tile::TileRequest;
 ///
-/// let request = TileRequest::new(37, 123, 16);
-/// assert_eq!(request.row(), 37);
-/// assert_eq!(request.col(), 123);
-/// assert_eq!(request.zoom(), 16);
+/// let request = TileRequest::new(100000, 125184, 18);
+/// assert_eq!(request.row(), 100000);
+/// assert_eq!(request.col(), 125184);
+/// assert_eq!(request.zoom(), 18);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileRequest {
-    /// Tile row (Y coordinate in Web Mercator grid)
-    row: i32,
-    /// Tile column (X coordinate in Web Mercator grid)
-    col: i32,
+    /// Tile row (Y coordinate in Web Mercator grid, unsigned)
+    row: u32,
+    /// Tile column (X coordinate in Web Mercator grid, unsigned)
+    col: u32,
     /// Zoom level
     zoom: u8,
 }
@@ -42,18 +44,18 @@ impl TileRequest {
     ///
     /// * `row` - Tile row (Y coordinate in Web Mercator grid)
     /// * `col` - Tile column (X coordinate in Web Mercator grid)
-    /// * `zoom` - Zoom level (typically 12-19)
-    pub fn new(row: i32, col: i32, zoom: u8) -> Self {
+    /// * `zoom` - Zoom level (typically 12-22)
+    pub fn new(row: u32, col: u32, zoom: u8) -> Self {
         Self { row, col, zoom }
     }
 
     /// Get the tile row.
-    pub fn row(&self) -> i32 {
+    pub fn row(&self) -> u32 {
         self.row
     }
 
     /// Get the tile column.
-    pub fn col(&self) -> i32 {
+    pub fn col(&self) -> u32 {
         self.col
     }
 
@@ -90,41 +92,48 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let request = TileRequest::new(37, 123, 16);
-        assert_eq!(request.row(), 37);
-        assert_eq!(request.col(), 123);
-        assert_eq!(request.zoom(), 16);
+        let request = TileRequest::new(100000, 125184, 18);
+        assert_eq!(request.row(), 100000);
+        assert_eq!(request.col(), 125184);
+        assert_eq!(request.zoom(), 18);
     }
 
     #[test]
-    fn test_negative_col() {
-        // Note: In practice tile columns are positive, but the type allows
-        // negative values for compatibility with signed filename parsing
-        let request = TileRequest::new(40, -74, 15);
-        assert_eq!(request.row(), 40);
-        assert_eq!(request.col(), -74);
-        assert_eq!(request.zoom(), 15);
+    fn test_new_zero_coords() {
+        let request = TileRequest::new(0, 0, 12);
+        assert_eq!(request.row(), 0);
+        assert_eq!(request.col(), 0);
+        assert_eq!(request.zoom(), 12);
+    }
+
+    #[test]
+    fn test_new_max_coords_zoom_18() {
+        // At zoom 18, max coordinate is 2^18 - 1 = 262143
+        let request = TileRequest::new(262143, 262143, 18);
+        assert_eq!(request.row(), 262143);
+        assert_eq!(request.col(), 262143);
+        assert_eq!(request.zoom(), 18);
     }
 
     #[test]
     fn test_clone() {
-        let request = TileRequest::new(37, 123, 16);
+        let request = TileRequest::new(100000, 125184, 18);
         let cloned = request;
         assert_eq!(request, cloned);
     }
 
     #[test]
     fn test_copy() {
-        let request = TileRequest::new(37, 123, 16);
+        let request = TileRequest::new(100000, 125184, 18);
         let copied = request;
         assert_eq!(request.row(), copied.row());
     }
 
     #[test]
     fn test_equality() {
-        let request1 = TileRequest::new(37, 123, 16);
-        let request2 = TileRequest::new(37, 123, 16);
-        let request3 = TileRequest::new(38, 123, 16);
+        let request1 = TileRequest::new(100000, 125184, 18);
+        let request2 = TileRequest::new(100000, 125184, 18);
+        let request3 = TileRequest::new(100001, 125184, 18);
 
         assert_eq!(request1, request2);
         assert_ne!(request1, request3);
@@ -135,45 +144,47 @@ mod tests {
         use std::collections::HashSet;
 
         let mut set = HashSet::new();
-        set.insert(TileRequest::new(37, 123, 16));
-        set.insert(TileRequest::new(37, 123, 16));
-        set.insert(TileRequest::new(38, 123, 16));
+        set.insert(TileRequest::new(100000, 125184, 18));
+        set.insert(TileRequest::new(100000, 125184, 18));
+        set.insert(TileRequest::new(100001, 125184, 18));
 
         assert_eq!(set.len(), 2);
     }
 
     #[test]
     fn test_debug() {
-        let request = TileRequest::new(37, 123, 16);
+        let request = TileRequest::new(100000, 125184, 18);
         let debug_str = format!("{:?}", request);
-        assert!(debug_str.contains("37"));
-        assert!(debug_str.contains("123"));
-        assert!(debug_str.contains("16"));
+        assert!(debug_str.contains("100000"));
+        assert!(debug_str.contains("125184"));
+        assert!(debug_str.contains("18"));
     }
 
     #[test]
     fn test_from_dds_filename() {
         let filename = DdsFilename {
-            row: 37,
-            col: 123,
-            zoom: 16,
+            row: 100000,
+            col: 125184,
+            zoom: 18,
+            map_type: "BI".to_string(),
         };
         let request: TileRequest = filename.into();
-        assert_eq!(request.row(), 37);
-        assert_eq!(request.col(), 123);
-        assert_eq!(request.zoom(), 16);
+        assert_eq!(request.row(), 100000);
+        assert_eq!(request.col(), 125184);
+        assert_eq!(request.zoom(), 18);
     }
 
     #[test]
     fn test_from_dds_filename_ref() {
         let filename = DdsFilename {
-            row: 37,
-            col: 123,
-            zoom: 16,
+            row: 100000,
+            col: 125184,
+            zoom: 18,
+            map_type: "BI".to_string(),
         };
         let request: TileRequest = (&filename).into();
-        assert_eq!(request.row(), 37);
-        assert_eq!(request.col(), 123);
-        assert_eq!(request.zoom(), 16);
+        assert_eq!(request.row(), 100000);
+        assert_eq!(request.col(), 125184);
+        assert_eq!(request.zoom(), 18);
     }
 }

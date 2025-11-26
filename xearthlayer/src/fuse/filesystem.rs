@@ -176,8 +176,8 @@ impl XEarthLayerFS {
             // Create a unique inode from coordinates
             // Use a hash-like function to map coords to inode space
             let inode = TILE_FILE_INODE_BASE
-                + ((coords.row.unsigned_abs() as u64) * 1000000)
-                + ((coords.col.unsigned_abs() as u64) * 1000)
+                + ((coords.row as u64) * 1000000)
+                + ((coords.col as u64) * 1000)
                 + (coords.zoom as u64);
 
             // Store the mapping in the cache

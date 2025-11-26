@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn test_trait_object_generate() {
         let generator: Arc<dyn TileGenerator> = Arc::new(MockTileGenerator::new());
-        let request = TileRequest::new(37, -123, 16);
+        let request = TileRequest::new(100000, 125184, 18);
 
         let result = generator.generate(&request);
         assert!(result.is_ok());
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn test_trait_object_generate_failure() {
         let generator: Arc<dyn TileGenerator> = Arc::new(MockTileGenerator::with_failure());
-        let request = TileRequest::new(37, -123, 16);
+        let request = TileRequest::new(100000, 125184, 18);
 
         let result = generator.generate(&request);
         assert!(result.is_err());

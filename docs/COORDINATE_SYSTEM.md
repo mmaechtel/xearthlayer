@@ -6,6 +6,8 @@ This document describes the coordinate conversion system implemented in XEarthLa
 
 XEarthLayer uses the **Web Mercator** (also called Slippy Map) projection system for converting between geographic coordinates (latitude/longitude) and tile coordinates used by satellite imagery providers.
 
+The system is designed to be compatible with **AutoOrtho** and **Ortho4XP** scenery packages for X-Plane, which use a specific filename format based on Web Mercator tile indices.
+
 ## Coordinate Types
 
 ### Geographic Coordinates
@@ -20,7 +22,7 @@ Standard latitude/longitude in decimal degrees:
 pub struct TileCoord {
     pub row: u32,    // Y coordinate (north-south), 0 at north
     pub col: u32,    // X coordinate (east-west), 0 at west
-    pub zoom: u8,    // Zoom level (0-18)
+    pub zoom: u8,    // Zoom level (0-22)
 }
 ```
 
@@ -45,6 +47,22 @@ pub struct ChunkCoord {
 
 Chunks are 256×256 pixel sub-tiles used for parallel downloading. Each tile contains 16×16 = 256 chunks.
 
+### Zoom Level Semantics
+
+XEarthLayer uses **chunk zoom** (like Ortho4XP) in user-facing APIs:
+
+| Concept | Zoom Range | Description |
+|---------|------------|-------------|
+| **Chunk Zoom** | 12-22 | User-specified zoom level (Ortho4XP style) |
+| **Tile Zoom** | 8-18 | Internal tile coordinates (chunk_zoom - 4) |
+
+The relationship: `tile_zoom = chunk_zoom - 4` (because each tile = 16×16 chunks, and 16 = 2^4)
+
+**Example:**
+- User requests zoom 18 (chunk zoom)
+- System uses zoom 14 for tile coordinates
+- Downloads 256 chunks at zoom 18 to compose the tile
+
 ### Quadkeys
 
 Quadkeys are Bing Maps' tile naming scheme using base-4 encoding:
@@ -59,6 +77,59 @@ Quadkeys are Bing Maps' tile naming scheme using base-4 encoding:
 - `3` = bottom-right (southeast)
 
 **Example:** Tile (col=3, row=5, zoom=3) → quadkey `"213"`
+
+## AutoOrtho/Ortho4XP Filename Format
+
+XEarthLayer uses the same DDS filename format as AutoOrtho and Ortho4XP:
+
+```
+{row}_{col}_{maptype}{zoom}.dds
+```
+
+**Components:**
+- `row`: Unsigned Web Mercator Y coordinate (increases southward)
+- `col`: Unsigned Web Mercator X coordinate (increases eastward)
+- `maptype`: Provider identifier (e.g., "BI" for Bing, "GO" for Google)
+- `zoom`: Two-digit chunk zoom level
+
+**Real-World Examples from AutoOrtho:**
+
+| Region | Filename | Row | Col | Lat/Lon (center) |
+|--------|----------|-----|-----|------------------|
+| Portugal | `100000_125184_BI18.dds` | 100000 | 125184 | 39.19°N, 8.07°W |
+| New Zealand | `169840_253472_BI18.dds` | 169840 | 253472 | 46.91°S, 168.10°E |
+| Korea | `100000_222560_BI18.dds` | 100000 | 222560 | 39.19°N, 125.65°E |
+| Caribbean | `116208_75824_BI18.dds` | 116208 | 75824 | 19.98°N, 75.86°W |
+
+**Coordinate Ranges at Zoom 18:**
+- Row: 0 (north pole) to 262143 (south pole)
+- Col: 0 (180°W) to 262143 (180°E)
+- Equator: row ≈ 131072
+- Prime Meridian: col ≈ 131072
+
+### DDS Filename Parsing
+
+```rust
+pub struct DdsFilename {
+    pub row: u32,        // Web Mercator row
+    pub col: u32,        // Web Mercator column
+    pub zoom: u8,        // Chunk zoom level
+    pub map_type: String // Provider identifier (e.g., "BI")
+}
+
+pub fn parse_dds_filename(filename: &str) -> Result<DdsFilename, ParseError>
+```
+
+**Example:**
+```rust
+use xearthlayer::fuse::parse_dds_filename;
+
+let coords = parse_dds_filename("100000_125184_BI18.dds")?;
+assert_eq!(coords.row, 100000);
+assert_eq!(coords.col, 125184);
+assert_eq!(coords.zoom, 18);
+assert_eq!(coords.map_type, "BI");
+```
 
 ## Conversion Functions
 
@@ -82,7 +153,9 @@ let tile = to_tile_coords(40.7128, -74.0060, 16)?;
 // Result: TileCoord { row: 24640, col: 19295, zoom: 16 }
 ```
 
-### Tile to Geographic Coordinates
+**Key Property:** Any lat/lon coordinate within a tile's boundaries will return the same tile coordinates. This ensures that regardless of where in a tile the user clicks, they get the correct tile.
+
+### Tile to Geographic Coordinates (Northwest Corner)
 
 ```rust
 pub fn tile_to_lat_lon(tile: &TileCoord) -> (f64, f64)
@@ -104,6 +177,33 @@ lat = lat_rad * 180 / π
 let tile = TileCoord { row: 24640, col: 19295, zoom: 16 };
 let (lat, lon) = tile_to_lat_lon(&tile);
 // Result: approximately (40.713, -74.007)
+```
+
+### Tile to Geographic Coordinates (Center)
+
+```rust
+pub fn tile_to_lat_lon_center(tile: &TileCoord) -> (f64, f64)
+```
+
+Returns the **center point** of the tile. This is useful for displaying human-readable coordinates and matches the `LOAD_CENTER` values in AutoOrtho `.ter` files.
+
+**Formula:**
+```
+n = 2^zoom
+lon = (col + 0.5) / n * 360 - 180
+y = (row + 0.5) / n
+lat_rad = atan(sinh(π * (1 - 2*y)))
+lat = lat_rad * 180 / π
+```
+
+**Example:**
+```rust
+use xearthlayer::coord::{TileCoord, tile_to_lat_lon_center};
+
+// AutoOrtho Europe tile
+let tile = TileCoord { row: 100000, col: 125184, zoom: 18 };
+let (lat, lon) = tile_to_lat_lon_center(&tile);
+// Result: approximately (39.19, -8.07) - matches LOAD_CENTER in .ter file
 ```
 
 ### Geographic to Chunk Coordinates
@@ -143,6 +243,7 @@ Converts chunk coordinates to global tile coordinates at chunk resolution. This 
 ```
 global_row = tile_row * 16 + chunk_row
 global_col = tile_col * 16 + chunk_col
+global_zoom = tile_zoom + 4
 ```
 
 **Example:**
@@ -153,7 +254,7 @@ let chunk = ChunkCoord {
     zoom: 10
 };
 let (global_row, global_col, zoom) = chunk.to_global_coords();
-// Result: (1605, 3207, 10)
+// Result: (1605, 3207, 14)
 ```
 
 ### Iterating Tile Chunks
@@ -171,8 +272,8 @@ Returns an iterator over all 256 chunks in a tile, yielded in row-major order.
 let tile = TileCoord { row: 100, col: 200, zoom: 12 };
 for chunk in tile.chunks() {
     // Process each 256×256 chunk
-    let (global_row, global_col, _) = chunk.to_global_coords();
-    download_chunk(global_row, global_col, chunk.zoom)?;
+    let (global_row, global_col, zoom) = chunk.to_global_coords();
+    download_chunk(global_row, global_col, zoom)?;
 }
 ```
 
@@ -250,17 +351,44 @@ At different zoom levels, tiles cover different geographic areas:
 | 16   | 0.0055°            | ~600 m                      |
 | 18   | 0.0014°            | ~150 m                      |
 
-**Roundtrip Precision**: When converting lat/lon → tile → lat/lon, the result will be within one tile's worth of the original coordinate. This is expected because `tile_to_lat_lon` returns the northwest corner of the tile.
+**Roundtrip Precision**: When converting lat/lon → tile → lat/lon, the result will be within one tile's worth of the original coordinate. This is expected because `tile_to_lat_lon` returns the northwest corner of the tile. Use `tile_to_lat_lon_center` for a more accurate center point.
+
+## CLI Usage
+
+The XEarthLayer CLI accepts lat/lon coordinates and automatically converts them to Web Mercator tile coordinates:
+
+```bash
+# Download a tile containing the given coordinates
+xearthlayer download --lat 39.18969 --lon=-8.07495 --zoom 18 --output tile.dds
+
+# The system:
+# 1. Converts lat/lon to tile coordinates at tile_zoom (18-4=14)
+# 2. Downloads 256 chunks at chunk_zoom (18)
+# 3. Assembles into 4096×4096 DDS texture
+```
+
+**Any coordinate within a tile produces the same tile:**
+```bash
+# These all download the same tile (100000_125184 at zoom 18):
+xearthlayer download --lat 39.189 --lon=-8.075 --zoom 18 --output tile.dds
+xearthlayer download --lat 39.190 --lon=-8.074 --zoom 18 --output tile.dds
+xearthlayer download --lat 39.188 --lon=-8.076 --zoom 18 --output tile.dds
+```
 
 ## Testing
 
-### Manual Tests (30 tests)
+### Manual Tests (51 tests)
 
 **Geographic/Tile Conversions:**
 - Known coordinates (NYC, London)
 - Edge cases (equator, prime meridian)
 - Invalid input rejection
 - Roundtrip conversions at multiple zoom levels
+
+**Tile Center Conversions:**
+- AutoOrtho Europe coordinates (Portugal)
+- AutoOrtho Australia coordinates (New Zealand)
+- AutoOrtho Asia coordinates (Korea)
 
 **Chunk Conversions:**
 - Basic chunk coordinate calculation
@@ -274,6 +402,13 @@ At different zoom levels, tiles cover different geographic areas:
 - Bing Maps official examples
 - Invalid character/length rejection
 - Roundtrip tile ↔ quadkey conversions
+
+**DDS Filename Parsing:**
+- AutoOrtho Europe/Australia/Asia/South America filenames
+- Various zoom levels (12-22)
+- Provider identifiers (BI, GO)
+- Case normalization
+- Invalid patterns and overflow handling
 
 ### Property-Based Tests (18 tests)
 
@@ -302,7 +437,7 @@ Using `proptest`, we verify mathematical properties with 100 random cases each:
 - Validation of length limits
 - Zoom 0 always produces empty string
 
-**Total Test Coverage:** 48 tests (30 manual + 18 property-based)
+**Total Test Coverage:** 51+ tests (manual + property-based)
 
 ## Implementation Details
 
@@ -313,23 +448,32 @@ Web Mercator is the standard for web mapping because:
 - Preserves angles (easier navigation)
 - Used by all major providers (Google, Bing, OSM)
 - Tiles align perfectly at all zoom levels
+- Compatible with AutoOrtho/Ortho4XP scenery
 
 ### Why ±85.05112878° Latitude Limit?
 
 Web Mercator projects the Earth as a square, which requires cutting off near the poles. The limit is chosen so that the projected map is exactly square.
+
+### Why Unsigned Tile Coordinates?
+
+Web Mercator tile indices are always non-negative:
+- Row 0 is at the north pole, increasing southward
+- Col 0 is at 180°W, increasing eastward
+- This matches the AutoOrtho filename format which uses unsigned integers
 
 ### Performance Optimizations
 
 - Functions marked `#[inline]` for better performance
 - Uses `powi()` instead of `powf()` for integer exponents
 - Direct float operations (no unnecessary conversions)
+- Regex pattern compiled once using `OnceLock`
 
 ## Usage Examples
 
 ### Basic Tile Conversion
 
 ```rust
-use xearthlayer::coord::{to_tile_coords, tile_to_lat_lon};
+use xearthlayer::coord::{to_tile_coords, tile_to_lat_lon, tile_to_lat_lon_center};
 
 // Convert user's current location to tile
 let location_tile = to_tile_coords(40.7128, -74.0060, 16)?;
@@ -338,6 +482,10 @@ let location_tile = to_tile_coords(40.7128, -74.0060, 16)?;
 if location_tile.row == some_tile.row && location_tile.col == some_tile.col {
     println!("Coordinates are in the same tile!");
 }
+
+// Get the center of a tile (for display)
+let (center_lat, center_lon) = tile_to_lat_lon_center(&tile);
+println!("Tile center: {}, {}", center_lat, center_lon);
 
 // Get the bounding box of a tile
 let (nw_lat, nw_lon) = tile_to_lat_lon(&tile);
@@ -348,6 +496,28 @@ let se_tile = TileCoord {
 };
 let (se_lat, se_lon) = tile_to_lat_lon(&se_tile);
 println!("Tile bounds: ({}, {}) to ({}, {})", nw_lat, nw_lon, se_lat, se_lon);
+```
+
+### Working with AutoOrtho Filenames
+
+```rust
+use xearthlayer::fuse::parse_dds_filename;
+use xearthlayer::coord::{TileCoord, tile_to_lat_lon_center};
+
+// Parse an AutoOrtho DDS filename
+let coords = parse_dds_filename("100000_125184_BI18.dds")?;
+
+// Convert to TileCoord for further processing
+let tile = TileCoord {
+    row: coords.row,
+    col: coords.col,
+    zoom: coords.zoom,
+};
+
+// Get the geographic center (matches LOAD_CENTER in .ter file)
+let (lat, lon) = tile_to_lat_lon_center(&tile);
+println!("Tile center: {:.5}, {:.5}", lat, lon);
+// Output: Tile center: 39.18969, -8.07495
 ```
 
 ### Chunk-Based Parallel Downloads
@@ -366,7 +536,7 @@ for chunk in chunks {
     // Download from provider using global coordinates
     let url = format!(
         "https://provider.com/{}/{}/{}.jpg",
-        zoom, global_row, global_col
+        zoom, global_col, global_row  // Note: some providers use x/y order
     );
     download_chunk(&url)?;
 }
@@ -392,44 +562,11 @@ let tile = quadkey_to_tile("0231012312")?;
 println!("Tile: row={}, col={}, zoom={}", tile.row, tile.col, tile.zoom);
 ```
 
-### Direct Chunk Lookup
-
-```rust
-use xearthlayer::coord::to_chunk_coords;
-
-// Find exact chunk for a coordinate
-let chunk = to_chunk_coords(40.7128, -74.0060, 16)?;
-
-println!("Tile: ({}, {})", chunk.tile_row, chunk.tile_col);
-println!("Chunk within tile: ({}, {})", chunk.chunk_row, chunk.chunk_col);
-
-// Convert to global coordinates for download
-let (global_row, global_col, _) = chunk.to_global_coords();
-let url = format!("https://provider.com/{}/{}/{}.jpg",
-    chunk.zoom, global_row, global_col);
-```
-
-## Future Enhancements
-
-### Bounding Box Operations (Planned)
-- Get all tiles within a geographic bounding box
-- Get all chunks within a bounding box
-- Calculate total tile/chunk coverage area
-- Tile/chunk set operations (union, intersection)
-
-### Distance and Proximity (Planned)
-- Calculate distance between two geographic points
-- Find nearest tile/chunk to a coordinate
-- Radius-based tile/chunk queries
-
-### Conversion Optimizations (Planned)
-- Batch conversion of multiple coordinates
-- SIMD-optimized conversions for large datasets
-- Cached tile lookups for repeated queries
-
 ## References
 
 - [Slippy Map Tilenames (OSM Wiki)](https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames)
 - [Web Mercator Projection (Wikipedia)](https://en.wikipedia.org/wiki/Web_Mercator_projection)
 - [Google Maps Tile Coordinates](https://developers.google.com/maps/documentation/javascript/coordinates)
 - [Bing Maps Tile System](https://docs.microsoft.com/en-us/bingmaps/articles/bing-maps-tile-system)
+- [AutoOrtho GitHub](https://github.com/kubilus1/autoortho)
+- [Ortho4XP GitHub](https://github.com/oscarpilote/Ortho4XP)

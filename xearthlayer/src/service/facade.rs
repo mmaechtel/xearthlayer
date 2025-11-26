@@ -186,7 +186,7 @@ impl XEarthLayerService {
 
         // Create tile request with tile row/col coordinates and tile zoom
         // (TileGenerator will add 4 to get chunk zoom for downloads)
-        let request = TileRequest::new(tile.row as i32, tile.col as i32, tile_zoom);
+        let request = TileRequest::new(tile.row, tile.col, tile_zoom);
 
         // Generate tile
         self.generator

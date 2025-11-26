@@ -81,25 +81,12 @@ impl TileGenerator for DefaultTileGenerator {
             request.zoom()
         );
 
-        // Validate coordinates are non-negative (tile indices must be positive)
-        if request.row() < 0 || request.col() < 0 {
-            error!(
-                "Invalid tile coordinates: row={}, col={} (must be non-negative)",
-                request.row(),
-                request.col()
-            );
-            warn!("Returning magenta placeholder for invalid coordinates");
-            return generate_default_placeholder().map_err(|e| {
-                TileGeneratorError::Internal(format!("Failed to generate placeholder: {}", e))
-            });
-        }
-
-        // TileRequest already contains tile coordinates (row/col), not lat/lon
-        // These come from FUSE filenames like "+37+123_BI16.dds" where
-        // 37 is the tile row and 123 is the tile column
+        // TileRequest contains Web Mercator tile coordinates (row/col)
+        // These come from FUSE filenames like "100000_125184_BI18.dds"
+        // where row=100000 and col=125184 are unsigned tile indices
         let tile = TileCoord {
-            row: request.row() as u32,
-            col: request.col() as u32,
+            row: request.row(),
+            col: request.col(),
             zoom: request.zoom(),
         };
 
