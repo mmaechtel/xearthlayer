@@ -74,21 +74,30 @@ impl DefaultTileGenerator {
 
 impl TileGenerator for DefaultTileGenerator {
     fn generate(&self, request: &TileRequest) -> Result<Vec<u8>, TileGeneratorError> {
+        // TileRequest contains chunk-level coordinates from FUSE filenames
+        // e.g., "100000_125184_BI18.dds" -> row=100000, col=125184, zoom=18
+        // These are at chunk resolution (256x256 pixels each)
+        //
+        // We need to convert to tile coordinates for the orchestrator:
+        // - Tile row = chunk row / 16 (each tile = 16x16 chunks)
+        // - Tile col = chunk col / 16
+        // - Tile zoom = chunk zoom - 4 (16 = 2^4)
+        let tile_zoom = request.zoom().saturating_sub(4);
+        let tile = TileCoord {
+            row: request.row() / 16,
+            col: request.col() / 16,
+            zoom: tile_zoom,
+        };
+
         info!(
-            "Generating tile: row={}, col={}, zoom={}",
+            "Generating tile: chunk coords ({}, {}, zoom {}) -> tile coords ({}, {}, zoom {})",
             request.row(),
             request.col(),
-            request.zoom()
+            request.zoom(),
+            tile.row,
+            tile.col,
+            tile_zoom
         );
-
-        // TileRequest contains Web Mercator tile coordinates (row/col)
-        // These come from FUSE filenames like "100000_125184_BI18.dds"
-        // where row=100000 and col=125184 are unsigned tile indices
-        let tile = TileCoord {
-            row: request.row(),
-            col: request.col(),
-            zoom: request.zoom(),
-        };
 
         // Download tile imagery
         let image = match self.orchestrator.download_tile(&tile) {
@@ -203,8 +212,9 @@ mod tests {
             Arc::new(DdsTextureEncoder::new(DdsFormat::BC1).with_mipmap_count(1));
 
         let generator = DefaultTileGenerator::new(orchestrator, encoder);
-        // Use valid tile coordinates at zoom 10: row and col in range 0-1023
-        let request = TileRequest::new(300, 500, 10);
+        // Use chunk-aligned coordinates (divisible by 16) at zoom 14
+        // This will be converted to tile coords: row=18, col=31, zoom=10
+        let request = TileRequest::new(288, 496, 14);
 
         let result = generator.generate(&request);
         assert!(result.is_ok());
@@ -226,8 +236,8 @@ mod tests {
             Arc::new(DdsTextureEncoder::new(DdsFormat::BC1).with_mipmap_count(1));
 
         let generator = DefaultTileGenerator::new(orchestrator, encoder);
-        // Use valid tile coordinates at zoom 10: row and col in range 0-1023
-        let request = TileRequest::new(300, 500, 10);
+        // Use chunk-aligned coordinates at zoom 14
+        let request = TileRequest::new(288, 496, 14);
 
         // Should return placeholder instead of error
         let result = generator.generate(&request);
