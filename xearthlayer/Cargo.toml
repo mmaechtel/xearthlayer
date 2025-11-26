@@ -14,7 +14,8 @@ path = "src/lib.rs"
 reqwest = { version = "0.12", features = ["blocking"] }
 image = "0.25"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "local-time"] }
+time = { version = "0.3", features = ["formatting", "local-offset"] }
 tracing-appender = "0.2"
 fuser = "0.14"
 libc = "0.2"

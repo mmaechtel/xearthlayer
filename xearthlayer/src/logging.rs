@@ -3,17 +3,23 @@
 //! Provides structured logging with file output and console output:
 //! - Writes to `logs/xearthlayer.log` (cleared on session start)
 //! - Also prints to stdout for CLI tailing
-//! - Multi-line pretty format for readability
+//! - Compact single-line format for release builds
+//! - Verbose multi-line format for debug builds
 //! - Configurable via RUST_LOG environment variable
 
 use std::fs;
 use std::io;
 use std::path::Path;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+#[cfg(debug_assertions)]
+use tracing_subscriber::fmt::format::FmtSpan;
+
+#[cfg(not(debug_assertions))]
+use tracing_subscriber::fmt::time::LocalTime;
 
 /// Guard that must be kept alive for the duration of logging.
 ///
@@ -52,29 +58,62 @@ pub fn init_logging(log_dir: &str, log_file: &str) -> Result<LoggingGuard, io::E
     let file_appender = tracing_appender::rolling::never(log_dir, log_file);
     let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
 
-    // Create file layer with pretty multi-line format
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking_file)
-        .with_ansi(false) // No ANSI colors in file
-        .with_span_events(FmtSpan::CLOSE)
-        .pretty();
-
-    // Create stdout layer with pretty multi-line format
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(io::stdout)
-        .with_ansi(true) // ANSI colors for terminal
-        .with_span_events(FmtSpan::CLOSE)
-        .pretty();
-
     // Create env filter (defaults to INFO if RUST_LOG not set)
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // Initialize global subscriber with both layers
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(file_layer)
-        .with(stdout_layer)
-        .init();
+    // Use different formats for debug vs release builds
+    #[cfg(debug_assertions)]
+    {
+        // Debug: verbose multi-line format with file locations
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking_file)
+            .with_ansi(false)
+            .with_span_events(FmtSpan::CLOSE)
+            .pretty();
+
+        let stdout_layer = tracing_subscriber::fmt::layer()
+            .with_writer(io::stdout)
+            .with_ansi(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .pretty();
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stdout_layer)
+            .init();
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        // Release: compact single-line format without file locations
+        // Format: "10:30:45 INFO message"
+        let time_format =
+            time::format_description::parse("[hour]:[minute]:[second]").expect("valid format");
+        let timer = LocalTime::new(time_format);
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking_file)
+            .with_ansi(false)
+            .with_target(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_timer(timer.clone());
+
+        let stdout_layer = tracing_subscriber::fmt::layer()
+            .with_writer(io::stdout)
+            .with_ansi(true)
+            .with_target(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_timer(timer);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stdout_layer)
+            .init();
+    }
 
     Ok(LoggingGuard {
         _file_guard: file_guard,
