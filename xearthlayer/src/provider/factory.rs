@@ -4,6 +4,7 @@
 //! eliminating duplication in CLI code and centralizing provider configuration.
 
 use super::bing::BingMapsProvider;
+use super::go2::Go2Provider;
 use super::google::GoogleMapsProvider;
 use super::http::ReqwestClient;
 use super::types::{Provider, ProviderError};
@@ -35,9 +36,16 @@ pub enum ProviderConfig {
     /// No API key required - uses public Bing Maps tile servers.
     Bing,
 
-    /// Google Maps satellite imagery provider.
+    /// Google Maps GO2 satellite imagery provider.
+    ///
+    /// No API key required - uses Google's public tile servers.
+    /// This is the same endpoint used by Ortho4XP's GO2 provider.
+    Go2,
+
+    /// Google Maps satellite imagery provider (official API).
     ///
     /// Requires a valid Google Maps Platform API key with Map Tiles API enabled.
+    /// Has usage limits and billing requirements.
     Google {
         /// Google Maps Platform API key
         api_key: String,
@@ -48,6 +56,11 @@ impl ProviderConfig {
     /// Create a Bing Maps provider configuration.
     pub fn bing() -> Self {
         Self::Bing
+    }
+
+    /// Create a Google GO2 provider configuration (no API key required).
+    pub fn go2() -> Self {
+        Self::Go2
     }
 
     /// Create a Google Maps provider configuration with the given API key.
@@ -61,6 +74,7 @@ impl ProviderConfig {
     pub fn name(&self) -> &str {
         match self {
             Self::Bing => "Bing Maps",
+            Self::Go2 => "Google GO2",
             Self::Google { .. } => "Google Maps",
         }
     }
@@ -123,6 +137,12 @@ impl ProviderFactory {
                 let max_zoom = provider.max_zoom();
                 Ok((Arc::new(provider), name, max_zoom))
             }
+            ProviderConfig::Go2 => {
+                let provider = Go2Provider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
             ProviderConfig::Google { api_key } => {
                 let provider = GoogleMapsProvider::new(self.http_client, api_key.clone())?;
                 let name = provider.name().to_string();
@@ -141,6 +161,13 @@ mod tests {
     fn test_provider_config_bing() {
         let config = ProviderConfig::bing();
         assert_eq!(config.name(), "Bing Maps");
+        assert!(!config.requires_api_key());
+    }
+
+    #[test]
+    fn test_provider_config_go2() {
+        let config = ProviderConfig::go2();
+        assert_eq!(config.name(), "Google GO2");
         assert!(!config.requires_api_key());
     }
 
@@ -169,6 +196,13 @@ mod tests {
         let config = ProviderConfig::Bing;
         let debug_str = format!("{:?}", config);
         assert!(debug_str.contains("Bing"));
+    }
+
+    #[test]
+    fn test_provider_config_go2_debug() {
+        let config = ProviderConfig::Go2;
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("Go2"));
     }
 
     // Note: Factory tests that create real HTTP clients are integration tests

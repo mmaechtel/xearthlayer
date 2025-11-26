@@ -17,12 +17,14 @@
 
 mod bing;
 mod factory;
+mod go2;
 mod google;
 mod http;
 mod types;
 
 pub use bing::BingMapsProvider;
 pub use factory::{ProviderConfig, ProviderFactory};
+pub use go2::Go2Provider;
 pub use google::GoogleMapsProvider;
 pub use http::{HttpClient, ReqwestClient};
 pub use types::{Provider, ProviderError};

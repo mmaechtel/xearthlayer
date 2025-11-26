@@ -16,23 +16,42 @@ Controls which satellite imagery provider to use.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `type` | string | `bing` | Imagery provider: `bing` (free) or `google` (paid, requires API key) |
-| `google_api_key` | string | (empty) | Google Maps API key. Required when `type = google`. Get one at [Google Cloud Console](https://console.cloud.google.com) (enable Map Tiles API) |
+| `type` | string | `bing` | Imagery provider: `bing`, `go2`, or `google` (see below) |
+| `google_api_key` | string | (empty) | Google Maps API key. Required only when `type = google`. |
 
-**Example:**
+**Available Providers:**
+
+| Provider | API Key | Cost | Notes |
+|----------|---------|------|-------|
+| `bing` | Not required | Free | Bing Maps aerial imagery. Recommended for most users. |
+| `go2` | Not required | Free | Google Maps via public tile servers. Same endpoint as Ortho4XP's GO2 provider. |
+| `google` | Required | Paid | Google Maps official API. Has usage limits (15,000 requests/day). |
+
+**Examples:**
+
+Bing Maps (recommended):
 ```ini
 [provider]
 type = bing
 ```
 
-For Google Maps:
+Google GO2 (free, no API key):
+```ini
+[provider]
+type = go2
+```
+
+Google Maps official API (paid):
 ```ini
 [provider]
 type = google
 google_api_key = AIzaSy...your-key-here
 ```
 
-**Note:** Google Maps has strict rate limits (15,000 requests/day for 2D tiles). With 256 chunks per tile, this allows approximately 58 tiles per day. Bing Maps is recommended for most users.
+**Notes:**
+- **GO2** uses the same Google tile servers as Ortho4XP, making it ideal for use with Ortho4XP-generated scenery packs.
+- **Google official API** has strict rate limits (15,000 requests/day). With 256 chunks per tile, this allows approximately 58 tiles per day.
+- **Bing Maps** is recommended for general use due to its reliability and no rate limits.
 
 ### [cache]
 

@@ -36,11 +36,17 @@ pub struct ReqwestClient {
     client: reqwest::blocking::Client,
 }
 
+/// Default User-Agent string for HTTP requests.
+/// Required by some tile servers (e.g., Google) that reject requests without a User-Agent.
+const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+
 impl ReqwestClient {
     /// Creates a new ReqwestClient with default configuration.
     pub fn new() -> Result<Self, ProviderError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .user_agent(DEFAULT_USER_AGENT)
             .build()
             .map_err(|e| {
                 ProviderError::HttpError(format!("Failed to create HTTP client: {}", e))
@@ -53,6 +59,7 @@ impl ReqwestClient {
     pub fn with_timeout(timeout_secs: u64) -> Result<Self, ProviderError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
+            .user_agent(DEFAULT_USER_AGENT)
             .build()
             .map_err(|e| {
                 ProviderError::HttpError(format!("Failed to create HTTP client: {}", e))

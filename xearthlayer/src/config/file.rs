@@ -55,9 +55,9 @@ pub struct ConfigFile {
 /// Provider configuration.
 #[derive(Debug, Clone)]
 pub struct ProviderSettings {
-    /// Provider type: "bing" or "google"
+    /// Provider type: "bing", "go2", or "google"
     pub provider_type: String,
-    /// Google Maps API key (if using google provider)
+    /// Google Maps API key (only required for "google" provider)
     pub google_api_key: Option<String>,
 }
 
@@ -203,12 +203,12 @@ impl ConfigFile {
         if let Some(section) = ini.section(Some("provider")) {
             if let Some(v) = section.get("type") {
                 let v = v.to_lowercase();
-                if v != "bing" && v != "google" {
+                if v != "bing" && v != "go2" && v != "google" {
                     return Err(ConfigFileError::InvalidValue {
                         section: "provider".to_string(),
                         key: "type".to_string(),
                         value: v,
-                        reason: "must be 'bing' or 'google'".to_string(),
+                        reason: "must be 'bing', 'go2', or 'google'".to_string(),
                     });
                 }
                 config.provider.provider_type = v;
@@ -346,7 +346,10 @@ impl ConfigFile {
 
         format!(
             r#"[provider]
-; Imagery provider: bing (free, no key required) or google (paid, requires API key)
+; Imagery provider:
+;   bing  - Bing Maps (free, no key required)
+;   go2   - Google Maps via public tile servers (free, no key required, same as Ortho4XP)
+;   google - Google Maps official API (paid, requires API key)
 type = {}
 ; Google Maps API key (only required when type = google)
 ; Get one at: https://console.cloud.google.com (enable Map Tiles API)
@@ -526,7 +529,9 @@ type = invalid
         let result = ConfigFile::load_from(&config_path);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("must be 'bing' or 'google'"));
+        assert!(err
+            .to_string()
+            .contains("must be 'bing', 'go2', or 'google'"));
     }
 
     #[test]

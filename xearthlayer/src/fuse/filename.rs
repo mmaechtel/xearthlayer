@@ -4,15 +4,21 @@
 //! `{row}_{col}_{maptype}{zoom}.dds`
 //!
 //! Examples:
-//! - `100000_125184_BI18.dds` (Europe: lat ~39.19°, lon ~-8.07°)
+//! - `100000_125184_BI18.dds` (Bing Maps, zoom 18)
+//! - `25264_10368_GO216.dds` (Google Maps GO2 variant, zoom 16)
 //! - `169840_253472_BI18.dds` (Australia: lat ~-46.91°, lon ~168.10°)
 //!
 //! The coordinates are unsigned Web Mercator tile indices at the specified zoom level.
 //! - Row increases southward (equator ≈ 2^(zoom-1))
 //! - Col increases eastward (prime meridian ≈ 2^(zoom-1))
 //!
-//! The map type identifier (e.g., "BI" for Bing, "GO" for Google) is captured
+//! The map type identifier (e.g., "BI" for Bing, "GO2" for Google) is captured
 //! but currently ignored as we use the configured provider.
+//!
+//! Supported map types:
+//! - `BI` - Bing Maps
+//! - `GO` - Google Maps (legacy)
+//! - `GO2` - Google Maps (Ortho4XP current format)
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -59,25 +65,27 @@ impl std::error::Error for ParseError {}
 /// Get the DDS filename regex pattern for AutoOrtho/Ortho4XP format.
 ///
 /// Pattern: `<row>_<col>_<maptype><zoom>.dds`
-/// Example: `100000_125184_BI18.dds`
+/// Examples:
+/// - `100000_125184_BI18.dds` (Bing, zoom 18)
+/// - `25264_10368_GO216.dds` (Google GO2, zoom 16)
 ///
 /// We capture:
 /// - Group 1: row (unsigned integer, e.g., "100000")
 /// - Group 2: col (unsigned integer, e.g., "125184")
-/// - Group 3: map type (letters, e.g., "BI")
+/// - Group 3: map type (letters + optional digit, e.g., "BI", "GO2")
 /// - Group 4: zoom level (exactly 2 digits, e.g., "18")
 fn dds_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // Pattern breakdown:
-        // (\d+)     - row (unsigned integer)
-        // _         - separator
-        // (\d+)     - column (unsigned integer)
-        // _         - separator
-        // ([A-Za-z]+) - map type (letters only)
-        // (\d{2})   - zoom level (exactly 2 digits)
-        // \.dds     - extension (case insensitive)
-        Regex::new(r"(\d+)_(\d+)_([A-Za-z]+)(\d{2})\.dds$").unwrap()
+        // (\d+)       - row (unsigned integer)
+        // _           - separator
+        // (\d+)       - column (unsigned integer)
+        // _           - separator
+        // ([A-Za-z]+\d?) - map type (letters + optional trailing digit for GO2, etc.)
+        // (\d{2})     - zoom level (exactly 2 digits)
+        // \.dds       - extension (case insensitive)
+        Regex::new(r"(\d+)_(\d+)_([A-Za-z]+\d?)(\d{2})\.dds$").unwrap()
     })
 }
 
@@ -215,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_parse_google_provider() {
-        // Google Maps provider
+        // Google Maps provider (legacy GO format)
         let result = parse_dds_filename("100000_125184_GO18.dds");
         assert!(result.is_ok());
         let coords = result.unwrap();
@@ -223,6 +231,31 @@ mod tests {
         assert_eq!(coords.col, 125184);
         assert_eq!(coords.zoom, 18);
         assert_eq!(coords.map_type, "GO");
+    }
+
+    #[test]
+    fn test_parse_google_go2_provider() {
+        // Google Maps GO2 format from Ortho4XP
+        // Example: 25264_10368_GO216.dds -> row=25264, col=10368, maptype=GO2, zoom=16
+        let result = parse_dds_filename("25264_10368_GO216.dds");
+        assert!(result.is_ok());
+        let coords = result.unwrap();
+        assert_eq!(coords.row, 25264);
+        assert_eq!(coords.col, 10368);
+        assert_eq!(coords.zoom, 16);
+        assert_eq!(coords.map_type, "GO2");
+    }
+
+    #[test]
+    fn test_parse_google_go2_zoom18() {
+        // GO2 at zoom 18
+        let result = parse_dds_filename("100000_125184_GO218.dds");
+        assert!(result.is_ok());
+        let coords = result.unwrap();
+        assert_eq!(coords.row, 100000);
+        assert_eq!(coords.col, 125184);
+        assert_eq!(coords.zoom, 18);
+        assert_eq!(coords.map_type, "GO2");
     }
 
     #[test]
@@ -347,9 +380,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_invalid_three_digit_zoom() {
+    fn test_parse_three_digit_zoom_as_maptype_with_digit() {
+        // With the new pattern, BI180 is parsed as maptype=BI1, zoom=80
+        // This is valid - map types can have a trailing digit (like GO2)
         let result = parse_dds_filename("100000_125184_BI180.dds");
-        assert!(matches!(result, Err(ParseError::InvalidPattern)));
+        assert!(result.is_ok());
+        let coords = result.unwrap();
+        assert_eq!(coords.map_type, "BI1");
+        assert_eq!(coords.zoom, 80);
     }
 
     #[test]

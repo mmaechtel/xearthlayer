@@ -36,7 +36,9 @@ use xearthlayer::service::ServiceConfig;
 enum ProviderType {
     /// Bing Maps aerial imagery (no API key required)
     Bing,
-    /// Google Maps satellite imagery (requires API key)
+    /// Google Maps via public tile servers (no API key required, same as Ortho4XP GO2)
+    Go2,
+    /// Google Maps official API (requires API key, has usage limits)
     Google,
 }
 
@@ -44,6 +46,7 @@ impl ProviderType {
     fn to_config(&self, api_key: Option<String>) -> Result<ProviderConfig, CliError> {
         match self {
             ProviderType::Bing => Ok(ProviderConfig::bing()),
+            ProviderType::Go2 => Ok(ProviderConfig::go2()),
             ProviderType::Google => {
                 let key = api_key.ok_or_else(|| {
                     CliError::Config(
@@ -61,6 +64,7 @@ impl ProviderType {
     fn from_config_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "bing" => Some(ProviderType::Bing),
+            "go2" => Some(ProviderType::Go2),
             "google" => Some(ProviderType::Google),
             _ => None,
         }

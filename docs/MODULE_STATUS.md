@@ -39,7 +39,8 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 **Implemented Providers**:
 - **BingMapsProvider** - Free, no API key required, zoom 1-19
-- **GoogleMapsProvider** - Paid, requires API key, zoom 1-22 (with session-based API)
+- **Go2Provider** - Free, no API key required, zoom 0-22 (same endpoint as Ortho4XP GO2)
+- **GoogleMapsProvider** - Paid, requires API key, zoom 0-22 (official API with session tokens)
 
 **Key Functionality**:
 - `Provider` trait - Common interface for all imagery providers

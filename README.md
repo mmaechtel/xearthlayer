@@ -7,7 +7,7 @@ A high-performance Rust implementation for streaming satellite imagery to X-Plan
 XEarthLayer mounts a virtual filesystem that intercepts X-Plane's texture file requests and generates satellite imagery on-demand. Instead of downloading massive scenery packages (100+ GB), it dynamically fetches only the imagery you need as you fly.
 
 **Key Features:**
-- On-demand satellite imagery from Bing Maps (free) or Google Maps (paid)
+- On-demand satellite imagery from Bing Maps or Google Maps (GO2 - same as Ortho4XP)
 - FUSE passthrough filesystem - real scenery files pass through, DDS textures generated on-demand
 - Parallel tile generation with request coalescing for fast scene loading
 - Two-tier caching (configurable memory + disk, default 2GB + 20GB)
