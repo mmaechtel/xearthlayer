@@ -4,20 +4,7 @@ Tracking issues discovered during development and testing.
 
 ## Performance Issues
 
-### P1: Slow Initial Load (4-5 minutes to load KOAK)
-- **Status**: Open
-- **Severity**: High
-- **Description**: Initial scene load takes 4-5 minutes at Oakland International Airport (KOAK)
-- **Observed**: 2025-11-25, first X-Plane integration test
-- **Likely Causes**:
-  - Sequential tile generation (one at a time)
-  - No pre-fetching of nearby tiles
-  - Each tile requires ~2 seconds (download + encode)
-- **Potential Fixes**:
-  - Parallel tile generation for multiple requests
-  - Background pre-fetching based on camera position
-  - Progressive loading (low-res first, upgrade later)
-  - Persistent disk cache to avoid regeneration on restart
+(None currently open)
 
 ## Visual Glitches
 
@@ -73,6 +60,12 @@ Tracking issues discovered during development and testing.
 
 ## Completed
 
+### P1: Slow Initial Load ✓
+- **Completed**: 2025-11-25
+- **Original Issue**: Initial scene load took 4-5 minutes at KOAK
+- **Resolution**: Implemented parallel tile generation with request coalescing
+- **Result**: Load time reduced to ~30 seconds (with cache hits)
+
 ### E1: Parallel Tile Generation ✓
 - **Completed**: 2025-11-25
 - **Implementation**: `ParallelTileGenerator` in `xearthlayer/src/tile/parallel.rs`
@@ -81,6 +74,14 @@ Tracking issues discovered during development and testing.
   - Request coalescing for duplicate tile requests
   - Timeout handling with magenta placeholder fallback
   - Configuration via `[generation]` section in config.ini
+
+### Graceful Shutdown ✓
+- **Completed**: 2025-11-25
+- **Implementation**: Signal handling with automatic FUSE unmount
+- **Features**:
+  - Ctrl+C and SIGTERM trigger clean shutdown
+  - BackgroundSession auto-unmounts on drop
+  - No stale mounts left behind
 
 ---
 

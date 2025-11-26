@@ -13,12 +13,14 @@ The following features are **implemented and working**:
 | On-demand DDS Generation | ✅ Complete | Downloads Bing imagery and encodes to BC1/BC3 DDS |
 | CLI `mount` Command | ✅ Complete | Mount scenery packs with optional auto-detection |
 | Two-tier Caching | ✅ Complete | Memory + disk cache for generated textures |
+| Parallel Tile Generation | ✅ Complete | Thread pool with request coalescing |
+| Graceful Shutdown | ✅ Complete | Auto-unmount on SIGTERM/SIGINT |
+| INI Configuration | ✅ Complete | `~/.xearthlayer/config.ini` |
 
 **Not yet implemented** (planned for future releases):
 - Pack management CLI (`pack install`, `pack update`)
 - Overlay pack support (`y_xel_*` packs)
 - Multi-region simultaneous mounting
-- Configuration file (`config.toml`)
 
 ## Overview
 
@@ -299,22 +301,17 @@ FileAttr {
 
 ### User Configuration
 
-Users select which regional packs to download and enable:
+XEarthLayer uses INI configuration at `~/.xearthlayer/config.ini`. See [CONFIGURATION.md](./CONFIGURATION.md) for full reference.
 
-```toml
-# ~/.xearthlayer/config.toml
+Example configuration excerpt:
+```ini
+[xplane]
+; Auto-detected from ~/.x-plane/x-plane_install_12.txt if not specified
+; scenery_dir = /path/to/X-Plane 12/Custom Scenery
 
-[scenery]
-pack_location = "/mnt/large_drive/xearthlayer/scenery_packs"
-
-[packs]
-europe = { enabled = true, auto_update = true }
-africa = { enabled = false }
-north_america = { enabled = true, auto_update = true }
-south_america = { enabled = false }
-asia = { enabled = true, auto_update = false }
-australia = { enabled = false }
-antarctica = { enabled = false }
+[cache]
+memory_size = 2GB
+disk_size = 20GB
 ```
 
 ### Pack Operations

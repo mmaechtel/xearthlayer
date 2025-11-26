@@ -11,394 +11,237 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 ## Recent Updates
 
-**2025-01-24**: Implemented DDS texture encoding module with BC1/BC3 compression, mipmap generation, and CLI integration. Added 93 comprehensive tests. Performance: 0.2-0.3s for 4096×4096 encoding.
+**2025-11-25**: Major milestone achieved - parallel tile generation reduced X-Plane load times from 4-5 minutes to ~30 seconds. Added graceful shutdown with automatic FUSE unmount.
+
+**2025-11-25**: First successful end-to-end test with X-Plane 12 at Oakland International Airport (KOAK).
 
 ## Core Library Modules (`xearthlayer/`)
 
 ### ✅ Coordinate System (`coord/`)
 
-**Status**: Fully implemented with 48 tests
+**Status**: Fully implemented with 48+ tests
 
 **Purpose**: Handles all coordinate conversions between geographic coordinates, tile coordinates, chunk coordinates, and Bing Maps quadkeys.
-
-**Files**:
-- `types.rs` - Core types (TileCoord, ChunkCoord, CoordError)
-- `mod.rs` - Conversion functions and iteration
 
 **Key Functionality**:
 - `to_tile_coords()` - Convert lat/lon to tile coordinates (Web Mercator projection)
 - `to_chunk_coords()` - Convert lat/lon to chunk coordinates within a tile
-- `tile_to_lat_lon()` - Convert tile coordinates back to geographic
 - `tile_to_quadkey()` / `quadkey_to_tile()` - Bing Maps quadkey encoding
 - `TileCoord::chunks()` - Iterator over all 256 chunks in a tile
-- `ChunkCoord::to_global_coords()` - Convert chunk to global tile coordinates at zoom+4
-
-**Test Coverage**:
-- 32 unit tests covering edge cases and known values
-- 16 property-based tests using proptest for invariant checking
-- 2 doctests for public API examples
-
-**Dependencies**:
-- None (only std library)
-
-**Design Notes**:
-- Uses Web Mercator projection (EPSG:3857)
-- Valid latitude range: -85.05112878° to 85.05112878°
-- Zoom levels 1-19 supported
-- Each tile = 16×16 chunks = 4096×4096 pixels
-- Chunks at zoom Z come from provider at zoom Z+4
 
 ---
 
 ### ✅ Provider Abstraction (`provider/`)
 
-**Status**: Fully implemented with 10 tests
+**Status**: Fully implemented with multiple providers
 
-**Purpose**: Abstracts satellite imagery providers behind a trait-based interface, enabling dependency injection and testing without network calls.
+**Purpose**: Abstracts satellite imagery providers behind a trait-based interface.
 
-**Files**:
-- `types.rs` - Provider trait and ProviderError enum
-- `http.rs` - HttpClient trait, ReqwestClient, and MockHttpClient
-- `bing.rs` - BingMapsProvider implementation
-- `mod.rs` - Module exports
+**Implemented Providers**:
+- **BingMapsProvider** - Free, no API key required, zoom 1-19
+- **GoogleMapsProvider** - Paid, requires API key, zoom 1-22 (with session-based API)
 
 **Key Functionality**:
 - `Provider` trait - Common interface for all imagery providers
 - `HttpClient` trait - Abstraction for HTTP requests (enables mocking)
-- `BingMapsProvider` - Bing Maps aerial imagery using quadkey URLs
-- `ReqwestClient` - Production HTTP client implementation
-- `MockHttpClient` - Test double for unit testing
-
-**Provider Trait Methods**:
-- `download_chunk(row, col, zoom)` - Download a single 256×256 tile
-- `name()` - Provider name for display
-- `min_zoom()` / `max_zoom()` - Supported zoom range
-- `supports_zoom(zoom)` - Validate zoom level
-
-**Test Coverage**:
-- 10 unit tests covering success, errors, and edge cases
-- Mock-based testing without network dependencies
-
-**Dependencies**:
-- `reqwest` (0.12) with blocking feature
-
-**Design Notes**:
-- Thread-safe (`Send + Sync` bounds)
-- Error handling via `ProviderError` enum
-- Bing Maps: zoom 1-19, quadkey-based URLs
-- Ready for additional providers (NAIP, Sentinel-2, USGS)
+- `ProviderFactory` - Creates providers from configuration
+- `ProviderConfig` - Provider-specific configuration
 
 ---
 
 ### ✅ Download Orchestrator (`orchestrator/`)
 
-**Status**: Fully implemented with 3 tests
+**Status**: Fully implemented
 
 **Purpose**: Coordinates parallel downloading of 256 chunks per tile and assembles them into complete 4096×4096 pixel images.
 
-**Files**:
-- `types.rs` - OrchestratorError, ChunkResult, DownloadStats
-- `download.rs` - TileOrchestrator implementation
-- `mod.rs` - Module exports
-
-**Key Functionality**:
-- `TileOrchestrator` - Main orchestration struct
-- `download_tile()` - Download and assemble complete tile
-- `download_chunks_parallel()` - Parallel chunk downloading with batching
-- `assemble_image()` - Decode JPEGs and composite into final image
-
-**Configuration**:
+**Configuration** (via `DownloadConfig`):
 - `timeout_secs` - Overall timeout for tile download (default: 30s)
 - `max_retries_per_chunk` - Retry attempts per failed chunk (default: 3)
 - `max_parallel_downloads` - Concurrent thread limit (default: 32)
 - Requires 80% chunk success rate minimum
 
-**Error Handling**:
-- `OrchestratorError::Timeout` - Exceeded time limit
-- `OrchestratorError::TooManyFailures` - < 80% success rate
-- `OrchestratorError::ImageError` - JPEG decode/assembly failed
-- Per-chunk retry with timeout checking
-
-**Test Coverage**:
-- 3 integration tests including real network downloads
-- Mock provider support for deterministic testing
-
-**Dependencies**:
-- `image` (0.25) for JPEG decoding and image manipulation
-- Provider implementation (generic over `Provider` trait)
-
-**Performance**:
-- Downloads 256 chunks in ~2.5 seconds (tested)
-- Batched threading prevents thread explosion
-- `Arc<Provider>` for efficient sharing across threads
-
-**Design Notes**:
-- Uses `std::thread` + `mpsc::channel` (no async complexity)
-- Batched execution: spawns `max_parallel_downloads` at a time
-- Black pixels fill missing chunks (graceful degradation)
-- Returns `RgbaImage` (4096×4096) for further processing
-
 ---
 
 ### ✅ DDS Texture Compression (`dds/`)
 
-**Status**: Fully implemented with 93 tests
+**Status**: Fully implemented with 93+ tests
 
 **Purpose**: Encode satellite imagery into DirectX DDS format with BC1/BC3 compression for X-Plane compatibility.
 
-**Files**:
-- `types.rs` - Core types, errors, DDS header structures
-- `conversion.rs` - RGB565 conversion and color distance calculations
-- `header.rs` - DDS header construction and serialization
-- `bc1.rs` - BC1/DXT1 compression implementation
-- `bc3.rs` - BC3/DXT5 compression implementation
-- `mipmap.rs` - Mipmap chain generation with box filtering
-- `encoder.rs` - Main DDS encoder API
-- `mod.rs` - Public API exports
-
-**Key Functionality**:
-- `DdsEncoder::new()` - Create encoder with BC1 or BC3 format
-- `encode()` - Encode RgbaImage to complete DDS file
-- `with_mipmap_count()` - Configure mipmap levels
-- `MipmapGenerator::generate_chain()` - Generate full mipmap chain
-- `Bc1Encoder::compress_block()` - Compress 4×4 pixel blocks
-- `Bc3Encoder::compress_block()` - Compress with alpha channel
-
 **Compression Formats**:
-- **BC1/DXT1**: 8 bytes per 4×4 block (0.5 bytes/pixel)
-  - Two RGB565 color endpoints
-  - 2-bit indices for 4-color palette
-  - Best for opaque satellite imagery
-- **BC3/DXT5**: 16 bytes per 4×4 block (1 byte/pixel)
-  - 8 bytes for alpha channel (two endpoints + 3-bit indices)
-  - 8 bytes for RGB (same as BC1)
-  - Best for textures with smooth alpha
-
-**Mipmap Generation**:
-- Box filter downsampling (2×2 average)
-- Configurable level count
-- Default: 5 levels (4096→2048→1024→512→256)
-- Automatic chain to 1×1 if requested
-
-**Test Coverage**:
-- 4 tests for core types and header structure
-- 15 tests for RGB565 conversion and color distance
-- 24 tests for DDS header construction
-- 15 tests for BC1 compression
-- 17 tests for BC3 compression
-- 14 tests for mipmap generation
-- 16 integration tests for full encoding pipeline
+- **BC1/DXT1**: 8 bytes per 4×4 block (~11 MB per tile with mipmaps)
+- **BC3/DXT5**: 16 bytes per 4×4 block (~21 MB per tile with mipmaps)
 
 **Performance**:
-- BC1 encoding: ~0.21s for 4096×4096 with 5 mipmaps
-- BC3 encoding: ~0.32s for 4096×4096 with 5 mipmaps
-- Well under 1-second target
+- BC1 encoding: ~0.2s for 4096×4096 with 5 mipmaps
+- BC3 encoding: ~0.3s for 4096×4096 with 5 mipmaps
 
-**File Sizes** (4096×4096 with 5 mipmaps):
-- BC1: ~11 MB
-- BC3: ~21 MB (2× BC1, as expected)
-- JPEG: ~8.8 MB (for comparison)
+---
 
-**Dependencies**:
-- `image` (0.25) for RgbaImage type
+### ✅ Tile Generator (`tile/`)
 
-**Design Notes**:
-- Bounding box method for color endpoint selection (fast, good quality)
-- Perceptual color distance with green weighting (RGB weights 3:6:1)
-- Sequential block processing (parallelization possible)
-- Compatible with X-Plane, DirectX 9+, OpenGL texture compression
+**Status**: Fully implemented with parallel processing
 
-**CLI Integration**:
-- `--format dds|jpeg` flag for output format
-- `--dds-format bc1|bc3` for compression selection
-- `--mipmap-count N` for custom mipmap levels
-- Auto-detection from `.dds` file extension
+**Purpose**: High-level tile generation combining download orchestration, texture encoding, and parallel processing.
 
-**Verification**:
-- Recognized by `file` command as DDS/DXT1/DXT5
-- Readable by ImageMagick, GIMP, Paint.NET
-- Compatible with X-Plane texture system
+**Files**:
+- `generator.rs` - `TileGenerator` trait
+- `default.rs` - `DefaultTileGenerator` implementation
+- `parallel.rs` - `ParallelTileGenerator` with thread pool and request coalescing
+- `request.rs` - `TileRequest` type
+- `error.rs` - `TileGeneratorError` enum
+
+**Key Features**:
+- Configurable thread pool (default: num_cpus)
+- Request coalescing for duplicate tile requests
+- Timeout handling with magenta placeholder fallback
+- Configuration via `[generation]` section in config.ini
+
+---
+
+### ✅ Texture Encoding (`texture/`)
+
+**Status**: Fully implemented
+
+**Purpose**: Abstraction layer over DDS encoding with configurable format and mipmaps.
+
+**Key Types**:
+- `TextureEncoder` trait
+- `DdsTextureEncoder` - Main implementation
+- `TextureConfig` - Format and mipmap configuration
+
+---
+
+### ✅ FUSE Virtual Filesystem (`fuse/`)
+
+**Status**: Fully implemented with passthrough support
+
+**Purpose**: Virtual filesystem that intercepts X-Plane texture file requests and generates imagery on-demand.
+
+**Files**:
+- `filesystem.rs` - `XEarthLayerFS` (standalone FUSE server)
+- `passthrough.rs` - `PassthroughFS` (overlay real files, generate DDS on-demand)
+- `filename.rs` - DDS filename pattern parsing
+- `placeholder.rs` - Magenta placeholder generation for failed tiles
+
+**Key Functionality**:
+- Passthrough mode overlays real scenery files
+- DDS textures generated on-demand when X-Plane requests them
+- Pattern matching: `{row}_{col}_ZL{zoom}.dds`
+- Graceful degradation with magenta placeholders
+
+---
+
+### ✅ Cache System (`cache/`)
+
+**Status**: Fully implemented with two-tier caching
+
+**Purpose**: Multi-tier caching to minimize redundant downloads and provide fast tile access.
+
+**Files**:
+- `memory.rs` - In-memory LRU cache with background cleanup
+- `disk.rs` - Persistent disk cache with size limits
+- `system.rs` - `CacheSystem` combining memory + disk
+- `trait.rs` - `Cache` trait and `NoOpCache`
+- `types.rs` - Configuration types
+
+**Features**:
+- Memory cache: LRU eviction, configurable size (default 2GB)
+- Disk cache: Persistent storage, configurable size (default 20GB)
+- Cache path structure: `{provider}/{zoom}/{row}/{col}_{format}.dds`
+- Statistics tracking (hits, misses, evictions)
+
+---
+
+### ✅ Configuration Management (`config/`)
+
+**Status**: Fully implemented with INI file support
+
+**Purpose**: Load and manage user configuration from INI files.
+
+**Files**:
+- `file.rs` - INI file loading and saving
+- `texture.rs` - Texture configuration
+- `download.rs` - Download configuration
+- `size.rs` - Human-readable size parsing (e.g., "2GB")
+- `xplane.rs` - X-Plane installation detection
+
+**Configuration Sections**:
+- `[provider]` - Imagery provider and API keys
+- `[cache]` - Cache directory, memory/disk sizes
+- `[texture]` - DDS format, mipmap count
+- `[download]` - Timeout, parallel downloads, retries
+- `[generation]` - Thread count, tile timeout
+- `[xplane]` - Custom Scenery directory
+- `[logging]` - Log file path
+
+**Location**: `~/.xearthlayer/config.ini`
+
+---
+
+### ✅ Service Facade (`service/`)
+
+**Status**: Fully implemented
+
+**Purpose**: High-level API that wires together all components.
+
+**Key Types**:
+- `XEarthLayerService` - Main facade
+- `ServiceConfig` - Combined configuration
+- `ServiceError` - Unified error handling
+
+**Key Methods**:
+- `new()` - Create service from configuration
+- `download_tile()` - Download a single tile
+- `serve()` - Start FUSE server (blocking)
+- `serve_background()` - Start FUSE server (non-blocking, returns `BackgroundSession`)
+- `serve_passthrough()` / `serve_passthrough_background()` - Passthrough mode variants
+
+---
+
+### ✅ Logging (`logging/`)
+
+**Status**: Fully implemented
+
+**Purpose**: Structured logging with file output.
+
+**Features**:
+- File-based logging to configurable path
+- Colored console output
+- Log levels via `tracing`
 
 ---
 
 ## Command-Line Interface (`xearthlayer-cli/`)
 
-### ✅ CLI Binary (`src/main.rs`)
+### ✅ CLI Binary
 
 **Status**: Fully implemented
 
-**Purpose**: Standalone binary for testing tile downloads and saving satellite imagery to disk.
+**Commands**:
+- `xearthlayer init` - Initialize configuration file
+- `xearthlayer mount` - Mount scenery pack with passthrough filesystem
+- `xearthlayer download` - Download a single tile to file
+- `xearthlayer serve` - Start standalone FUSE server
 
-**Key Functionality**:
-- Command-line argument parsing with `clap`
-- Coordinate validation and tile conversion
-- Provider zoom level validation
-- JPEG encoding with quality control
-- Progress reporting
-
-**Arguments**:
-- `--lat <LAT>` - Latitude (required)
-- `--lon <LON>` - Longitude (required)
-- `--zoom <ZOOM>` - Zoom level 1-15 for Bing, 1-18 for Google (default: 15)
-- `--output <PATH>` - Output file path (required)
-- `--provider <PROVIDER>` - Imagery provider: bing, google (default: bing)
-- `--google-api-key <KEY>` - Google Maps API key (required for Google)
-- `--format <FORMAT>` - Output format: jpeg, dds (auto-detected from extension)
-- `--dds-format <FORMAT>` - DDS compression: bc1, bc3 (default: bc1)
-- `--mipmap-count <COUNT>` - Number of mipmap levels for DDS (default: 5)
-
-**Validation**:
-- Zoom range: 1-19 (enforced by coord module)
-- Provider-specific: zoom+4 ≤ max_zoom (enforced by CLI)
-- Geographic bounds: lat ∈ [-85.05, 85.05], lon ∈ [-180, 180]
-
-**Output Formats**:
-- **JPEG**: 4096×4096 at 90% quality (~8-9 MB)
-- **DDS BC1**: 4096×4096 with mipmaps (~11 MB)
-- **DDS BC3**: 4096×4096 with mipmaps (~21 MB)
-
-**Dependencies**:
-- `clap` (4.5) with derive feature for argument parsing
-- `image` (0.25) for JPEG encoding
-- `xearthlayer` library
-
-**Example Usage**:
-```bash
-./target/release/xearthlayer \
-  --lat 40.7128 \
-  --lon -74.0060 \
-  --zoom 15 \
-  --output nyc.jpg
-```
+**Key Features**:
+- Signal handling (Ctrl+C, SIGTERM) with graceful shutdown
+- Automatic FUSE unmount on exit
+- Configuration file override via CLI arguments
 
 ---
 
 ## Planned Modules
 
-### ⏳ FUSE Virtual Filesystem (`fuse/`)
-
-**Purpose**: Virtual filesystem that intercepts X-Plane texture file requests and generates imagery on-demand.
-
-**Planned Files**:
-- `types.rs` - FUSE operation types
-- `filesystem.rs` - Main FUSE implementation
-- `parser.rs` - DDS filename pattern matching
-
-**Required Functionality**:
-- `getattr()` - File metadata for virtual files
-- `read()` - Generate DDS on-the-fly when X-Plane reads
-- `readdir()` - List scenery directory contents
-- Regex pattern: `(\d+)[-_](\d+)[-_]((?!ZL)\S*)(\d{2}).dds`
-- Pass-through for non-DDS files
-
-**Crates to Consider**:
-- `fuser` - Pure Rust FUSE library
-- `polyfuse` - Alternative async FUSE implementation
-
-**Design Decisions Needed**:
-- Blocking vs async I/O
-- Error handling for missing tiles
-- Cache integration strategy
-
----
-
-### ⏳ Tile Cache Manager (`cache/`)
-
-**Purpose**: Multi-tier caching to minimize redundant downloads and provide fast tile access.
-
-**Planned Files**:
-- `types.rs` - Cache types and errors
-- `memory.rs` - In-memory LRU cache
-- `disk.rs` - Persistent disk cache
-- `manager.rs` - Unified cache coordinator
-
-**Required Functionality**:
-- **Memory Cache**:
-  - LRU eviction policy
-  - Size limit: 1-2GB (50-100 tiles)
-  - Thread-safe access
-  - Holds complete 4096×4096 images
-
-- **Disk Cache**:
-  - Store individual 256×256 JPEG chunks
-  - Size limit: 30GB default
-  - Directory structure by zoom/row/col
-  - Corruption detection (magic bytes)
-
-- **Cache Manager**:
-  - Check memory → check disk → download
-  - Background cleanup thread
-  - Cache statistics and monitoring
-
-**Crates to Consider**:
-- `lru` - LRU cache implementation
-- `parking_lot` - High-performance RwLock
-- `dashmap` - Concurrent HashMap
-
----
-
-### ⏳ Configuration Management (`config/`)
-
-**Purpose**: Load and manage user configuration from INI files.
-
-**Planned Files**:
-- `types.rs` - Configuration structures
-- `loader.rs` - INI parsing and validation
-- `defaults.rs` - Default values
-
-**Required Functionality**:
-- Read `~/.autoortho/autoortho.ini`
-- Sections: general, paths, autoortho, pydds, scenery, fuse, cache
-- X-Plane installation auto-detection
-- Provider selection and prioritization
-- Cache size limits
-- Thread pool sizing
-
-**Crates to Consider**:
-- `ini` - INI file parser
-- `serde` - Serialization framework
-- `config` - Multi-format configuration
-
----
-
 ### 📋 Additional Imagery Providers (`provider/`)
 
-**Purpose**: Add support for additional satellite imagery sources beyond Bing Maps.
+**Purpose**: Add support for additional satellite imagery sources.
 
 **Planned Providers**:
-- **NAIP** - USDA National Agriculture Imagery Program
-- **Sentinel-2** - ESA Copernicus satellite (via EOX)
+- **NAIP** - USDA National Agriculture Imagery Program (US only, high resolution)
+- **Sentinel-2** - ESA Copernicus satellite via EOX
 - **USGS** - US Geological Survey imagery
-
-**Required Functionality**:
-- Implement `Provider` trait for each source
-- Provider-specific URL construction
-- Authentication handling (if required)
-- Zoom level mapping
-- Fallback logic when primary fails
-
----
-
-### 📋 Scenery Package Management (`scenery/`)
-
-**Purpose**: Download and install pre-built X-Plane scenery packages that contain DSF/terrain files but no imagery.
-
-**Planned Files**:
-- `types.rs` - Package metadata
-- `downloader.rs` - GitHub releases API
-- `installer.rs` - Package extraction and mounting
-
-**Required Functionality**:
-- Fetch from `https://api.github.com/repos/kubilus1/autoortho-scenery/releases`
-- Download `.zip` packages
-- Extract to scenery directory
-- Verify checksums
-- Track installed packages
-
-**Crates to Consider**:
-- `reqwest` - HTTP client (already in use)
-- `zip` - ZIP archive handling
-- `sha2` - Checksum verification
 
 ---
 
@@ -406,21 +249,11 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 **Purpose**: Listen to X-Plane's UDP position broadcasts for predictive tile preloading.
 
-**Planned Files**:
-- `types.rs` - Flight data structures
-- `listener.rs` - UDP socket handler
-- `predictor.rs` - Tile prediction based on heading/speed
-
 **Required Functionality**:
 - UDP listener on port 49000
 - Parse X-Plane data format
-- Calculate required tiles based on position
 - Predict upcoming tiles from heading/speed
 - Queue preload requests
-
-**Crates to Consider**:
-- `tokio` - Async runtime for UDP
-- Standard library `UdpSocket` for simplicity
 
 ---
 
@@ -428,25 +261,11 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 **Purpose**: Provide a web-based dashboard for monitoring and configuration.
 
-**Planned Files**:
-- `server.rs` - HTTP server
-- `handlers.rs` - Request handlers
-- `websocket.rs` - Real-time updates
-
 **Required Functionality**:
-- HTTP server on port 5000
+- HTTP server for status page
 - Real-time download statistics
 - Cache hit/miss metrics
-- Active downloads display
 - Configuration management
-- Manual cache clearing
-
-**Crates to Consider**:
-- `axum` - Modern web framework
-- `tokio-tungstenite` - WebSocket support
-- `tower-http` - HTTP middleware
-
-**Alternative**: Could be a separate service
 
 ---
 
@@ -454,78 +273,66 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 ```
 xearthlayer-cli
-    ├─→ coord (geographic ↔ tile conversion)
-    ├─→ provider (imagery sources)
-    └─→ orchestrator (parallel downloads)
-            ├─→ coord (chunk iteration)
-            └─→ provider (chunk downloads)
-
-[Future FUSE filesystem]
-    ├─→ coord (filename parsing)
-    ├─→ cache (tile retrieval)
-    ├─→ dds (texture encoding)
-    └─→ config (settings)
-            └─→ cache
-                    ├─→ orchestrator (on cache miss)
-                    └─→ disk (persistent storage)
+    ├─→ service/facade (main entry point)
+    │       ├─→ provider (imagery sources)
+    │       ├─→ orchestrator (parallel downloads)
+    │       ├─→ tile (generation pipeline)
+    │       │       ├─→ parallel (thread pool + coalescing)
+    │       │       └─→ default (download + encode)
+    │       ├─→ texture (DDS encoding)
+    │       ├─→ cache (memory + disk)
+    │       └─→ fuse (virtual filesystem)
+    │               └─→ passthrough (overlay mode)
+    └─→ config (settings management)
 ```
 
-## Next Implementation Priorities
+## Test Coverage
 
-Based on the AutoOrtho architecture and current progress:
+**Current Test Count**: 426+ tests passing
 
-1. ~~**DDS Texture Compression**~~ - ✅ **COMPLETED** (93 tests, 0.2-0.3s encoding)
-2. **Tile Cache Manager** - Essential for performance (memory + disk LRU)
-3. **FUSE Virtual Filesystem** - Core integration point with X-Plane
-4. **Configuration Management** - User-facing settings
-5. **Additional Providers** - Improved imagery quality/coverage
-6. **Flight Data Integration** - Predictive preloading
-7. **Scenery Package Management** - Simplified installation
-8. **Web UI Dashboard** - Optional monitoring/management
+**Test Types**:
+- Unit tests for all modules
+- Integration tests with real network
+- Property-based tests with proptest
+- Doctests for public APIs
 
-## Testing Strategy
+---
 
-**Current Test Coverage**: 161 tests passing
-- Unit tests: 155
-- Integration tests: 3 (with real network)
-- Doctests: 2
+## Performance Benchmarks
 
-**Target Coverage**: 80% minimum (90% goal)
+Based on testing at Oakland International Airport (KOAK):
 
-**Testing Approach**:
-- TDD: Write tests before implementation
-- Property-based testing with `proptest` for invariants
-- Dependency injection for mockable components
-- Integration tests with real providers (limited to avoid rate limits)
-- Benchmark tests for performance-critical paths
+| Metric | Before Optimization | After Optimization |
+|--------|--------------------|--------------------|
+| Scene Load Time | 4-5 minutes | ~30 seconds |
+| Tile Download | ~2.5s | ~1s (with coalescing) |
+| DDS Encoding | ~0.2s (BC1) | ~0.2s (BC1) |
+| Cache Hit | N/A | <10ms |
 
-## Documentation Status
-
-- ✅ README.md - Project overview and CLI usage
-- ✅ CLAUDE.md - Development guidance
-- ✅ DESIGN_PRINCIPLES.md - SOLID and TDD guidelines
-- ✅ COORDINATE_SYSTEM.md - Detailed coord module docs
-- ✅ MODULE_STATUS.md - This document
-- ⏳ API documentation (rustdoc) - Partial coverage
-- ⏳ Architecture diagrams - Planned
-- ⏳ Performance benchmarks - Planned
-
-## Performance Targets
-
-Based on AutoOrtho benchmarks:
-
-- **Tile Download**: < 3 seconds for 256 chunks (✅ Currently ~2.5s)
-- **DDS Encoding**: < 1 second for 4096×4096 image
-- **Cache Lookup**: < 10ms memory, < 50ms disk
-- **FUSE Operations**: < 100ms total latency
-- **Memory Usage**: < 2GB for in-memory cache
-- **Disk Cache**: 30GB default, configurable
+---
 
 ## Platform Support
 
-- **Linux**: Primary target (native FUSE support) - ✅ Working
-- **Windows**: Requires Dokan/WinFSP - ⏳ Planned
-- **macOS**: Requires macFUSE - ⏳ Planned
+- **Linux**: ✅ Fully working (native FUSE support)
+- **Windows**: ⏳ Planned (requires Dokan/WinFSP)
+- **macOS**: ⏳ Planned (requires macFUSE)
+
+---
+
+## Documentation
+
+| Document | Status |
+|----------|--------|
+| README.md | ✅ Updated |
+| CONFIGURATION.md | ✅ Complete |
+| PARALLEL_PROCESSING.md | ✅ Complete |
+| FUSE_FILESYSTEM.md | ✅ Updated |
+| CACHE_DESIGN.md | ✅ Updated |
+| COORDINATE_SYSTEM.md | ✅ Current |
+| DESIGN_PRINCIPLES.md | ✅ Current |
+| DDS_IMPLEMENTATION.md | ✅ Current |
+
+---
 
 ## License
 

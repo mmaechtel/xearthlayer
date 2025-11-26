@@ -9,9 +9,12 @@ XEarthLayer mounts a virtual filesystem that intercepts X-Plane's texture file r
 **Key Features:**
 - On-demand satellite imagery from Bing Maps (free) or Google Maps (paid)
 - FUSE passthrough filesystem - real scenery files pass through, DDS textures generated on-demand
-- Two-tier caching (2GB memory + 20GB disk)
+- Parallel tile generation with request coalescing for fast scene loading
+- Two-tier caching (configurable memory + disk, default 2GB + 20GB)
 - BC1/BC3 DDS compression with 5-level mipmap chains
+- Graceful shutdown with automatic FUSE unmount on Ctrl+C/SIGTERM
 - Automatic X-Plane 12 installation detection
+- INI-based configuration at `~/.xearthlayer/config.ini`
 
 ## Quick Start
 
@@ -96,6 +99,9 @@ make doc-open       # Generate and open documentation
 ## CLI Commands
 
 ```bash
+# Initialize configuration file
+xearthlayer init
+
 # Mount scenery pack with passthrough filesystem
 xearthlayer mount --source <scenery_dir> [--mountpoint <path>]
 
@@ -112,14 +118,14 @@ Run `xearthlayer --help` for all options.
 
 | Document | Description |
 |----------|-------------|
+| [Configuration](docs/CONFIGURATION.md) | All configuration settings and INI file reference |
 | [FUSE Filesystem](docs/FUSE_FILESYSTEM.md) | Virtual filesystem architecture and passthrough implementation |
+| [Parallel Processing](docs/PARALLEL_PROCESSING.md) | Thread pool architecture and request coalescing |
 | [Cache Design](docs/CACHE_DESIGN.md) | Two-tier caching strategy (memory + disk) |
 | [DDS Implementation](docs/DDS_IMPLEMENTATION.md) | BC1/BC3 texture compression and mipmap generation |
 | [Coordinate System](docs/COORDINATE_SYSTEM.md) | Web Mercator projection and tile coordinate system |
 | [Design Principles](docs/DESIGN_PRINCIPLES.md) | SOLID principles and TDD guidelines |
 | [Architecture Analysis](docs/arch/ARCHITECTURE_ANALYSIS.md) | Original AutoOrtho architecture reference |
-| [Module Status](docs/MODULE_STATUS.md) | Implementation progress tracking |
-| [Refactoring Strategy](docs/REFACTORING_STRATEGY.md) | Code organization and refactoring approach |
 
 ## Known Issues
 

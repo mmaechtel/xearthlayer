@@ -616,32 +616,30 @@ rm -rf ~/.cache/xearthlayer/bing/
 # Frees 1.1 GB
 ```
 
-## Implementation Phases
+## Implementation Status
 
-### Phase 1: Current (Basic Memory Cache) ✅
+### Phase 1: Basic Memory Cache ✅
 - ✅ In-memory HashMap cache
-- ✅ No eviction (unlimited growth)
-- ✅ No persistence
 - ✅ Basic inode cache for reverse mapping
 
-### Phase 2: Memory Cache with LRU (Next)
-- Add memory size limits (2GB default)
-- Implement LRU eviction
-- Add memory cache daemon thread
-- Add basic statistics tracking
+### Phase 2: Memory Cache with LRU ✅
+- ✅ Memory size limits (2GB default, configurable)
+- ✅ LRU eviction
+- ✅ Background cleanup thread
+- ✅ Statistics tracking
 
-### Phase 3: Disk Cache
-- Add hierarchical disk cache structure (provider/format/zoom/row)
-- Implement async disk writes
-- Add disk write thread
-- Add disk cache daemon thread
+### Phase 3: Disk Cache ✅
+- ✅ Hierarchical disk cache structure (provider/format/zoom/row)
+- ✅ Async disk writes
+- ✅ Disk cache with size limits (20GB default, configurable)
+- ✅ LRU eviction for disk cache
 
-### Phase 4: Advanced Features
-- Virtual `/stats` file
-- Configurable cache sizes via CLI
-- Age-based eviction
-- Corruption detection/recovery
-- Cache pre-warming (download tiles ahead of flight path)
+### Phase 4: Advanced Features (Partial)
+- ❌ Virtual `/stats` file (not implemented)
+- ✅ Configurable cache sizes via config.ini
+- ❌ Age-based eviction (not implemented)
+- ❌ Corruption detection/recovery (not implemented)
+- ❌ Cache pre-warming (not implemented)
 
 ## Directory Size Estimates
 
