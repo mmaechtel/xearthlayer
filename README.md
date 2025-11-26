@@ -125,7 +125,6 @@ Run `xearthlayer --help` for all options.
 | [DDS Implementation](docs/DDS_IMPLEMENTATION.md) | BC1/BC3 texture compression and mipmap generation |
 | [Coordinate System](docs/COORDINATE_SYSTEM.md) | Web Mercator projection and tile coordinate system |
 | [Design Principles](docs/DESIGN_PRINCIPLES.md) | SOLID principles and TDD guidelines |
-| [Architecture Analysis](docs/arch/ARCHITECTURE_ANALYSIS.md) | Original AutoOrtho architecture reference |
 
 ## Known Issues
 
