@@ -7,6 +7,18 @@ use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Result of detecting X-Plane Custom Scenery directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneryDetectionResult {
+    /// No X-Plane 12 installation found.
+    NotFound,
+    /// Single X-Plane 12 installation with valid Custom Scenery directory.
+    Single(PathBuf),
+    /// Multiple X-Plane 12 installations found - user must choose.
+    /// Contains list of Custom Scenery directories.
+    Multiple(Vec<PathBuf>),
+}
+
 /// Errors that can occur when detecting X-Plane paths.
 #[derive(Debug, Error)]
 pub enum XPlanePathError {
@@ -56,9 +68,56 @@ fn get_install_reference_path() -> Result<PathBuf, XPlanePathError> {
     }
 }
 
+/// Detect all X-Plane 12 installation directories.
+///
+/// Reads the install reference file which may contain multiple paths (one per line)
+/// for users with multiple X-Plane installations.
+///
+/// # Returns
+///
+/// A vector of paths to valid X-Plane 12 installation directories.
+/// Returns an empty vector if no valid installations are found.
+///
+/// # Example
+///
+/// ```ignore
+/// use xearthlayer::config::detect_xplane_installs;
+///
+/// let installs = detect_xplane_installs();
+/// match installs.len() {
+///     0 => println!("No X-Plane 12 installations found"),
+///     1 => println!("Found X-Plane at: {}", installs[0].display()),
+///     _ => println!("Found {} X-Plane installations", installs.len()),
+/// }
+/// ```
+pub fn detect_xplane_installs() -> Vec<PathBuf> {
+    let reference_path = match get_install_reference_path() {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+
+    if !reference_path.exists() {
+        return Vec::new();
+    }
+
+    // Read the file and parse all lines as potential paths
+    let contents = match fs::read_to_string(&reference_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    // Each line is a potential install path
+    contents
+        .lines()
+        .map(|line| PathBuf::from(line.trim()))
+        .filter(|path| !path.as_os_str().is_empty() && path.exists())
+        .collect()
+}
+
 /// Detect the X-Plane 12 installation directory.
 ///
 /// Reads the install reference file to find the X-Plane 12 installation path.
+/// If multiple installations exist, returns the first valid one.
 ///
 /// # Returns
 ///
@@ -69,7 +128,7 @@ fn get_install_reference_path() -> Result<PathBuf, XPlanePathError> {
 /// Returns an error if:
 /// - The install reference file cannot be found
 /// - The file cannot be read
-/// - The path in the file doesn't exist
+/// - No valid installation path exists
 ///
 /// # Example
 ///
@@ -82,21 +141,13 @@ fn get_install_reference_path() -> Result<PathBuf, XPlanePathError> {
 /// }
 /// ```
 pub fn detect_xplane_install() -> Result<PathBuf, XPlanePathError> {
-    let reference_path = get_install_reference_path()?;
+    let installs = detect_xplane_installs();
 
-    if !reference_path.exists() {
-        return Err(XPlanePathError::InstallFileNotFound(reference_path));
-    }
-
-    // Read the install path from the file
-    let contents = fs::read_to_string(&reference_path)?;
-    let install_path = PathBuf::from(contents.trim());
-
-    if !install_path.exists() {
-        return Err(XPlanePathError::InstallPathNotFound(install_path));
-    }
-
-    Ok(install_path)
+    installs.into_iter().next().ok_or_else(|| {
+        let reference_path = get_install_reference_path()
+            .unwrap_or_else(|_| PathBuf::from("~/.x-plane/x-plane_install_12.txt"));
+        XPlanePathError::InstallFileNotFound(reference_path)
+    })
 }
 
 /// Detect the X-Plane 12 Custom Scenery directory.
@@ -178,6 +229,54 @@ pub fn derive_mountpoint(source_path: &std::path::Path) -> Result<PathBuf, XPlan
         .unwrap_or_else(|| "xel_scenery".to_string());
 
     Ok(custom_scenery.join(pack_name))
+}
+
+/// Detect X-Plane Custom Scenery directory for configuration.
+///
+/// This is the main entry point for the init command to detect where
+/// X-Plane scenery packs should be mounted.
+///
+/// # Returns
+///
+/// - `NotFound` if no X-Plane 12 installation is detected
+/// - `Single(path)` if exactly one installation with Custom Scenery is found
+/// - `Multiple(paths)` if multiple installations are found (user must choose)
+///
+/// # Example
+///
+/// ```
+/// use xearthlayer::config::{detect_scenery_dir, SceneryDetectionResult};
+///
+/// match detect_scenery_dir() {
+///     SceneryDetectionResult::NotFound => {
+///         println!("X-Plane 12 not found");
+///     }
+///     SceneryDetectionResult::Single(path) => {
+///         println!("Found: {}", path.display());
+///     }
+///     SceneryDetectionResult::Multiple(paths) => {
+///         println!("Multiple installations found:");
+///         for path in paths {
+///             println!("  - {}", path.display());
+///         }
+///     }
+/// }
+/// ```
+pub fn detect_scenery_dir() -> SceneryDetectionResult {
+    let installs = detect_xplane_installs();
+
+    // Filter to only installations with valid Custom Scenery directories
+    let scenery_dirs: Vec<PathBuf> = installs
+        .into_iter()
+        .map(|install| install.join("Custom Scenery"))
+        .filter(|path| path.exists())
+        .collect();
+
+    match scenery_dirs.len() {
+        0 => SceneryDetectionResult::NotFound,
+        1 => SceneryDetectionResult::Single(scenery_dirs.into_iter().next().unwrap()),
+        _ => SceneryDetectionResult::Multiple(scenery_dirs),
+    }
 }
 
 #[cfg(test)]

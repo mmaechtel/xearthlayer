@@ -45,5 +45,6 @@ pub use file::{
 pub use size::{format_size, parse_size, Size, SizeParseError};
 pub use texture::TextureConfig;
 pub use xplane::{
-    derive_mountpoint, detect_custom_scenery, detect_xplane_install, XPlanePathError,
+    derive_mountpoint, detect_custom_scenery, detect_scenery_dir, detect_xplane_install,
+    detect_xplane_installs, SceneryDetectionResult, XPlanePathError,
 };
