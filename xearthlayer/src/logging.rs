@@ -3,7 +3,8 @@
 //! Provides structured logging with file output and console output:
 //! - Writes to `logs/xearthlayer.log` (cleared on session start)
 //! - Also prints to stdout for CLI tailing
-//! - Compact single-line format for release builds
+//! - Compact single-line format for release builds with UTC date+time
+//!   (supports flight sim sessions lasting 24+ hours)
 //! - Verbose multi-line format for debug builds
 //! - Configurable via RUST_LOG environment variable
 
@@ -19,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[cfg(not(debug_assertions))]
-use tracing_subscriber::fmt::time::LocalTime;
+use tracing_subscriber::fmt::time::OffsetTime;
 
 /// Guard that must be kept alive for the duration of logging.
 ///
@@ -87,10 +88,11 @@ pub fn init_logging(log_dir: &str, log_file: &str) -> Result<LoggingGuard, io::E
     #[cfg(not(debug_assertions))]
     {
         // Release: compact single-line format without file locations
-        // Format: "10:30:45 INFO message"
+        // Format: "2025-11-26 10:30:45Z INFO message" (Zulu/UTC timestamps for long sessions)
         let time_format =
-            time::format_description::parse("[hour]:[minute]:[second]").expect("valid format");
-        let timer = LocalTime::new(time_format);
+            time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]Z")
+                .expect("valid format");
+        let timer = OffsetTime::new(time::UtcOffset::UTC, time_format);
 
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking_file)
