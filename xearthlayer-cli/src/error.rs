@@ -25,6 +25,10 @@ pub enum CliError {
     FileWrite { path: String, error: std::io::Error },
     /// FUSE server error
     Serve(ServiceError),
+    /// Failed to clear cache
+    CacheClear(String),
+    /// Failed to get cache stats
+    CacheStats(String),
 }
 
 impl CliError {
@@ -74,6 +78,8 @@ impl fmt::Display for CliError {
                 write!(f, "Failed to write file '{}': {}", path, error)
             }
             CliError::Serve(e) => write!(f, "FUSE server error: {}", e),
+            CliError::CacheClear(msg) => write!(f, "Failed to clear cache: {}", msg),
+            CliError::CacheStats(msg) => write!(f, "Failed to get cache stats: {}", msg),
         }
     }
 }

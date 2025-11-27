@@ -25,9 +25,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use xearthlayer::cache::{clear_disk_cache, disk_cache_stats};
 use xearthlayer::config::{
-    derive_mountpoint, detect_scenery_dir, ConfigFile, DownloadConfig, SceneryDetectionResult,
-    TextureConfig,
+    derive_mountpoint, detect_scenery_dir, format_size, ConfigFile, DownloadConfig,
+    SceneryDetectionResult, TextureConfig,
 };
 use xearthlayer::dds::DdsFormat;
 use xearthlayer::provider::ProviderConfig;
@@ -107,6 +108,12 @@ enum Commands {
     /// Initialize configuration file at ~/.xearthlayer/config.ini
     Init,
 
+    /// Cache management commands
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+
     /// Start XEarthLayer with a scenery pack (passthrough for real files, on-demand DDS generation)
     Start {
         /// Source scenery pack directory to overlay
@@ -174,6 +181,14 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Clear the disk cache, removing all cached tiles
+    Clear,
+    /// Show disk cache statistics
+    Stats,
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -183,6 +198,7 @@ fn main() {
 
     let result = match cli.command {
         Commands::Init => run_init(),
+        Commands::Cache { action } => run_cache(action),
         Commands::Start {
             source,
             mountpoint,
@@ -295,6 +311,42 @@ fn run_init() -> Result<(), CliError> {
     println!("Edit this file to customize XEarthLayer settings.");
     println!("CLI arguments override config file values when specified.");
     Ok(())
+}
+
+/// Handle cache management commands.
+fn run_cache(action: CacheAction) -> Result<(), CliError> {
+    let config = ConfigFile::load().unwrap_or_default();
+    let cache_dir = &config.cache.directory;
+
+    match action {
+        CacheAction::Clear => {
+            println!("Clearing disk cache at: {}", cache_dir.display());
+
+            match clear_disk_cache(cache_dir) {
+                Ok(result) => {
+                    println!(
+                        "Deleted {} files, freed {}",
+                        result.files_deleted,
+                        format_size(result.bytes_freed as usize)
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(CliError::CacheClear(e.to_string())),
+            }
+        }
+        CacheAction::Stats => {
+            println!("Disk cache: {}", cache_dir.display());
+
+            match disk_cache_stats(cache_dir) {
+                Ok((files, bytes)) => {
+                    println!("  Files: {}", files);
+                    println!("  Size:  {}", format_size(bytes as usize));
+                    Ok(())
+                }
+                Err(e) => Err(CliError::CacheStats(e.to_string())),
+            }
+        }
+    }
 }
 
 /// Resolve provider settings from CLI args and config.

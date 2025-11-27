@@ -21,4 +21,7 @@ pub use system::CacheSystem;
 pub use types::{CacheConfig, CacheError, CacheKey, DiskCacheConfig, MemoryCacheConfig};
 
 // Re-export path utilities for convenience
-pub use path::{cache_path, provider_directory, row_directory};
+pub use path::{
+    cache_path, clear_disk_cache, disk_cache_stats, provider_directory, row_directory,
+    ClearCacheResult,
+};
