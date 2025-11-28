@@ -36,6 +36,16 @@ pub struct DdsFilename {
     pub map_type: String,
 }
 
+impl std::fmt::Display for DdsFilename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}_{}_{}{}",
+            self.row, self.col, self.map_type, self.zoom
+        )
+    }
+}
+
 /// Error parsing DDS filename.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
@@ -499,5 +509,28 @@ mod tests {
         assert!(debug_str.contains("125184"));
         assert!(debug_str.contains("18"));
         assert!(debug_str.contains("BI"));
+    }
+
+    #[test]
+    fn test_dds_filename_display() {
+        let coords = DdsFilename {
+            row: 100000,
+            col: 125184,
+            zoom: 18,
+            map_type: "BI".to_string(),
+        };
+        // Display format matches the original filename (without .dds extension)
+        assert_eq!(format!("{}", coords), "100000_125184_BI18");
+    }
+
+    #[test]
+    fn test_dds_filename_display_go2() {
+        let coords = DdsFilename {
+            row: 25264,
+            col: 10368,
+            zoom: 16,
+            map_type: "GO2".to_string(),
+        };
+        assert_eq!(format!("{}", coords), "25264_10368_GO216");
     }
 }

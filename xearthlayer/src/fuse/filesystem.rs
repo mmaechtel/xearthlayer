@@ -335,11 +335,11 @@ impl Filesystem for XEarthLayerFS {
 
         // Try to get from cache (memory → disk → none)
         let dds_data = if let Some(data) = self.cache.get(&cache_key) {
-            log_info!(self.logger, "Cache hit for tile {:?}", tile);
+            log_debug!(self.logger, "Cache hit: {}.dds", coords);
             data
         } else {
             // Cache miss - generate tile using injected generator
-            log_info!(self.logger, "Cache miss for tile {:?}, generating...", tile);
+            log_info!(self.logger, "Generating: {}.dds", coords);
             let data = self.generate_tile(&coords);
 
             // Cache the generated tile

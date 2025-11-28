@@ -216,11 +216,11 @@ impl PassthroughFS {
         let cache_key = CacheKey::new(self.cache.provider(), self.dds_format, tile);
 
         if let Some(data) = self.cache.get(&cache_key) {
-            log_info!(self.logger, "Cache hit for DDS {:?}", coords);
+            log_debug!(self.logger, "Cache hit: {}.dds", coords);
             return data;
         }
 
-        log_info!(self.logger, "Generating DDS for coords {:?}", coords);
+        log_info!(self.logger, "Generating: {}.dds", coords);
 
         match self.generator.generate(&request) {
             Ok(data) => {
