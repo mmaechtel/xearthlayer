@@ -39,6 +39,9 @@ mod output;
 mod services;
 mod traits;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export public types
 pub use args::PublishCommands;
 pub use handlers::{
