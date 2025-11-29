@@ -447,15 +447,15 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 5
 
 
-55e772c100c5f01cc148a7e9a66196e266adb22e2ca2116f81f8d138f9d7c725  zzXEL_eur-1.0.0.tar.gz.aa  https://dl.example.com/zzXEL_eur-1.0.0.tar.gz.aa
-b91f75f976768c62f6215d4e16e1e0e8a5948dfb9fccf73e67699a6818933335  zzXEL_eur-1.0.0.tar.gz.ab  https://dl.example.com/zzXEL_eur-1.0.0.tar.gz.ab
-f5e5a7881b2156f1b53baf1982b4a11db3662449ce63abe0867841ed139aedf0  zzXEL_eur-1.0.0.tar.gz.ac  https://dl.example.com/zzXEL_eur-1.0.0.tar.gz.ac
-031bf3288532038142cf5bc4a7453eb87340b9441da5b381c567781c23ef33fe  zzXEL_eur-1.0.0.tar.gz.ad  https://dl.example.com/zzXEL_eur-1.0.0.tar.gz.ad
-15d85a6c5d9b8a6db1d6745cac1c2819972a689088e7f12bf5a2f076d7bc03d9  zzXEL_eur-1.0.0.tar.gz.ae  https://dl.example.com/zzXEL_eur-1.0.0.tar.gz.ae
+55e772c100c5f01cc148a7e9a66196e266adb22e2ca2116f81f8d138f9d7c725  zzXEL_eur_ortho-1.0.0.tar.gz.aa  https://dl.example.com/zzXEL_eur_ortho-1.0.0.tar.gz.aa
+b91f75f976768c62f6215d4e16e1e0e8a5948dfb9fccf73e67699a6818933335  zzXEL_eur_ortho-1.0.0.tar.gz.ab  https://dl.example.com/zzXEL_eur_ortho-1.0.0.tar.gz.ab
+f5e5a7881b2156f1b53baf1982b4a11db3662449ce63abe0867841ed139aedf0  zzXEL_eur_ortho-1.0.0.tar.gz.ac  https://dl.example.com/zzXEL_eur_ortho-1.0.0.tar.gz.ac
+031bf3288532038142cf5bc4a7453eb87340b9441da5b381c567781c23ef33fe  zzXEL_eur_ortho-1.0.0.tar.gz.ad  https://dl.example.com/zzXEL_eur_ortho-1.0.0.tar.gz.ad
+15d85a6c5d9b8a6db1d6745cac1c2819972a689088e7f12bf5a2f076d7bc03d9  zzXEL_eur_ortho-1.0.0.tar.gz.ae  https://dl.example.com/zzXEL_eur_ortho-1.0.0.tar.gz.ae
 "#
     }
 
@@ -468,7 +468,7 @@ f5e5a7881b2156f1b53baf1982b4a11db3662449ce63abe0867841ed139aedf0  zzXEL_eur-1.0.
         assert_eq!(metadata.package_version, Version::new(1, 0, 0));
         assert_eq!(metadata.package_type, PackageType::Ortho);
         assert_eq!(metadata.mountpoint, "zzXEL_eur_ortho");
-        assert_eq!(metadata.filename, "zzXEL_eur-1.0.0.tar.gz");
+        assert_eq!(metadata.filename, "zzXEL_eur_ortho-1.0.0.tar.gz");
         assert_eq!(metadata.parts.len(), 5);
     }
 
@@ -480,13 +480,19 @@ f5e5a7881b2156f1b53baf1982b4a11db3662449ce63abe0867841ed139aedf0  zzXEL_eur-1.0.
             metadata.parts[0].checksum,
             "55e772c100c5f01cc148a7e9a66196e266adb22e2ca2116f81f8d138f9d7c725"
         );
-        assert_eq!(metadata.parts[0].filename, "zzXEL_eur-1.0.0.tar.gz.aa");
+        assert_eq!(
+            metadata.parts[0].filename,
+            "zzXEL_eur_ortho-1.0.0.tar.gz.aa"
+        );
         assert_eq!(
             metadata.parts[0].url,
-            "https://dl.example.com/zzXEL_eur-1.0.0.tar.gz.aa"
+            "https://dl.example.com/zzXEL_eur_ortho-1.0.0.tar.gz.aa"
         );
 
-        assert_eq!(metadata.parts[4].filename, "zzXEL_eur-1.0.0.tar.gz.ae");
+        assert_eq!(
+            metadata.parts[4].filename,
+            "zzXEL_eur_ortho-1.0.0.tar.gz.ae"
+        );
     }
 
     #[test]
@@ -497,11 +503,11 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Y
 yzXEL_eur_overlay
-yzXEL_eur-1.0.0.tar.gz
+yzXEL_eur_overlay-1.0.0.tar.gz
 1
 
 
-abc123  yzXEL_eur-1.0.0.tar.gz.aa  https://example.com/file.aa
+abc123  yzXEL_eur_overlay-1.0.0.tar.gz.aa  https://example.com/file.aa
 "#;
         let metadata = parse_package_metadata(content).unwrap();
         assert_eq!(metadata.package_type, PackageType::Overlay);
@@ -516,7 +522,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 1
 
 abc  file.aa  http://example.com/file.aa
@@ -540,7 +546,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 1
 
 
@@ -561,7 +567,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 X
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 1
 
 
@@ -582,7 +588,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 3
 
 
@@ -651,7 +657,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 0
 
 
@@ -668,7 +674,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 2
 
 
@@ -697,7 +703,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 0
 
 
@@ -714,7 +720,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 0
 
 
@@ -733,7 +739,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 1
 
 
@@ -751,7 +757,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 1
 
 
@@ -796,7 +802,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 0
 
 
@@ -816,7 +822,7 @@ EUROPE  1.0.0
 2025-12-20T20:49:23Z
 Z
 zzXEL_eur_ortho
-zzXEL_eur-1.0.0.tar.gz
+zzXEL_eur_ortho-1.0.0.tar.gz
 1
 
 

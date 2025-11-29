@@ -23,6 +23,7 @@ pub mod dds;
 pub mod fuse;
 pub mod log;
 pub mod logging;
+pub mod manager;
 pub mod orchestrator;
 pub mod package;
 pub mod provider;

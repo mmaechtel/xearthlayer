@@ -25,12 +25,16 @@
 
 mod library;
 mod metadata;
+mod naming;
 mod types;
 
 pub use library::{parse_package_library, serialize_package_library, LibraryEntry, PackageLibrary};
 pub use metadata::{
     parse_package_metadata, serialize_package_metadata, MetadataValidationError, PackageMetadata,
     ValidationContext,
+};
+pub use naming::{
+    archive_filename, archive_part_filename, package_mountpoint, update_archive_version,
 };
 pub use types::{ArchivePart, PackageType};
 

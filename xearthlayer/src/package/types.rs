@@ -7,7 +7,7 @@ use std::fmt;
 /// Determines how the package is installed and used:
 /// - `Ortho`: Mounted via FUSE for on-demand texture generation
 /// - `Overlay`: Installed via symlink (static content)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PackageType {
     /// Orthophoto scenery package (type code: Z)
     ///
@@ -88,7 +88,7 @@ pub struct ArchivePart {
     /// SHA-256 checksum of this part
     pub checksum: String,
 
-    /// Local filename for this part (e.g., "zzXEL_eur-1.0.0.tar.gz.aa")
+    /// Local filename for this part (e.g., "zzXEL_eur_ortho-1.0.0.tar.gz.aa")
     pub filename: String,
 
     /// Remote URL to download this part
@@ -152,16 +152,19 @@ mod tests {
     fn test_archive_part_new() {
         let part = ArchivePart::new(
             "55e772c100c5f01cc148a7e9a66196e266adb22e2ca2116f81f8d138f9d7c725",
-            "zzXEL_eur-1.0.0.tar.gz.aa",
-            "https://example.com/zzXEL_eur-1.0.0.tar.gz.aa",
+            "zzXEL_eur_ortho-1.0.0.tar.gz.aa",
+            "https://example.com/zzXEL_eur_ortho-1.0.0.tar.gz.aa",
         );
 
         assert_eq!(
             part.checksum,
             "55e772c100c5f01cc148a7e9a66196e266adb22e2ca2116f81f8d138f9d7c725"
         );
-        assert_eq!(part.filename, "zzXEL_eur-1.0.0.tar.gz.aa");
-        assert_eq!(part.url, "https://example.com/zzXEL_eur-1.0.0.tar.gz.aa");
+        assert_eq!(part.filename, "zzXEL_eur_ortho-1.0.0.tar.gz.aa");
+        assert_eq!(
+            part.url,
+            "https://example.com/zzXEL_eur_ortho-1.0.0.tar.gz.aa"
+        );
     }
 
     #[test]

@@ -12,7 +12,8 @@ use semver::Version;
 
 use super::{archive_filename, PublishError, PublishResult, Repository};
 use crate::package::{
-    parse_package_metadata, serialize_package_metadata, ArchivePart, PackageMetadata, PackageType,
+    parse_package_metadata, serialize_package_metadata, update_archive_version, ArchivePart,
+    PackageMetadata, PackageType,
 };
 
 /// Metadata file name within package directories.
@@ -32,7 +33,7 @@ pub const DEFAULT_SPEC_VERSION: &str = "1.0.0";
 /// * `version` - The package version
 /// * `package_type` - Ortho or Overlay
 /// * `mountpoint` - The folder name for mounting (e.g., "zzXEL_na_ortho")
-/// * `filename` - The base archive filename (e.g., "zzXEL_na-1.0.0.tar.gz")
+/// * `filename` - The base archive filename (e.g., "zzXEL_na_ortho-1.0.0.tar.gz")
 pub fn create_metadata(
     title: &str,
     version: Version,
@@ -165,19 +166,9 @@ pub fn bump_package_version(
 
 /// Update the version in a filename.
 ///
-/// Assumes filename format: `prefix-X.Y.Z.extension` where extension starts with `.tar`
+/// This is a local alias for [`crate::package::update_archive_version`].
 fn update_filename_version(filename: &str, version: &Version) -> String {
-    // Find the version pattern in the filename
-    if let Some(dash_pos) = filename.rfind('-') {
-        // Find the start of the extension (.tar.gz, .tar.gz.aa, etc.)
-        if let Some(ext_pos) = filename[dash_pos..].find(".tar") {
-            let prefix = &filename[..dash_pos];
-            let extension = &filename[dash_pos + ext_pos..];
-            return format!("{}-{}{}", prefix, version, extension);
-        }
-    }
-    // Fallback: return original if pattern not found
-    filename.to_string()
+    update_archive_version(filename, version)
 }
 
 /// Add archive parts to package metadata.
@@ -260,7 +251,7 @@ mod tests {
             Version::new(1, 0, 0),
             PackageType::Ortho,
             "zzXEL_na_ortho",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
         );
 
         assert_eq!(metadata.title, "NORTH_AMERICA");
@@ -278,7 +269,7 @@ mod tests {
             Version::new(2, 1, 0),
             PackageType::Overlay,
             "yzXEL_eur_overlay",
-            "yzXEL_eur-2.1.0.tar.gz",
+            "yzXEL_eur_overlay-2.1.0.tar.gz",
         );
 
         write_metadata(&metadata, temp.path()).unwrap();
@@ -299,7 +290,7 @@ mod tests {
             Version::new(1, 0, 0),
             PackageType::Ortho,
             "zzXEL_na_ortho",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
         );
         write_metadata(&metadata, temp.path()).unwrap();
 
@@ -360,13 +351,13 @@ mod tests {
     #[test]
     fn test_update_filename_version() {
         assert_eq!(
-            update_filename_version("zzXEL_na-1.0.0.tar.gz", &Version::new(2, 0, 0)),
-            "zzXEL_na-2.0.0.tar.gz"
+            update_filename_version("zzXEL_na_ortho-1.0.0.tar.gz", &Version::new(2, 0, 0)),
+            "zzXEL_na_ortho-2.0.0.tar.gz"
         );
 
         assert_eq!(
-            update_filename_version("yzXEL_eur-1.2.3.tar.gz.aa", &Version::new(1, 3, 0)),
-            "yzXEL_eur-1.3.0.tar.gz.aa"
+            update_filename_version("yzXEL_eur_overlay-1.2.3.tar.gz.aa", &Version::new(1, 3, 0)),
+            "yzXEL_eur_overlay-1.3.0.tar.gz.aa"
         );
     }
 
@@ -378,14 +369,14 @@ mod tests {
             Version::new(1, 0, 0),
             PackageType::Ortho,
             "zzXEL_na_ortho",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
         );
         write_metadata(&metadata, temp.path()).unwrap();
 
         let updated = update_version(temp.path(), Version::new(2, 0, 0)).unwrap();
 
         assert_eq!(updated.package_version, Version::new(2, 0, 0));
-        assert_eq!(updated.filename, "zzXEL_na-2.0.0.tar.gz");
+        assert_eq!(updated.filename, "zzXEL_na_ortho-2.0.0.tar.gz");
     }
 
     #[test]
@@ -396,7 +387,7 @@ mod tests {
             Version::new(1, 0, 0),
             PackageType::Ortho,
             "zzXEL_na_ortho",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
         );
         write_metadata(&metadata, temp.path()).unwrap();
 
@@ -413,7 +404,7 @@ mod tests {
             Version::new(1, 0, 0),
             PackageType::Ortho,
             "zzXEL_na_ortho",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
         );
         write_metadata(&metadata, temp.path()).unwrap();
 

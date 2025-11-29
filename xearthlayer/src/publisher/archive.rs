@@ -13,7 +13,7 @@ use semver::Version;
 
 use super::metadata::calculate_sha256;
 use super::{PublishError, PublishResult, RepoConfig};
-use crate::package::PackageType;
+use crate::package::{self, PackageType};
 
 // Re-export format_size for convenience
 pub use crate::config::format_size as format_archive_size;
@@ -21,7 +21,7 @@ pub use crate::config::format_size as format_archive_size;
 /// Result of building an archive.
 #[derive(Debug, Clone)]
 pub struct ArchiveBuildResult {
-    /// The base archive filename (e.g., "zzXEL_na-1.0.0.tar.gz").
+    /// The base archive filename (e.g., "zzXEL_na_ortho-1.0.0.tar.gz").
     pub archive_name: String,
 
     /// List of archive parts with their paths and checksums.
@@ -34,7 +34,7 @@ pub struct ArchiveBuildResult {
 /// Information about a single archive part.
 #[derive(Debug, Clone)]
 pub struct ArchivePart {
-    /// Filename of this part (e.g., "zzXEL_na-1.0.0.tar.gz.aa").
+    /// Filename of this part (e.g., "zzXEL_na_ortho-1.0.0.tar.gz.aa").
     pub filename: String,
 
     /// Full path to the part file.
@@ -74,14 +74,10 @@ fn check_tool_available(tool: &str, args: &[&str]) -> PublishResult<()> {
 
 /// Generate the archive filename for a package.
 ///
-/// Format: `{sort_prefix}XEL_{region}-{version}.tar.gz`
+/// This is a re-export of [`crate::package::archive_filename`] for convenience.
+/// See that function for full documentation.
 pub fn archive_filename(region: &str, package_type: PackageType, version: &Version) -> String {
-    format!(
-        "{}XEL_{}-{}.tar.gz",
-        package_type.sort_prefix(),
-        region.to_lowercase(),
-        version
-    )
+    package::archive_filename(region, package_type, version)
 }
 
 /// Build a distributable archive from a package directory.
@@ -304,14 +300,14 @@ mod tests {
     fn test_archive_filename_ortho() {
         let version = Version::new(1, 2, 3);
         let filename = archive_filename("na", PackageType::Ortho, &version);
-        assert_eq!(filename, "zzXEL_na-1.2.3.tar.gz");
+        assert_eq!(filename, "zzXEL_na_ortho-1.2.3.tar.gz");
     }
 
     #[test]
     fn test_archive_filename_overlay() {
         let version = Version::new(2, 0, 0);
         let filename = archive_filename("EUR", PackageType::Overlay, &version);
-        assert_eq!(filename, "yzXEL_eur-2.0.0.tar.gz");
+        assert_eq!(filename, "yzXEL_eur_overlay-2.0.0.tar.gz");
     }
 
     #[test]
@@ -369,7 +365,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.archive_name, "zzXEL_na-1.0.0.tar.gz");
+        assert_eq!(result.archive_name, "zzXEL_na_ortho-1.0.0.tar.gz");
         assert_eq!(result.parts.len(), 1);
         assert!(result.parts[0].filename.ends_with(".aa"));
         assert!(result.parts[0].path.exists());

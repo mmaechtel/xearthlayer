@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use semver::Version;
 
 use super::{PublishError, PublishResult};
-use crate::package::PackageType;
+use crate::package::{self, PackageType};
 
 /// Repository marker filename.
 const REPO_MARKER: &str = ".xearthlayer-repo";
@@ -221,13 +221,8 @@ impl Repository {
     ///
     /// For example: `zzXEL_na_ortho` or `yzXEL_eur_overlay`
     pub fn package_dir(&self, region: &str, package_type: PackageType) -> PathBuf {
-        let folder_name = format!(
-            "{}XEL_{}_{}",
-            package_type.sort_prefix(),
-            region.to_lowercase(),
-            package_type.folder_suffix()
-        );
-        self.packages_dir().join(folder_name)
+        self.packages_dir()
+            .join(package::package_mountpoint(region, package_type))
     }
 
     /// Check if a package exists in the repository.

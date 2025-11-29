@@ -3106,6 +3106,7 @@ dependencies = [
  "fuser",
  "image",
  "semver",
+ "tempfile",
  "tracing",
  "xearthlayer",
 ]

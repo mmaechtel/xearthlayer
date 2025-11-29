@@ -235,7 +235,7 @@ impl UrlVerifier {
 /// Parse a base URL and generate part URLs.
 ///
 /// Given a base URL like "https://example.com/packages/" and an archive name
-/// like "zzXEL_na-1.0.0.tar.gz", generates URLs for each part suffix.
+/// like "zzXEL_na_ortho-1.0.0.tar.gz", generates URLs for each part suffix.
 pub fn generate_part_urls(base_url: &str, archive_name: &str, suffixes: &[&str]) -> Vec<String> {
     let base = if base_url.ends_with('/') {
         base_url.to_string()
@@ -362,21 +362,21 @@ mod tests {
     fn test_generate_part_urls() {
         let urls = generate_part_urls(
             "https://example.com/packages",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
             &["aa", "ab", "ac"],
         );
         assert_eq!(urls.len(), 3);
         assert_eq!(
             urls[0],
-            "https://example.com/packages/zzXEL_na-1.0.0.tar.gz.aa"
+            "https://example.com/packages/zzXEL_na_ortho-1.0.0.tar.gz.aa"
         );
         assert_eq!(
             urls[1],
-            "https://example.com/packages/zzXEL_na-1.0.0.tar.gz.ab"
+            "https://example.com/packages/zzXEL_na_ortho-1.0.0.tar.gz.ab"
         );
         assert_eq!(
             urls[2],
-            "https://example.com/packages/zzXEL_na-1.0.0.tar.gz.ac"
+            "https://example.com/packages/zzXEL_na_ortho-1.0.0.tar.gz.ac"
         );
     }
 
@@ -384,12 +384,12 @@ mod tests {
     fn test_generate_part_urls_trailing_slash() {
         let urls = generate_part_urls(
             "https://example.com/packages/",
-            "zzXEL_na-1.0.0.tar.gz",
+            "zzXEL_na_ortho-1.0.0.tar.gz",
             &["aa"],
         );
         assert_eq!(
             urls[0],
-            "https://example.com/packages/zzXEL_na-1.0.0.tar.gz.aa"
+            "https://example.com/packages/zzXEL_na_ortho-1.0.0.tar.gz.aa"
         );
     }
 
