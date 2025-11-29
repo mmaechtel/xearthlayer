@@ -34,7 +34,7 @@ Components:
 |--------|------|---------------|-----------------|
 | Africa | afr | zzXEL_afr_ortho | yzXEL_afr_overlay |
 | Antarctica | ant | zzXEL_ant_ortho | yzXEL_ant_overlay |
-| Asia | asi | zzXEL_asi_ortho | yzXEL_asi_overlay |
+| Asia | asia | zzXEL_asia_ortho | yzXEL_asia_overlay |
 | Australia | aus | zzXEL_aus_ortho | yzXEL_aus_overlay |
 | Europe | eur | zzXEL_eur_ortho | yzXEL_eur_overlay |
 | North America | na | zzXEL_na_ortho | yzXEL_na_overlay |
@@ -48,16 +48,16 @@ Each package conforms to X-Plane 12 DSF specification structure:
 zzXEL_na_ortho/
 ├── xearthlayer_scenery_package.txt    # XEarthLayer metadata
 ├── Earth nav data/                     # DSF files
-│   └── +30-120/                        # Lat/lon grouping folder
+│   └── +30-120/                        # 10° × 10° grid folder
+│       ├── +32-115.dsf
 │       ├── +37-118.dsf
-│       ├── +37-119.dsf
-│       └── +37-120.dsf
+│       └── +39-119.dsf
 ├── terrain/                            # Terrain type files
 │   ├── 25264_10912_BI16.ter
 │   ├── 25264_10912_BI16_sea.ter
 │   └── ...
 └── textures/                           # Water masks only
-    ├── 25264_10912_BI16_sea.png
+    ├── 25264_10912_ZL16.png
     └── ...
 ```
 
@@ -65,12 +65,13 @@ zzXEL_na_ortho/
 
 Contains DSF (Distribution Scenery Format) files organized by geographic location.
 
-**Folder naming**: `+<lat><lon>` where longitude is rounded to nearest 10 degrees.
+**Folder naming**: `+<lat><lon>` where both latitude and longitude are rounded down to the nearest 10 degrees.
 - Example: `+37-127.dsf` is in folder `+30-130/`
-- Latitude: 2-digit zero-padded with sign (e.g., `+37`, `-05`, `+00`)
-- Longitude: 3-digit zero-padded with sign (e.g., `-120`, `+005`, `+000`)
+- Example: `+41-118.dsf` is in folder `+40-120/`
+- Grid latitude: 2-digit zero-padded with sign (e.g., `+30`, `-10`, `+00`)
+- Grid longitude: 3-digit zero-padded with sign (e.g., `-120`, `+010`, `+000`)
 
-Each folder contains 1-10 DSF files covering 1° latitude × 10° longitude.
+Each folder contains up to 100 DSF files covering a 10° latitude × 10° longitude area.
 
 ### terrain/
 
@@ -82,7 +83,9 @@ These files reference:
 
 ### textures/
 
-Contains only water mask PNG files. DDS orthophoto textures are NOT included - XEarthLayer generates them dynamically via FUSE.
+Contains only water mask PNG files (e.g., `25264_10912_ZL16.png`). These define water boundaries for coastal and lake areas.
+
+DDS orthophoto textures are NOT included - XEarthLayer generates them dynamically via FUSE when X-Plane requests them.
 
 ## Package Metadata File
 

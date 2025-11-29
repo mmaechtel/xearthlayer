@@ -26,6 +26,7 @@ pub mod logging;
 pub mod orchestrator;
 pub mod package;
 pub mod provider;
+pub mod publisher;
 pub mod service;
 pub mod texture;
 pub mod tile;

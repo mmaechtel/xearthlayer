@@ -57,36 +57,48 @@ Foundation types and parsers used by both Publisher and Manager.
 
 ---
 
-## Phase 2: Publisher - Core Functionality
+## Phase 2: Publisher - Core Functionality ✓
 
 Create packages from Ortho4XP output.
 
 ### Repository Management
 
-- [ ] Repository initialization (`.xearthlayer-repo`, directories)
-- [ ] Repository detection and validation
-- [ ] Repository state tracking
+- [x] Repository initialization (`.xearthlayer-repo`, directories)
+- [x] Repository detection and validation
+- [x] Package directory structure (`packages/<region>/<type>/`)
 
 ### Ortho4XP Processing
 
-- [ ] Scan Ortho4XP tile directories
-- [ ] Validate tile structure (DSF, ter, textures)
-- [ ] Filter files (keep DSF/ter/masks, remove DDS)
-- [ ] Organize into package structure
-- [ ] Region assignment from lat/lon
+- [x] Scan Ortho4XP tile directories (`zOrtho4XP_+NN-NNN/` format)
+- [x] Validate tile structure (DSF in grid subdirs, ter, textures)
+- [x] Filter files (keep DSF/ter/PNG masks, skip DDS)
+- [x] Organize DSF into 10° × 10° grid structure
+- [x] Coalesce terrain and texture files with deduplication
+- [x] Region suggestion from lat/lon coordinates
+
+**Design Decision**: `SceneryProcessor` trait abstraction allows future support for other scenery formats (e.g., X-Plane 13 when released).
 
 ### Metadata Generation
 
-- [ ] Generate `xearthlayer_scenery_package.txt`
-- [ ] SHA-256 checksum calculation
-- [ ] Version management (bump, set)
+- [x] Generate `xearthlayer_scenery_package.txt`
+- [x] SHA-256 checksum calculation (streaming, 8KB buffer)
+- [x] Version management (bump major/minor/patch, set specific version)
 
 ### Files
 
-- [ ] `xearthlayer/src/publisher/mod.rs`
-- [ ] `xearthlayer/src/publisher/repository.rs`
-- [ ] `xearthlayer/src/publisher/processor.rs`
-- [ ] `xearthlayer/src/publisher/metadata.rs`
+- [x] `xearthlayer/src/publisher/mod.rs`
+- [x] `xearthlayer/src/publisher/error.rs`
+- [x] `xearthlayer/src/publisher/repository.rs`
+- [x] `xearthlayer/src/publisher/processor.rs` (trait + module)
+- [x] `xearthlayer/src/publisher/processor/tile.rs`
+- [x] `xearthlayer/src/publisher/processor/ortho4xp.rs`
+- [x] `xearthlayer/src/publisher/metadata.rs`
+- [x] `xearthlayer/src/publisher/region.rs`
+
+### Dependencies Added
+
+- `sha2 = "0.10"` - SHA-256 checksums
+- `chrono` clock feature enabled - UTC timestamps
 
 ---
 
@@ -379,6 +391,11 @@ Record significant decisions made during implementation:
 | 2025-11-28 | Multi-mount (one per region) | Simpler than merged filesystem |
 | 2025-11-28 | Region as String not enum | Allows publishers to define custom regional groupings |
 | 2025-11-28 | Use semver crate | Less code to maintain, standard implementation |
+| 2025-11-28 | SceneryProcessor trait | SOLID principles - abstracts scenery format, supports future versions of X-Plane |
+| 2025-11-28 | 10° × 10° DSF grid | Matches X-Plane/Ortho4XP grid organization for Earth nav data |
+| 2025-11-28 | Coalesce tiles into single package | Ortho4XP creates per-tile dirs; we consolidate into regional packages |
+| 2025-11-28 | Skip DDS by default | XEarthLayer generates DDS on-demand via FUSE |
+| 2025-11-28 | PNG mask detection (not `*_sea.png`) | Ortho4XP uses `*_ZL16.png` naming for water masks |
 
 ---
 
