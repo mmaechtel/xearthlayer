@@ -3082,6 +3082,7 @@ dependencies = [
  "image",
  "libc",
  "proptest",
+ "rand",
  "regex",
  "reqwest",
  "rust-ini",

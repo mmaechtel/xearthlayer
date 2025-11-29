@@ -61,22 +61,35 @@ xearthlayer-packages/
 │   └── yzXEL_na_overlay/
 │       └── ...
 ├── dist/                                # Published archives
-│   ├── zzXEL_na-1.0.0.tar.gz.aa
-│   ├── zzXEL_na-1.0.0.tar.gz.ab
-│   └── ...
+│   └── na/                              # Region subdirectory
+│       └── ortho/                       # Type subdirectory
+│           ├── zzXEL_na-1.0.0.tar.gz.aa
+│           ├── zzXEL_na-1.0.0.tar.gz.ab
+│           └── ...
 └── staging/                             # Work in progress
     └── ...
 ```
 
 ### Repository Marker
 
-`.xearthlayer-repo` contains repository metadata:
+`.xearthlayer-repo` contains repository metadata and optional configuration:
 
 ```
 XEARTHLAYER PACKAGE REPOSITORY
 1.0.0
 2025-12-20T10:00:00Z
+
+[config]
+part_size = 500000000
 ```
+
+The `[config]` section is optional and stores repository-wide settings:
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `part_size` | Archive split size in bytes | 500MB |
+
+Part size can be specified with units: `500MB`, `1GB`, `10 MB`, etc.
 
 ## Workflow
 
@@ -358,6 +371,38 @@ Updating library index...
 Repository published successfully.
 Upload dist/ contents to your hosting provider.
 ```
+
+## Package Release States
+
+Each package in the repository has a release status that tracks its position in the publish workflow:
+
+### Release Status
+
+| Status | Description | Next Action |
+|--------|-------------|-------------|
+| `NotBuilt` | Package exists but no archive built | Run `build` command |
+| `AwaitingUrls` | Archive built, parts have checksums but no URLs | Run `urls` command |
+| `Ready` | URLs configured and verified, ready for release | Run `release` command |
+| `Released` | Package is in the library index | Upload files to hosting |
+
+### Status Detection
+
+The status is determined automatically by examining package metadata:
+
+1. **NotBuilt**: No parts defined in metadata (part count = 0)
+2. **AwaitingUrls**: Parts exist but one or more has empty URL
+3. **Ready**: All parts have URLs, package not in library index
+4. **Released**: Package entry exists in library index
+
+### Context-Aware Validation
+
+Package metadata validation adapts to the release status:
+
+- **Initial context**: Parts optional, URLs not required (post-processing)
+- **AwaitingUrls context**: Parts required, URLs may be empty (post-build)
+- **Release context**: Parts and URLs required (pre-release validation)
+
+This separation of parsing (lenient) from validation (context-aware) enables the multi-phase workflow while ensuring only complete packages are published.
 
 ## Representational State
 

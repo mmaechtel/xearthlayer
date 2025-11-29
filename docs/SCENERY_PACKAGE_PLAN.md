@@ -102,42 +102,93 @@ Create packages from Ortho4XP output.
 
 ---
 
-## Phase 3: Publisher - Archive & Release
+## Phase 3: Publisher - Archive & Release (Ortho Only) ✓
 
-Build distributable archives and manage library.
+Build distributable archives and manage library. Focus on ortho packages first; overlay support added in Phase 3b.
+
+### Repository Configuration
+
+- [x] Extend `.xearthlayer-repo` to store settings (part size, URLs)
+- [x] Load/save repository configuration
+- [x] Validate configuration on repository open
 
 ### Archive Building
 
-- [ ] Create tar.gz archives
-- [ ] Split into configurable part sizes
-- [ ] Generate per-part checksums
-- [ ] Store in `dist/` directory
+- [x] Create tar.gz archives (shell out to `tar`)
+- [x] Split into configurable part sizes (shell out to `split`)
+- [x] Detect missing tools and provide helpful error messages
+- [x] Generate SHA-256 checksums for each part
+- [x] Store archives in `dist/<region>/<type>/` directory
 
 ### URL Configuration
 
-- [ ] Set base URL for package
-- [ ] Update metadata with full URLs
-- [ ] Validate URL format
+- [x] Validate URL format (http/https required)
+- [x] Optional URL accessibility verification (HEAD request)
+- [x] Optional checksum verification (download and verify SHA-256)
+- [x] Update package metadata with verified URLs
+- [x] Support batch URL entry with base URL + auto-generated filenames
 
 ### Library Index Management
 
-- [ ] Add package to library index
-- [ ] Update existing package entry
-- [ ] Remove package from library
-- [ ] Increment sequence number
-- [ ] Update timestamps
+- [x] Create library index in repository root
+- [x] Add package to library index
+- [x] Update existing package entry (by title + type)
+- [x] Remove package from library
+- [x] Increment sequence number on save
+- [x] Update timestamps on save
+- [x] Sort entries by title then type
 
-### Release Process
+### Release Workflow
 
-- [ ] Validate all packages ready
-- [ ] Update library index
-- [ ] Generate final checksums
+Multi-phase workflow to handle the "genesis paradox" (can't have URLs before files are hosted):
+
+```
+1. build   → Create archives in dist/, generate metadata (no URLs yet)
+2. [user]  → Upload archives to hosting (GitHub releases, S3, etc.)
+3. urls    → Provide URLs, optionally verify accessibility & checksums, update metadata
+4. [user]  → Upload updated metadata files
+5. release → Update library index, validate consistency
+6. [user]  → Upload library index to CDN
+```
+
+### Context-Aware Validation
+
+- [x] `ValidationContext` enum (Initial, AwaitingUrls, Release)
+- [x] Lenient parsing (0 parts allowed, empty URLs allowed)
+- [x] Context-specific validation (parts/URLs requirements vary by stage)
+- [x] `ReleaseStatus` enum tracks package position in workflow
+
+**Design Decision**: Separated parsing from validation to support the multi-phase workflow. Parser is lenient; validation is context-aware.
 
 ### Files
 
-- [ ] `xearthlayer/src/publisher/archive.rs`
-- [ ] `xearthlayer/src/publisher/library.rs`
-- [ ] `xearthlayer/src/publisher/release.rs`
+- [x] `xearthlayer/src/publisher/config.rs` - Repository configuration
+- [x] `xearthlayer/src/publisher/archive.rs` - Archive creation & splitting
+- [x] `xearthlayer/src/publisher/urls.rs` - URL verification & configuration
+- [x] `xearthlayer/src/publisher/library.rs` - Library index management
+- [x] `xearthlayer/src/publisher/release.rs` - Release orchestration
+
+### Dependencies Added
+
+- `rand = "0.9"` (dev-dependency) - Random data for compression tests
+
+---
+
+## Phase 3b: Publisher - Overlay Support
+
+Add overlay package support to the publisher.
+
+### Overlay Processing
+
+- [ ] Create `OverlayProcessor` implementing `SceneryProcessor` trait
+- [ ] Scan `yOrtho4XP_Overlays/` directory structure
+- [ ] Handle consolidated overlay format (not per-tile like ortho)
+- [ ] Package type `Y` with `yzXEL_` folder prefix
+
+### Integration
+
+- [ ] Verify archive/release workflow works for overlays
+- [ ] Update any ortho-specific assumptions in Phase 3 code
 
 ---
 
@@ -147,15 +198,16 @@ Command-line interface for Publisher.
 
 ### Commands
 
-- [ ] `xearthlayer publish init [<path>]`
-- [ ] `xearthlayer publish add --source --region --type [--version]`
-- [ ] `xearthlayer publish build --region --type [--part-size]`
-- [ ] `xearthlayer publish urls --region --type --base-url`
-- [ ] `xearthlayer publish version --region --type <--bump|--set>`
-- [ ] `xearthlayer publish release`
-- [ ] `xearthlayer publish list`
-- [ ] `xearthlayer publish remove --region --type`
-- [ ] `xearthlayer publish validate`
+- [ ] `xearthlayer publish init [<path>]` - Initialize repository
+- [ ] `xearthlayer publish scan --source <path>` - Scan and report tile info
+- [ ] `xearthlayer publish add --source <path> --region <code> --type <ortho|overlay> [--version <ver>]`
+- [ ] `xearthlayer publish list` - List packages in repository
+- [ ] `xearthlayer publish build [--region <code>] [--type <type>]` - Build archives
+- [ ] `xearthlayer publish urls --region <code> --type <type>` - Interactive URL configuration
+- [ ] `xearthlayer publish version --region <code> --type <type> <--bump <major|minor|patch>|--set <version>>`
+- [ ] `xearthlayer publish release` - Update library index
+- [ ] `xearthlayer publish validate` - Validate repository state
+- [ ] `xearthlayer publish remove --region <code> --type <type>` - Remove package
 
 ### Files
 
@@ -165,7 +217,7 @@ Command-line interface for Publisher.
 
 ## Phase 5: Create Test Package
 
-Use Publisher to create real North America package from California Ortho4XP data.
+Use Publisher to create real North America ortho package from California Ortho4XP data.
 
 ### Tasks
 
@@ -339,15 +391,19 @@ End-to-end testing with real packages.
 ## Dependencies
 
 ```
-Phase 1 (Core)
+Phase 1 (Core) ✓
     ↓
-Phase 2 (Publisher Core) ────→ Phase 3 (Publisher Archive)
-                                        ↓
-                               Phase 4 (Publisher CLI)
-                                        ↓
-                               Phase 5 (Test Package)
-                                        ↓
-Phase 6 (Manager Read) ←───────────────┘
+Phase 2 (Publisher Core) ✓
+    ↓
+Phase 3 (Publisher Archive - Ortho) ✓
+    ↓
+Phase 4 (Publisher CLI)
+    ↓
+Phase 5 (Test Ortho Package)
+    ↓
+Phase 3b (Publisher - Overlay Support)
+    ↓
+Phase 6 (Manager Read) ←── Test packages ready
     ↓
 Phase 7 (Manager Install)
     ↓
@@ -359,6 +415,8 @@ Phase 10 (Config/Polish)
     ↓
 Phase 11 (Integration Tests)
 ```
+
+**Note:** Phase 3b (Overlay Support) is sequenced after Phase 5 to allow end-to-end testing of the ortho pipeline before adding overlay complexity. The Manager (Phase 6+) will support both package types from the start.
 
 ---
 
@@ -396,6 +454,17 @@ Record significant decisions made during implementation:
 | 2025-11-28 | Coalesce tiles into single package | Ortho4XP creates per-tile dirs; we consolidate into regional packages |
 | 2025-11-28 | Skip DDS by default | XEarthLayer generates DDS on-demand via FUSE |
 | 2025-11-28 | PNG mask detection (not `*_sea.png`) | Ortho4XP uses `*_ZL16.png` naming for water masks |
+| 2025-11-28 | Store config in `.xearthlayer-repo` | Makes repositories portable and self-contained |
+| 2025-11-28 | Global part size setting | Curator decides once; applies to all packages in repo |
+| 2025-11-28 | Library index in repo root | Simple location, easy to find |
+| 2025-11-28 | Multi-phase release workflow | Avoids genesis paradox - can't have URLs before files are hosted |
+| 2025-11-28 | Interactive URL verification | Fetch and verify SHA-256 before accepting URLs |
+| 2025-11-28 | Shell out to tar/split | Common Linux utils; provide guidance if missing |
+| 2025-11-28 | Ortho before overlay | Complete ortho pipeline end-to-end before adding overlay complexity |
+| 2025-11-28 | Separate library/package hosting | Library on CDN, packages on GitHub releases (cost optimization) |
+| 2025-11-28 | Context-aware validation | Lenient parsing, strict validation per lifecycle stage (Initial/AwaitingUrls/Release) |
+| 2025-11-28 | ReleaseStatus state machine | Track package position in publish workflow (NotBuilt→AwaitingUrls→Ready→Released) |
+| 2025-11-28 | Archive parts may have empty URLs | Supports "genesis paradox" - metadata exists before files are uploaded |
 
 ---
 

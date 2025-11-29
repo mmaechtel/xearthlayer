@@ -121,14 +121,26 @@ REGIONAL SCENERY PACKAGE
 | 5 | packagetype | `Z` for ortho, `Y` for overlay |
 | 6 | mountpoint | Folder name in Custom Scenery (e.g., `zzXEL_eur_ortho`) |
 | 7 | filename | Complete archive filename (e.g., `zzXEL_eur-1.0.0.tar.gz`) |
-| 8 | partcount | Number of archive parts (u8, must be >= 1) |
+| 8 | partcount | Number of archive parts (may be 0 for draft metadata) |
 
 After line 8, two blank lines, then one line per part:
 - **sha256sum**: SHA-256 checksum of the part file
 - **localfilename**: Filename for the part (e.g., `zzXEL_eur-1.0.0.tar.gz.aa`)
-- **remoteurl**: Download URL for the part
+- **remoteurl**: Download URL for the part (may be empty during draft phase)
 
 Fields within each line are separated by **two spaces**.
+
+### Validation Contexts
+
+Package metadata is validated differently depending on its lifecycle stage:
+
+| Context | Part Count | URLs | Use Case |
+|---------|-----------|------|----------|
+| Initial | 0 allowed | Not required | After processing, before archive build |
+| AwaitingUrls | >= 1 required | May be empty | After build, before URL configuration |
+| Release | >= 1 required | All required | Ready for publication or already published |
+
+The parser is lenient (accepts 0 parts, empty URLs), while validation is context-aware. This design supports the multi-phase publish workflow where metadata evolves through stages.
 
 ### Example
 

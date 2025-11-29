@@ -45,12 +45,143 @@ pub struct PackageMetadata {
     pub parts: Vec<ArchivePart>,
 }
 
+/// Validation context for package metadata.
+///
+/// Different stages of the publish workflow require different validation rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationContext {
+    /// Initial metadata before archive is built.
+    /// Parts are optional, URLs are not required.
+    Initial,
+
+    /// After archive is built, awaiting URL configuration.
+    /// Parts are required, URLs may be empty.
+    AwaitingUrls,
+
+    /// Ready for release or already released.
+    /// Parts are required, all URLs must be present.
+    Release,
+}
+
+/// Validation error for package metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataValidationError {
+    /// No archive parts defined
+    NoParts,
+    /// Missing URL for a part
+    MissingUrl { part_index: usize, filename: String },
+    /// Empty checksum for a part
+    EmptyChecksum { part_index: usize, filename: String },
+}
+
+impl fmt::Display for MetadataValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MetadataValidationError::NoParts => {
+                write!(f, "no archive parts defined")
+            }
+            MetadataValidationError::MissingUrl {
+                part_index,
+                filename,
+            } => {
+                write!(f, "missing URL for part {} ({})", part_index + 1, filename)
+            }
+            MetadataValidationError::EmptyChecksum {
+                part_index,
+                filename,
+            } => {
+                write!(
+                    f,
+                    "empty checksum for part {} ({})",
+                    part_index + 1,
+                    filename
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetadataValidationError {}
+
 impl PackageMetadata {
     /// Generate the folder name for this package in Custom Scenery.
     ///
     /// Uses the mountpoint field which should already be in the correct format.
     pub fn folder_name(&self) -> &str {
         &self.mountpoint
+    }
+
+    /// Validate metadata for a specific context.
+    ///
+    /// Returns all validation errors found.
+    pub fn validate(&self, context: ValidationContext) -> Vec<MetadataValidationError> {
+        let mut errors = Vec::new();
+
+        match context {
+            ValidationContext::Initial => {
+                // Initial state: parts are optional, no URL requirements
+                // Just validate checksums if parts exist
+                for (i, part) in self.parts.iter().enumerate() {
+                    if part.checksum.is_empty() {
+                        errors.push(MetadataValidationError::EmptyChecksum {
+                            part_index: i,
+                            filename: part.filename.clone(),
+                        });
+                    }
+                }
+            }
+            ValidationContext::AwaitingUrls => {
+                // After build: parts required, URLs may be empty
+                if self.parts.is_empty() {
+                    errors.push(MetadataValidationError::NoParts);
+                }
+                for (i, part) in self.parts.iter().enumerate() {
+                    if part.checksum.is_empty() {
+                        errors.push(MetadataValidationError::EmptyChecksum {
+                            part_index: i,
+                            filename: part.filename.clone(),
+                        });
+                    }
+                }
+            }
+            ValidationContext::Release => {
+                // Ready for release: parts and URLs required
+                if self.parts.is_empty() {
+                    errors.push(MetadataValidationError::NoParts);
+                }
+                for (i, part) in self.parts.iter().enumerate() {
+                    if part.checksum.is_empty() {
+                        errors.push(MetadataValidationError::EmptyChecksum {
+                            part_index: i,
+                            filename: part.filename.clone(),
+                        });
+                    }
+                    if part.url.is_empty() {
+                        errors.push(MetadataValidationError::MissingUrl {
+                            part_index: i,
+                            filename: part.filename.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        errors
+    }
+
+    /// Check if metadata is valid for a specific context.
+    pub fn is_valid(&self, context: ValidationContext) -> bool {
+        self.validate(context).is_empty()
+    }
+
+    /// Check if all parts have URLs configured.
+    pub fn has_all_urls(&self) -> bool {
+        !self.parts.is_empty() && self.parts.iter().all(|p| !p.url.is_empty())
+    }
+
+    /// Check if the package has any parts defined.
+    pub fn has_parts(&self) -> bool {
+        !self.parts.is_empty()
     }
 }
 
@@ -189,17 +320,11 @@ pub fn parse_package_metadata(content: &str) -> Result<PackageMetadata, Metadata
     // Line 7: Filename
     let filename = lines[6].trim().to_string();
 
-    // Line 8: Part count
+    // Line 8: Part count (0 is allowed for initial/draft metadata)
     let part_count: usize = lines[7]
         .trim()
         .parse()
         .map_err(|_| MetadataParseError::InvalidPartCount(lines[7].trim().to_string()))?;
-
-    if part_count == 0 {
-        return Err(MetadataParseError::InvalidPartCount(
-            "0 (must be >= 1)".to_string(),
-        ));
-    }
 
     // Skip two blank lines, then parse parts
     // Parts start after the blank lines following line 8
@@ -219,15 +344,18 @@ pub fn parse_package_metadata(content: &str) -> Result<PackageMetadata, Metadata
         }
 
         let part_fields: Vec<&str> = line.split(FIELD_SEPARATOR).collect();
-        if part_fields.len() != 3 {
+        // Accept 2 or 3 fields - URL may be empty/missing for draft metadata
+        if part_fields.len() < 2 || part_fields.len() > 3 {
             return Err(MetadataParseError::InvalidPartLine(line.to_string()));
         }
 
-        parts.push(ArchivePart::new(
-            part_fields[0],
-            part_fields[1],
-            part_fields[2],
-        ));
+        let url = if part_fields.len() == 3 {
+            part_fields[2]
+        } else {
+            ""
+        };
+
+        parts.push(ArchivePart::new(part_fields[0], part_fields[1], url));
     }
 
     if parts.len() != part_count {
@@ -513,5 +641,207 @@ abc  file.aa  http://example.com/file.aa
         };
         assert!(err.to_string().contains("5"));
         assert!(err.to_string().contains("3"));
+    }
+
+    #[test]
+    fn test_parse_metadata_zero_parts() {
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+0
+
+
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        assert!(metadata.parts.is_empty());
+    }
+
+    #[test]
+    fn test_parse_metadata_parts_without_urls() {
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+2
+
+
+abc123  file.aa
+def456  file.ab
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        assert_eq!(metadata.parts.len(), 2);
+        assert!(metadata.parts[0].url.is_empty());
+        assert!(metadata.parts[1].url.is_empty());
+    }
+
+    #[test]
+    fn test_validation_initial_context() {
+        let metadata = parse_package_metadata(sample_metadata_content()).unwrap();
+        // Full metadata is valid for initial context
+        assert!(metadata.is_valid(ValidationContext::Initial));
+        assert!(metadata.validate(ValidationContext::Initial).is_empty());
+    }
+
+    #[test]
+    fn test_validation_initial_allows_no_parts() {
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+0
+
+
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        assert!(metadata.is_valid(ValidationContext::Initial));
+    }
+
+    #[test]
+    fn test_validation_awaiting_urls_requires_parts() {
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+0
+
+
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        let errors = metadata.validate(ValidationContext::AwaitingUrls);
+        assert!(!errors.is_empty());
+        assert!(matches!(errors[0], MetadataValidationError::NoParts));
+    }
+
+    #[test]
+    fn test_validation_awaiting_urls_allows_empty_urls() {
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+1
+
+
+abc123  file.aa
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        assert!(metadata.is_valid(ValidationContext::AwaitingUrls));
+    }
+
+    #[test]
+    fn test_validation_release_requires_urls() {
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+1
+
+
+abc123  file.aa
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        let errors = metadata.validate(ValidationContext::Release);
+        assert!(!errors.is_empty());
+        assert!(matches!(
+            errors[0],
+            MetadataValidationError::MissingUrl { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validation_release_valid() {
+        let metadata = parse_package_metadata(sample_metadata_content()).unwrap();
+        assert!(metadata.is_valid(ValidationContext::Release));
+    }
+
+    #[test]
+    fn test_validation_empty_checksum() {
+        // Create metadata programmatically with empty checksum since
+        // the parser splits on "  " which makes it hard to test with raw content
+        let mut metadata = parse_package_metadata(sample_metadata_content()).unwrap();
+        metadata.parts[0].checksum = String::new();
+
+        let errors = metadata.validate(ValidationContext::Release);
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, MetadataValidationError::EmptyChecksum { .. })));
+    }
+
+    #[test]
+    fn test_has_parts() {
+        let metadata = parse_package_metadata(sample_metadata_content()).unwrap();
+        assert!(metadata.has_parts());
+
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+0
+
+
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        assert!(!metadata.has_parts());
+    }
+
+    #[test]
+    fn test_has_all_urls() {
+        let metadata = parse_package_metadata(sample_metadata_content()).unwrap();
+        assert!(metadata.has_all_urls());
+
+        let content = r#"REGIONAL SCENERY PACKAGE
+1.0.0
+EUROPE  1.0.0
+2025-12-20T20:49:23Z
+Z
+zzXEL_eur_ortho
+zzXEL_eur-1.0.0.tar.gz
+1
+
+
+abc123  file.aa
+"#;
+        let metadata = parse_package_metadata(content).unwrap();
+        assert!(!metadata.has_all_urls());
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        let err = MetadataValidationError::NoParts;
+        assert!(err.to_string().contains("no archive parts"));
+
+        let err = MetadataValidationError::MissingUrl {
+            part_index: 0,
+            filename: "file.aa".to_string(),
+        };
+        assert!(err.to_string().contains("missing URL"));
+        assert!(err.to_string().contains("file.aa"));
+
+        let err = MetadataValidationError::EmptyChecksum {
+            part_index: 1,
+            filename: "file.ab".to_string(),
+        };
+        assert!(err.to_string().contains("empty checksum"));
     }
 }

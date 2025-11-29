@@ -305,9 +305,9 @@ impl Repository {
     /// Generate empty library index content.
     fn empty_library_content(timestamp: &DateTime<Utc>) -> String {
         format!(
-            "XEARTHLAYER PACKAGE LIBRARY\n\
+            "XEARTHLAYER REGIONAL SCENERY PACKAGE LIBRARY\n\
              1.0.0\n\
-             xearthlayer-official\n\
+             EARTH\n\
              0\n\
              {}\n\
              0\n",
@@ -544,9 +544,9 @@ mod tests {
         let content = fs::read_to_string(temp.path().join(LIBRARY_FILE)).unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
-        assert_eq!(lines[0], "XEARTHLAYER PACKAGE LIBRARY");
+        assert_eq!(lines[0], "XEARTHLAYER REGIONAL SCENERY PACKAGE LIBRARY");
         assert_eq!(lines[1], "1.0.0");
-        assert_eq!(lines[2], "xearthlayer-official");
+        assert_eq!(lines[2], "EARTH");
         assert_eq!(lines[3], "0"); // sequence
                                    // lines[4] is timestamp
         assert_eq!(lines[5], "0"); // package count

@@ -38,13 +38,26 @@
 //! println!("Processed {} tiles", summary.tile_count);
 //! ```
 
+mod archive;
+mod config;
 mod error;
+mod library;
 mod metadata;
 mod processor;
 mod region;
+mod release;
 mod repository;
+mod urls;
 
+pub use archive::{
+    archive_filename, build_archive, check_required_tools, format_archive_size, ArchiveBuildResult,
+    ArchivePart,
+};
+pub use config::{
+    read_config, write_config, RepoConfig, DEFAULT_PART_SIZE, MAX_PART_SIZE, MIN_PART_SIZE,
+};
 pub use error::{PublishError, PublishResult};
+pub use library::{LibraryManager, DEFAULT_SCOPE, LIBRARY_FILENAME, SPEC_VERSION};
 pub use metadata::{
     add_archive_parts, bump_package_version, bump_version, calculate_sha256, create_metadata,
     generate_initial_metadata, has_metadata, read_metadata, update_version, write_metadata,
@@ -55,4 +68,9 @@ pub use processor::{
     TileInfo, TileWarning,
 };
 pub use region::{analyze_tiles, suggest_region, RegionSuggestion, SuggestedRegion};
+pub use release::{
+    build_package, configure_urls, get_release_status, release_package, validate_repository,
+    BuildResult, ReleaseResult, ReleaseStatus, UrlConfigResult,
+};
 pub use repository::Repository;
+pub use urls::{generate_part_urls, validate_url, UrlVerification, UrlVerifier};

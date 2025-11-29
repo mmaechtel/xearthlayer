@@ -28,7 +28,10 @@ mod metadata;
 mod types;
 
 pub use library::{parse_package_library, serialize_package_library, LibraryEntry, PackageLibrary};
-pub use metadata::{parse_package_metadata, serialize_package_metadata, PackageMetadata};
+pub use metadata::{
+    parse_package_metadata, serialize_package_metadata, MetadataValidationError, PackageMetadata,
+    ValidationContext,
+};
 pub use types::{ArchivePart, PackageType};
 
 // Re-export semver::Version for convenience
