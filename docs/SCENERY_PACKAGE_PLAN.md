@@ -192,26 +192,45 @@ Add overlay package support to the publisher.
 
 ---
 
-## Phase 4: Publisher CLI
+## Phase 4: Publisher CLI ✓
 
 Command-line interface for Publisher.
 
 ### Commands
 
-- [ ] `xearthlayer publish init [<path>]` - Initialize repository
-- [ ] `xearthlayer publish scan --source <path>` - Scan and report tile info
-- [ ] `xearthlayer publish add --source <path> --region <code> --type <ortho|overlay> [--version <ver>]`
-- [ ] `xearthlayer publish list` - List packages in repository
-- [ ] `xearthlayer publish build [--region <code>] [--type <type>]` - Build archives
-- [ ] `xearthlayer publish urls --region <code> --type <type>` - Interactive URL configuration
-- [ ] `xearthlayer publish version --region <code> --type <type> <--bump <major|minor|patch>|--set <version>>`
-- [ ] `xearthlayer publish release` - Update library index
-- [ ] `xearthlayer publish validate` - Validate repository state
-- [ ] `xearthlayer publish remove --region <code> --type <type>` - Remove package
+- [x] `xearthlayer publish init [<path>]` - Initialize repository
+- [x] `xearthlayer publish scan --source <path>` - Scan and report tile info
+- [x] `xearthlayer publish add --source <path> --region <code> --type <ortho|overlay> [--version <ver>]`
+- [x] `xearthlayer publish list` - List packages in repository
+- [x] `xearthlayer publish build [--region <code>] [--type <type>]` - Build archives
+- [x] `xearthlayer publish urls --region <code> --type <type> --base-url <url>` - URL configuration
+- [x] `xearthlayer publish version --region <code> --type <type> <--bump <major|minor|patch>|--set <version>>`
+- [x] `xearthlayer publish release --region <code> --type <type> --metadata-url <url>` - Update library index
+- [x] `xearthlayer publish status [--region <code>] [--type <type>]` - Show release status
+- [x] `xearthlayer publish validate` - Validate repository state
+
+**Design Decision**: Command Pattern with trait-based dependency injection enables testable handlers that depend only on interfaces.
+
+### Architecture
+
+```
+xearthlayer-cli/src/commands/publish/
+├── mod.rs        # Module exports and command dispatch
+├── traits.rs     # Core interfaces (Output, PublisherService, CommandHandler)
+├── services.rs   # Concrete implementations wrapping xearthlayer publisher
+├── args.rs       # CLI argument types and parsing (clap-derived)
+├── handlers.rs   # Command handlers implementing business logic
+└── output.rs     # Shared output formatting utilities
+```
 
 ### Files
 
-- [ ] `xearthlayer-cli/src/commands/publish.rs`
+- [x] `xearthlayer-cli/src/commands/publish/mod.rs`
+- [x] `xearthlayer-cli/src/commands/publish/traits.rs`
+- [x] `xearthlayer-cli/src/commands/publish/services.rs`
+- [x] `xearthlayer-cli/src/commands/publish/args.rs`
+- [x] `xearthlayer-cli/src/commands/publish/handlers.rs`
+- [x] `xearthlayer-cli/src/commands/publish/output.rs`
 
 ---
 
@@ -397,7 +416,7 @@ Phase 2 (Publisher Core) ✓
     ↓
 Phase 3 (Publisher Archive - Ortho) ✓
     ↓
-Phase 4 (Publisher CLI)
+Phase 4 (Publisher CLI) ✓
     ↓
 Phase 5 (Test Ortho Package)
     ↓
@@ -465,6 +484,9 @@ Record significant decisions made during implementation:
 | 2025-11-28 | Context-aware validation | Lenient parsing, strict validation per lifecycle stage (Initial/AwaitingUrls/Release) |
 | 2025-11-28 | ReleaseStatus state machine | Track package position in publish workflow (NotBuilt→AwaitingUrls→Ready→Released) |
 | 2025-11-28 | Archive parts may have empty URLs | Supports "genesis paradox" - metadata exists before files are uploaded |
+| 2025-11-28 | Command Pattern for CLI | Separates concerns - handlers own logic, services abstract library, traits enable testing |
+| 2025-11-28 | Trait-based dependency injection | Handlers depend on Output/PublisherService interfaces, not implementations |
+| 2025-11-28 | CommandContext bundles dependencies | Single injection point for handler dependencies |
 
 ---
 

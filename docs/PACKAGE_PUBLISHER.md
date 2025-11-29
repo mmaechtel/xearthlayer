@@ -290,46 +290,129 @@ Clients can quickly check `sequence > cached_sequence` to know if updates exist.
 
 ```bash
 # Initialize repository
-xearthlayer publish init [<path>]
+xearthlayer publish init [<path>] [--part-size <size>]
+
+# Scan Ortho4XP output and report tile information
+xearthlayer publish scan --source <ortho4xp_tiles_path>
 
 # Add Ortho4XP output to a package
 xearthlayer publish add \
   --source <ortho4xp_tiles_path> \
   --region <region_code> \
-  --type <ortho|overlay> \
-  [--version <semver>]
+  [--type <ortho|overlay>] \
+  [--version <semver>] \
+  [--repo <path>]
+
+# List packages in repository
+xearthlayer publish list [<repo_path>] [--verbose]
 
 # Build archives for a package
 xearthlayer publish build \
   --region <region_code> \
-  --type <ortho|overlay> \
-  [--part-size <bytes>]
+  [--type <ortho|overlay>] \
+  [--repo <path>]
 
 # Set download URLs
 xearthlayer publish urls \
   --region <region_code> \
-  --type <ortho|overlay> \
-  --base-url <url>
+  [--type <ortho|overlay>] \
+  --base-url <url> \
+  [--verify] \
+  [--repo <path>]
 
 # Bump or set version
 xearthlayer publish version \
   --region <region_code> \
-  --type <ortho|overlay> \
-  <--bump major|minor|patch | --set <version>>
+  [--type <ortho|overlay>] \
+  <--bump major|minor|patch | --set <version>> \
+  [--repo <path>]
 
 # Finalize and update library index
-xearthlayer publish release
-
-# List packages in repository
-xearthlayer publish list
-
-# Remove a package from repository
-xearthlayer publish remove \
+xearthlayer publish release \
   --region <region_code> \
-  --type <ortho|overlay>
+  [--type <ortho|overlay>] \
+  --metadata-url <url> \
+  [--repo <path>]
+
+# Show package release status
+xearthlayer publish status \
+  [--region <region_code>] \
+  [--type <ortho|overlay>] \
+  [<repo_path>]
 
 # Validate repository integrity
-xearthlayer publish validate
+xearthlayer publish validate [<repo_path>]
+```
+
+### CLI Architecture
+
+The CLI is implemented using the **Command Pattern** with **trait-based dependency injection** for testability and maintainability.
+
+#### Module Structure
+
+```
+xearthlayer-cli/src/commands/publish/
+├── mod.rs        # Module exports and command dispatch
+├── traits.rs     # Core interfaces (Output, PublisherService, CommandHandler)
+├── services.rs   # Concrete implementations wrapping xearthlayer publisher
+├── args.rs       # CLI argument types and parsing (clap-derived)
+├── handlers.rs   # Command handlers implementing business logic
+└── output.rs     # Shared output formatting utilities
+```
+
+#### Core Traits
+
+```rust
+/// Abstracts console output for testable handlers
+pub trait Output: Send + Sync {
+    fn println(&self, message: &str);
+    fn print(&self, message: &str);
+    fn newline(&self);
+    fn header(&self, title: &str);
+    fn indented(&self, message: &str);
+}
+
+/// Abstracts all publisher operations
+pub trait PublisherService: Send + Sync {
+    fn init_repository(&self, path: &Path) -> Result<Box<dyn RepositoryOperations>, CliError>;
+    fn open_repository(&self, path: &Path) -> Result<Box<dyn RepositoryOperations>, CliError>;
+    fn scan_scenery(&self, source: &Path) -> Result<SceneryScanResult, CliError>;
+    fn process_tiles(...) -> Result<ProcessSummary, CliError>;
+    // ... other operations
+}
+
+/// Each command handler implements this trait
+pub trait CommandHandler {
+    type Args;
+    fn execute(args: Self::Args, ctx: &CommandContext<'_>) -> Result<(), CliError>;
+}
+```
+
+#### Design Benefits
+
+| Benefit | Description |
+|---------|-------------|
+| **Single Responsibility** | Each handler owns one command's logic |
+| **Dependency Injection** | Handlers depend only on trait interfaces |
+| **Testability** | Handlers can be tested with mock implementations |
+| **Extensibility** | Adding commands means adding a handler |
+| **Consistent Interface** | CommandHandler trait enforces uniform API |
+
+#### Testing Example
+
+```rust
+// Production usage
+let output = ConsoleOutput::new();
+let publisher = DefaultPublisherService::new();
+let ctx = CommandContext::new(&output, &publisher);
+InitHandler::execute(args, &ctx)?;
+
+// Test usage with mocks
+let output = MockOutput::new();
+let publisher = MockPublisherService::new();
+let ctx = CommandContext::new(&output, &publisher);
+InitHandler::execute(args, &ctx)?;
+assert!(output.contains("Initialized"));
 ```
 
 ### Output Examples
