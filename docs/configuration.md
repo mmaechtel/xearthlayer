@@ -171,6 +171,26 @@ Controls log output.
 file = ~/.xearthlayer/xearthlayer.log
 ```
 
+### [packages]
+
+Controls package manager behavior.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `library_url` | URL | (none) | URL to the package library index file |
+| `temp_dir` | path | system temp | Temporary directory for package downloads |
+
+**Example:**
+```ini
+[packages]
+library_url = https://example.com/xearthlayer_package_library.txt
+temp_dir = ~/Downloads/xearthlayer-temp
+```
+
+**Notes:**
+- When `library_url` is set, you don't need to pass `--library-url` to package commands
+- The `temp_dir` is used for downloading archives before extraction; files are cleaned up after installation
+
 ## Complete Example
 
 ```ini
@@ -200,6 +220,10 @@ timeout = 10
 
 [logging]
 file = ~/.xearthlayer/xearthlayer.log
+
+[packages]
+; library_url = https://example.com/xearthlayer_package_library.txt
+; temp_dir = ~/Downloads/xearthlayer-temp
 ```
 
 ## CLI Overrides
