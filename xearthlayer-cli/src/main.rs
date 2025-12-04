@@ -32,6 +32,9 @@ use xearthlayer::config::{
     SceneryDetectionResult, TextureConfig,
 };
 use xearthlayer::dds::DdsFormat;
+use xearthlayer::log::TracingLogger;
+use xearthlayer::manager::{LocalPackageStore, MountManager};
+use xearthlayer::package::PackageType;
 use xearthlayer::provider::ProviderConfig;
 use xearthlayer::service::ServiceConfig;
 
@@ -162,6 +165,37 @@ enum Commands {
         no_cache: bool,
     },
 
+    /// Mount all installed ortho packages for X-Plane
+    Serve {
+        /// Scenery directory containing installed packages (default: from config)
+        #[arg(long)]
+        scenery_dir: Option<PathBuf>,
+
+        /// Imagery provider (default: from config)
+        #[arg(long, value_enum)]
+        provider: Option<ProviderType>,
+
+        /// Google Maps API key (default: from config)
+        #[arg(long)]
+        google_api_key: Option<String>,
+
+        /// DDS compression format (default: from config)
+        #[arg(long, value_enum)]
+        dds_format: Option<DdsCompression>,
+
+        /// Download timeout in seconds (default: from config)
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// Maximum parallel downloads (default: from config)
+        #[arg(long)]
+        parallel: Option<usize>,
+
+        /// Disable caching (always generate tiles fresh)
+        #[arg(long)]
+        no_cache: bool,
+    },
+
     /// Download a single tile to a file (for testing)
     Download {
         /// Latitude in decimal degrees
@@ -242,6 +276,23 @@ fn main() {
             provider,
             google_api_key,
         } => run_download(lat, lon, zoom, output, dds_format, provider, google_api_key),
+        Commands::Serve {
+            scenery_dir,
+            provider,
+            google_api_key,
+            dds_format,
+            timeout,
+            parallel,
+            no_cache,
+        } => run_serve(
+            scenery_dir,
+            provider,
+            google_api_key,
+            dds_format,
+            timeout,
+            parallel,
+            no_cache,
+        ),
     };
 
     if let Err(e) = result {
@@ -567,6 +618,205 @@ fn run_download(
 
     // Save to file
     runner.save_dds(&output, &dds_data, &texture_config)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Serve Command - Mount All Installed Packages
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn run_serve(
+    scenery_dir: Option<PathBuf>,
+    provider: Option<ProviderType>,
+    google_api_key: Option<String>,
+    dds_format: Option<DdsCompression>,
+    timeout: Option<u64>,
+    parallel: Option<usize>,
+    no_cache: bool,
+) -> Result<(), CliError> {
+    let runner = CliRunner::new()?;
+    runner.log_startup("serve");
+    let config = runner.config();
+
+    // Determine scenery directory
+    let scenery_dir = match scenery_dir {
+        Some(dir) => dir,
+        None => config.xplane.scenery_dir.clone().ok_or_else(|| {
+            CliError::Config(
+                "No scenery directory configured. \
+                 Set scenery_dir in config.ini or use --scenery-dir"
+                    .to_string(),
+            )
+        })?,
+    };
+
+    if !scenery_dir.exists() {
+        return Err(CliError::Config(format!(
+            "Scenery directory does not exist: {}",
+            scenery_dir.display()
+        )));
+    }
+
+    // Resolve settings from CLI and config
+    let provider_config = resolve_provider(provider, google_api_key, config)?;
+    let format = resolve_dds_format(dds_format, config);
+    let timeout_secs = timeout.unwrap_or(config.download.timeout);
+    let parallel_downloads = parallel.unwrap_or(config.download.parallel);
+
+    // Build configurations
+    let texture_config = TextureConfig::new(format).with_mipmap_count(5);
+
+    let download_config = DownloadConfig::new()
+        .with_timeout_secs(timeout_secs)
+        .with_max_retries(3)
+        .with_parallel_downloads(parallel_downloads);
+
+    let service_config = ServiceConfig::builder()
+        .texture(texture_config)
+        .download(download_config)
+        .cache_enabled(!no_cache)
+        .cache_directory(config.cache.directory.clone())
+        .cache_memory_size(config.cache.memory_size)
+        .cache_disk_size(config.cache.disk_size)
+        .generation_threads(config.generation.threads)
+        .generation_timeout(config.generation.timeout)
+        .build();
+
+    // Print banner
+    println!("XEarthLayer Multi-Mount Server v{}", xearthlayer::VERSION);
+    println!("=====================================");
+    println!();
+    println!("Scenery Dir: {}", scenery_dir.display());
+    println!("DDS Format:  {:?}", texture_config.format());
+    println!();
+
+    // Discover installed packages
+    let store = LocalPackageStore::new(&scenery_dir);
+    let packages = store
+        .list()
+        .map_err(|e| CliError::Packages(e.to_string()))?;
+
+    // Filter to ortho packages only
+    let ortho_packages: Vec<_> = packages
+        .iter()
+        .filter(|p| p.package_type() == PackageType::Ortho)
+        .collect();
+
+    if ortho_packages.is_empty() {
+        println!("No ortho packages found in {}.", scenery_dir.display());
+        println!();
+        println!("Use 'xearthlayer packages install' to install packages first.");
+        return Ok(());
+    }
+
+    println!("Found {} ortho package(s):", ortho_packages.len());
+    for pkg in &ortho_packages {
+        println!(
+            "  {} v{} - {}",
+            pkg.region(),
+            pkg.version(),
+            pkg.path.display()
+        );
+    }
+    println!();
+
+    // Print cache info
+    if !no_cache {
+        println!(
+            "Cache: Enabled ({} memory, {} disk)",
+            format_size(config.cache.memory_size),
+            format_size(config.cache.disk_size)
+        );
+    } else {
+        println!("Cache: Disabled (all tiles generated fresh)");
+    }
+    println!();
+
+    // Create mount manager
+    let mut mount_manager = MountManager::new();
+
+    // Create a logger for all services
+    let logger: Arc<dyn xearthlayer::log::Logger> = Arc::new(TracingLogger);
+
+    // Mount all packages
+    println!("Mounting packages...");
+    let results = mount_manager
+        .mount_all(&store, |_pkg| {
+            xearthlayer::service::XEarthLayerService::new(
+                service_config.clone(),
+                provider_config.clone(),
+                logger.clone(),
+            )
+        })
+        .map_err(|e| CliError::Packages(e.to_string()))?;
+
+    // Report results
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    for result in &results {
+        if result.success {
+            println!(
+                "  Mounted {} ({}) at {}",
+                result.region,
+                result.package_type,
+                result.mountpoint.display()
+            );
+            success_count += 1;
+        } else {
+            println!(
+                "  Failed {} ({}): {}",
+                result.region,
+                result.package_type,
+                result.error.as_deref().unwrap_or("Unknown error")
+            );
+            failure_count += 1;
+        }
+    }
+    println!();
+
+    if success_count == 0 {
+        return Err(CliError::Serve(
+            xearthlayer::service::ServiceError::IoError(std::io::Error::other(
+                "Failed to mount any packages",
+            )),
+        ));
+    }
+
+    println!(
+        "{} package(s) mounted successfully{}",
+        success_count,
+        if failure_count > 0 {
+            format!(", {} failed", failure_count)
+        } else {
+            String::new()
+        }
+    );
+    println!();
+    println!("Press Ctrl+C to unmount all packages and exit");
+    println!();
+
+    // Set up signal handler for graceful shutdown
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+
+    ctrlc::set_handler(move || {
+        println!();
+        println!("Received shutdown signal, unmounting all packages...");
+        shutdown_clone.store(true, Ordering::SeqCst);
+    })
+    .map_err(|e| CliError::Config(format!("Failed to set signal handler: {}", e)))?;
+
+    // Wait for shutdown signal
+    while !shutdown.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Unmount all packages
+    mount_manager.unmount_all();
+    println!("All packages unmounted.");
 
     Ok(())
 }

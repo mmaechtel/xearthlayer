@@ -422,23 +422,40 @@ Follows same Command Pattern architecture as Publisher CLI with trait-based depe
 
 ---
 
-## Phase 9: Multi-Mount Support
+## Phase 9: Multi-Mount Support ✓
 
-Modify start command to mount all installed ortho packages.
+Mount all installed ortho packages for X-Plane with a single command.
 
 ### Tasks
 
-- [ ] Enumerate installed ortho packages
-- [ ] Create FUSE mount for each package
-- [ ] Track mount state (BackgroundSession per mount)
-- [ ] Handle individual mount failures gracefully
-- [ ] Clean shutdown of all mounts
-- [ ] Update `start` command
+- [x] Enumerate installed ortho packages via `LocalPackageStore`
+- [x] Create FUSE mount for each package via `MountManager`
+- [x] Track mount state (`BackgroundSession` per mount in HashMap)
+- [x] Handle individual mount failures gracefully (continue with others)
+- [x] Clean shutdown of all mounts (unmount in reverse order)
+- [x] Add `xearthlayer serve` command
+
+### Implementation
+
+The `serve` command discovers all installed ortho packages from the configured scenery directory and mounts each one using FUSE. Each mount overlays the package directory with on-demand DDS texture generation.
+
+```
+xearthlayer serve [--scenery-dir <path>] [--provider <bing|go2|google>] [--no-cache]
+```
 
 ### Files
 
-- [ ] `xearthlayer/src/manager/mounts.rs`
-- [ ] Update `xearthlayer-cli/src/commands/start.rs`
+- [x] `xearthlayer/src/manager/mounts.rs` - MountManager, MountResult, ActiveMount, ServiceBuilder
+- [x] Update `xearthlayer-cli/src/main.rs` - Add Serve command and run_serve function
+
+### Design Notes
+
+- Uses existing `start` command for single-package mounting (backward compatible)
+- New `serve` command for multi-mount (production use case)
+- Each ortho package gets its own service instance with shared config
+- `MountManager` tracks `BackgroundSession` per region in HashMap
+- Graceful shutdown via Ctrl+C unmounts all packages
+- Failed mounts don't block successful ones (reports failures at end)
 
 ---
 
@@ -509,14 +526,14 @@ Phase 7 (Manager Install) ✓
     ↓
 Phase 8 (Manager CLI) ✓
     ↓
-Phase 9 (Multi-Mount) ←── Next
+Phase 9 (Multi-Mount) ✓
     ↓
-Phase 10 (Config/Polish)
+Phase 10 (Config/Polish) ←── Next
     ↓
 Phase 11 (Integration Tests)
 ```
 
-**Note:** Phase 3b (Overlay Support) completed. Both ortho and overlay package types are now fully supported by the Publisher.
+**Note:** Phases 1-9 completed. The system now supports full end-to-end workflow: create packages (Publisher), install/update packages (Manager), and serve with multi-mount (Serve command).
 
 ---
 
@@ -581,6 +598,10 @@ Record significant decisions made during implementation:
 | 2025-12-03 | Range request support | HttpDownloader checks Accept-Ranges header and resumes partial downloads |
 | 2025-12-03 | Shell-based extraction | Using `tar` command for extraction matches Publisher's use of `tar` for creation |
 | 2025-12-03 | Stage-based progress reporting | InstallStage enum provides clear progress tracking through installation workflow |
+| 2025-12-03 | MountManager with HashMap<region, session> | Track multiple BackgroundSession instances by region; auto-unmount on drop |
+| 2025-12-03 | Separate serve command | Keep `start` for single-pack, add `serve` for multi-mount production use |
+| 2025-12-03 | Graceful failure handling | Failed mounts don't block successful ones; report all at end |
+| 2025-12-03 | Service factory pattern for mounts | Create service instance per package with shared config via closure |
 
 ---
 

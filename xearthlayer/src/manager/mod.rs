@@ -46,6 +46,7 @@ mod error;
 mod extractor;
 mod installer;
 mod local;
+mod mounts;
 mod traits;
 mod updates;
 
@@ -57,5 +58,6 @@ pub use error::{ManagerError, ManagerResult};
 pub use extractor::{check_required_tools, ShellExtractor};
 pub use installer::{InstallProgressCallback, InstallResult, InstallStage, PackageInstaller};
 pub use local::{InstalledPackage, LocalPackageStore, MountStatus};
+pub use mounts::{ActiveMount, MountManager, MountResult, ServiceBuilder};
 pub use traits::{ArchiveExtractor, LibraryClient, PackageDownloader, ProgressCallback};
 pub use updates::{PackageInfo, PackageStatus, UpdateChecker};
