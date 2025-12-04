@@ -178,9 +178,18 @@ fn create_tar_gz(source_dir: &Path, archive_path: &Path) -> PublishResult<()> {
         .parent()
         .ok_or_else(|| PublishError::InvalidPath("source directory has no parent".to_string()))?;
 
+    // Convert archive path to absolute since we're running tar from a different directory
+    let abs_archive_path = if archive_path.is_absolute() {
+        archive_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| PublishError::ArchiveFailed(format!("failed to get cwd: {}", e)))?
+            .join(archive_path)
+    };
+
     let output = Command::new("tar")
         .current_dir(parent_dir)
-        .args(["-czf", archive_path.to_str().unwrap(), dir_name])
+        .args(["-czf", abs_archive_path.to_str().unwrap(), dir_name])
         .output()
         .map_err(|e| PublishError::ArchiveFailed(format!("failed to run tar: {}", e)))?;
 
