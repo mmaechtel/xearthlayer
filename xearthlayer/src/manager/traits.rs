@@ -100,7 +100,6 @@ pub trait PackageDownloader: Send + Sync {
 ///
 /// This trait abstracts archive extraction to support different formats
 /// and enable testing.
-#[allow(dead_code)] // Will be used in Phase 6 implementation
 pub trait ArchiveExtractor: Send + Sync {
     /// Extract an archive to a destination directory.
     ///
