@@ -43,9 +43,9 @@ pub enum PackagesCommands {
 
     /// Check for package updates
     Check {
-        /// Library URL to check against
+        /// Library URL to check against (default: from config)
         #[arg(long)]
-        library_url: String,
+        library_url: Option<String>,
 
         /// Installation directory (default: from config)
         #[arg(long)]
@@ -61,15 +61,15 @@ pub enum PackagesCommands {
         #[arg(long, value_enum, default_value = "ortho")]
         r#type: PackageTypeArg,
 
-        /// Library URL to install from
+        /// Library URL to install from (default: from config)
         #[arg(long)]
-        library_url: String,
+        library_url: Option<String>,
 
         /// Installation directory (default: from config)
         #[arg(long)]
         install_dir: Option<PathBuf>,
 
-        /// Temporary directory for downloads (default: system temp)
+        /// Temporary directory for downloads (default: from config or system temp)
         #[arg(long)]
         temp_dir: Option<PathBuf>,
     },
@@ -83,15 +83,15 @@ pub enum PackagesCommands {
         #[arg(long, value_enum)]
         r#type: Option<PackageTypeArg>,
 
-        /// Library URL to check for updates
+        /// Library URL to check for updates (default: from config)
         #[arg(long)]
-        library_url: String,
+        library_url: Option<String>,
 
         /// Installation directory (default: from config)
         #[arg(long)]
         install_dir: Option<PathBuf>,
 
-        /// Temporary directory for downloads (default: system temp)
+        /// Temporary directory for downloads (default: from config or system temp)
         #[arg(long)]
         temp_dir: Option<PathBuf>,
 

@@ -459,33 +459,49 @@ xearthlayer serve [--scenery-dir <path>] [--provider <bing|go2|google>] [--no-ca
 
 ---
 
-## Phase 10: Configuration & Polish
+## Phase 10: Configuration & Polish ✓
 
 Configuration options and UX improvements.
 
 ### Configuration
 
-- [ ] Add `[packages]` section to config.ini
-- [ ] `library_root` setting
-- [ ] `install_location` setting
-- [ ] `download_threads` setting
+- [x] Add `[packages]` section to config.ini
+- [x] `library_url` setting - URL to package library index
+- [x] `temp_dir` setting - Temporary directory for downloads
+- [x] Uses existing `[xplane].scenery_dir` as install location
 
-### Update Notifications
+### CLI Improvements
 
-- [ ] Check for updates on first run
-- [ ] Display notification (don't repeat)
-- [ ] Respect quiet mode
+- [x] All packages commands use config defaults
+- [x] `--library-url` optional if configured in config.ini
+- [x] User-friendly error messages for missing config
 
-### Error Messages
+### Implementation
 
-- [ ] User-friendly error messages
-- [ ] Disk space warnings
-- [ ] Network error guidance
+The `[packages]` section in config.ini:
+```ini
+[packages]
+; URL to the XEarthLayer package library index
+library_url = https://example.com/library.txt
+; Temporary directory for package downloads (default: system temp dir)
+temp_dir = /tmp/xearthlayer
+```
 
-### Documentation
+CLI commands now use these defaults:
+- `xearthlayer packages check` - no `--library-url` required if configured
+- `xearthlayer packages install` - no `--library-url` required if configured
+- `xearthlayer packages update` - no `--library-url` required if configured
 
-- [ ] Update README with package commands
-- [ ] Add examples to CLI help text
+### Files
+
+- [x] `xearthlayer/src/config/file.rs` - Add PackagesSettings struct
+- [x] `xearthlayer/src/config/mod.rs` - Export PackagesSettings
+- [x] `xearthlayer-cli/src/commands/packages/args.rs` - Make library_url optional
+- [x] `xearthlayer-cli/src/commands/packages/mod.rs` - Use config defaults
+
+### Deferred Items
+
+Update notifications, disk space warnings, and additional documentation deferred to future work.
 
 ---
 
@@ -528,12 +544,15 @@ Phase 8 (Manager CLI) ✓
     ↓
 Phase 9 (Multi-Mount) ✓
     ↓
-Phase 10 (Config/Polish) ←── Next
+Phase 10 (Config/Polish) ✓
     ↓
-Phase 11 (Integration Tests)
+Phase 11 (Integration Tests) ←── Next
 ```
 
-**Note:** Phases 1-9 completed. The system now supports full end-to-end workflow: create packages (Publisher), install/update packages (Manager), and serve with multi-mount (Serve command).
+**Note:** Phases 1-10 completed. The system now supports full end-to-end workflow with configuration:
+- Create packages (Publisher)
+- Install/update packages (Manager with config defaults)
+- Serve with multi-mount (Serve command)
 
 ---
 
@@ -602,6 +621,9 @@ Record significant decisions made during implementation:
 | 2025-12-03 | Separate serve command | Keep `start` for single-pack, add `serve` for multi-mount production use |
 | 2025-12-03 | Graceful failure handling | Failed mounts don't block successful ones; report all at end |
 | 2025-12-03 | Service factory pattern for mounts | Create service instance per package with shared config via closure |
+| 2025-12-03 | PackagesSettings in ConfigFile | New `[packages]` section for library_url and temp_dir settings |
+| 2025-12-03 | Optional library_url in CLI | Falls back to config; user-friendly error if neither specified |
+| 2025-12-03 | Reuse scenery_dir for installs | No separate install_location - use existing `[xplane].scenery_dir` |
 
 ---
 

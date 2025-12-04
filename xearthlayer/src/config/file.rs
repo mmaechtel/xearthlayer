@@ -48,6 +48,8 @@ pub struct ConfigFile {
     pub generation: GenerationSettings,
     /// X-Plane settings
     pub xplane: XPlaneSettings,
+    /// Package manager settings
+    pub packages: PackagesSettings,
     /// Logging settings
     pub logging: LoggingSettings,
 }
@@ -107,6 +109,16 @@ pub struct XPlaneSettings {
     pub scenery_dir: Option<PathBuf>,
 }
 
+/// Package manager configuration.
+#[derive(Debug, Clone)]
+pub struct PackagesSettings {
+    /// URL to the package library index.
+    /// This is where the package manager fetches the list of available packages.
+    pub library_url: Option<String>,
+    /// Temporary directory for downloads (default: system temp dir).
+    pub temp_dir: Option<PathBuf>,
+}
+
 /// Logging configuration.
 #[derive(Debug, Clone)]
 pub struct LoggingSettings {
@@ -143,6 +155,10 @@ impl Default for ConfigFile {
                 timeout: 10,
             },
             xplane: XPlaneSettings { scenery_dir: None },
+            packages: PackagesSettings {
+                library_url: None,
+                temp_dir: None,
+            },
             logging: LoggingSettings {
                 file: config_dir.join("xearthlayer.log"),
             },
@@ -321,6 +337,22 @@ impl ConfigFile {
             }
         }
 
+        // [packages] section
+        if let Some(section) = ini.section(Some("packages")) {
+            if let Some(v) = section.get("library_url") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    config.packages.library_url = Some(v.to_string());
+                }
+            }
+            if let Some(v) = section.get("temp_dir") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    config.packages.temp_dir = Some(expand_tilde(v));
+                }
+            }
+        }
+
         // [logging] section
         if let Some(section) = ini.section(Some("logging")) {
             if let Some(v) = section.get("file") {
@@ -340,6 +372,13 @@ impl ConfigFile {
         let scenery_dir = self
             .xplane
             .scenery_dir
+            .as_ref()
+            .map(|p| path_to_string(p))
+            .unwrap_or_default();
+        let library_url = self.packages.library_url.as_deref().unwrap_or("");
+        let temp_dir = self
+            .packages
+            .temp_dir
             .as_ref()
             .map(|p| path_to_string(p))
             .unwrap_or_default();
@@ -389,7 +428,16 @@ timeout = {}
 [xplane]
 ; X-Plane Custom Scenery directory for mounting scenery packs
 ; If empty, auto-detects from ~/.x-plane/x-plane_install_12.txt
+; This is also where packages are installed by 'xearthlayer packages install'
 scenery_dir = {}
+
+[packages]
+; URL to the XEarthLayer package library index
+; This is where available packages are discovered for 'xearthlayer packages check/install'
+library_url = {}
+; Temporary directory for package downloads (default: system temp dir)
+; Large packages are downloaded here before extraction
+temp_dir = {}
 
 [logging]
 ; Log file path (default: ~/.xearthlayer/xearthlayer.log)
@@ -405,6 +453,8 @@ file = {}
             self.generation.threads,
             self.generation.timeout,
             scenery_dir,
+            library_url,
+            temp_dir,
             path_to_string(&self.logging.file),
         )
     }
@@ -616,5 +666,38 @@ parallel = 16
         assert_eq!(config.cache.memory_size, 2 * 1024 * 1024 * 1024);
         assert_eq!(config.download.timeout, 30);
         assert_eq!(config.texture.format, DdsFormat::BC1);
+    }
+
+    #[test]
+    fn test_packages_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.ini");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[packages]
+library_url = https://example.com/library.txt
+temp_dir = /tmp/xearthlayer
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigFile::load_from(&config_path).unwrap();
+        assert_eq!(
+            config.packages.library_url,
+            Some("https://example.com/library.txt".to_string())
+        );
+        assert_eq!(
+            config.packages.temp_dir,
+            Some(PathBuf::from("/tmp/xearthlayer"))
+        );
+    }
+
+    #[test]
+    fn test_packages_config_defaults() {
+        let config = ConfigFile::default();
+        assert!(config.packages.library_url.is_none());
+        assert!(config.packages.temp_dir.is_none());
     }
 }

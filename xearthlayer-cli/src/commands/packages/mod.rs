@@ -33,28 +33,50 @@ use std::path::PathBuf;
 
 use args::{CheckArgs, InfoArgs, InstallArgs, ListArgs, RemoveArgs, UpdateArgs};
 use traits::CommandContext;
+use xearthlayer::config::ConfigFile;
 
 use crate::error::CliError;
+
+/// Load config or return default.
+fn load_config() -> ConfigFile {
+    ConfigFile::load().unwrap_or_default()
+}
 
 /// Get the default installation directory.
 ///
 /// Uses the config file's scenery_dir if available, otherwise falls back to
 /// a sensible default.
-fn default_install_dir() -> PathBuf {
-    // Try to load from config
-    if let Ok(config) = xearthlayer::config::ConfigFile::load() {
-        if let Some(ref scenery_dir) = config.xplane.scenery_dir {
-            return scenery_dir.clone();
-        }
-    }
-
-    // Fall back to current directory
-    PathBuf::from(".")
+fn default_install_dir(config: &ConfigFile) -> PathBuf {
+    config
+        .xplane
+        .scenery_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Get the default temporary directory.
-fn default_temp_dir() -> PathBuf {
-    env::temp_dir().join("xearthlayer")
+///
+/// Uses the config file's packages.temp_dir if available, otherwise falls back to
+/// system temp directory.
+fn default_temp_dir(config: &ConfigFile) -> PathBuf {
+    config
+        .packages
+        .temp_dir
+        .clone()
+        .unwrap_or_else(|| env::temp_dir().join("xearthlayer"))
+}
+
+/// Get the default library URL from config.
+///
+/// Returns an error if not configured.
+fn require_library_url(cli_url: Option<String>, config: &ConfigFile) -> Result<String, CliError> {
+    cli_url
+        .or_else(|| config.packages.library_url.clone())
+        .ok_or_else(|| {
+            CliError::Config(
+                "No library URL specified. Use --library-url or set library_url in config.ini [packages] section.".to_string(),
+            )
+        })
 }
 
 /// Run a packages subcommand.
@@ -63,6 +85,9 @@ fn default_temp_dir() -> PathBuf {
 /// production context with real implementations and dispatches to the
 /// appropriate handler.
 pub fn run(command: PackagesCommands) -> Result<(), CliError> {
+    // Load config once for all commands
+    let config = load_config();
+
     // Create production context
     let output = ConsoleOutput::new();
     let manager = DefaultPackageManagerService::new();
@@ -76,7 +101,7 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
             verbose,
         } => ListHandler::execute(
             ListArgs {
-                install_dir: install_dir.unwrap_or_else(default_install_dir),
+                install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
                 verbose,
             },
             &ctx,
@@ -87,8 +112,8 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
             install_dir,
         } => CheckHandler::execute(
             CheckArgs {
-                library_url,
-                install_dir: install_dir.unwrap_or_else(default_install_dir),
+                library_url: require_library_url(library_url, &config)?,
+                install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
             },
             &ctx,
         ),
@@ -103,9 +128,9 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
             InstallArgs {
                 region,
                 package_type: r#type.into(),
-                library_url,
-                install_dir: install_dir.unwrap_or_else(default_install_dir),
-                temp_dir: temp_dir.unwrap_or_else(default_temp_dir),
+                library_url: require_library_url(library_url, &config)?,
+                install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
+                temp_dir: temp_dir.unwrap_or_else(|| default_temp_dir(&config)),
             },
             &ctx,
         ),
@@ -121,9 +146,9 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
             UpdateArgs {
                 region,
                 package_type: r#type.map(|t| t.into()),
-                library_url,
-                install_dir: install_dir.unwrap_or_else(default_install_dir),
-                temp_dir: temp_dir.unwrap_or_else(default_temp_dir),
+                library_url: require_library_url(library_url, &config)?,
+                install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
+                temp_dir: temp_dir.unwrap_or_else(|| default_temp_dir(&config)),
                 all,
             },
             &ctx,
@@ -138,7 +163,7 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
             RemoveArgs {
                 region,
                 package_type: r#type.into(),
-                install_dir: install_dir.unwrap_or_else(default_install_dir),
+                install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
                 force,
             },
             &ctx,
@@ -152,7 +177,7 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
             InfoArgs {
                 region,
                 package_type: r#type.into(),
-                install_dir: install_dir.unwrap_or_else(default_install_dir),
+                install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
             },
             &ctx,
         ),
