@@ -112,6 +112,12 @@ enum Commands {
     /// Initialize configuration file at ~/.xearthlayer/config.ini
     Init,
 
+    /// Get or set configuration values
+    Config {
+        #[command(subcommand)]
+        command: commands::config::ConfigCommands,
+    },
+
     /// Cache management commands
     Cache {
         #[command(subcommand)]
@@ -245,6 +251,7 @@ fn main() {
 
     let result = match cli.command {
         Commands::Init => run_init(),
+        Commands::Config { command } => commands::config::run(command),
         Commands::Cache { action } => run_cache(action),
         Commands::Publish { command } => commands::publish::run(command),
         Commands::Packages { command } => commands::packages::run(command),

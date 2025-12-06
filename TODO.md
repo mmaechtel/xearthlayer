@@ -12,6 +12,20 @@ Tracking issues discovered during development and testing.
 
 ## Tech Debt
 
+### TD2: Refactor CLI Validation to Specification Pattern
+- **Status**: Open
+- **Priority**: Low
+- **Description**: Review CLI command handlers and refactor business validation rules to use the Specification Pattern in library modules rather than being managed in the CLI interface.
+- **Context**: The `config` CLI commands now use `ConfigKey` with validation specifications in the config module (`xearthlayer/src/config/keys.rs`). This pattern should be applied to other CLI handlers that contain validation logic.
+- **Files to review**:
+  - `xearthlayer-cli/src/commands/publish/` - Publisher CLI handlers
+  - `xearthlayer-cli/src/commands/packages.rs` - Package manager CLI
+- **Benefits**:
+  - Validation logic reusable across different interfaces
+  - Better separation of concerns (thin CLI layer)
+  - Easier to test validation in isolation
+- **Added**: 2025-12-05
+
 ### TD1: Migrate to Async FUSE Model
 - **Status**: Open
 - **Priority**: Medium

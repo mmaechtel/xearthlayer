@@ -170,6 +170,21 @@ custom_scenery_path = /path/to/X-Plane 12/Custom Scenery
 auto_install_overlays = true
 ```
 
+Configuration can also be managed via CLI:
+
+```bash
+# View all settings
+xearthlayer config list
+
+# Get a specific setting
+xearthlayer config get packages.library_url
+
+# Set a value (with validation)
+xearthlayer config set packages.library_url https://example.com/library.txt
+```
+
+See [Configuration Reference](../configuration.md) for all available settings and CLI commands.
+
 ## Next Steps
 
 - See [Scenery Package Specification](scenery-packages.md) for detailed file formats
