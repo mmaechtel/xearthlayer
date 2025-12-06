@@ -84,14 +84,30 @@ pub struct MountManager {
     sessions: HashMap<String, BackgroundSession>,
     /// Mount information for display purposes.
     mounts: HashMap<String, ActiveMount>,
+    /// Target scenery directory for mounts (e.g., X-Plane Custom Scenery).
+    /// If None, packages are mounted in-place.
+    scenery_path: Option<PathBuf>,
 }
 
 impl MountManager {
-    /// Create a new mount manager.
+    /// Create a new mount manager that mounts packages in-place.
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
             mounts: HashMap::new(),
+            scenery_path: None,
+        }
+    }
+
+    /// Create a new mount manager that mounts packages to a target scenery directory.
+    ///
+    /// When a scenery path is set, packages from `install_location` are mounted
+    /// as directories in the scenery path (e.g., Custom Scenery).
+    pub fn with_scenery_path(scenery_path: &std::path::Path) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            mounts: HashMap::new(),
+            scenery_path: Some(scenery_path.to_path_buf()),
         }
     }
 
@@ -173,7 +189,20 @@ impl MountManager {
         F: Fn(&InstalledPackage) -> Result<XEarthLayerService, ServiceError>,
     {
         let region = package.region().to_lowercase();
-        let mountpoint = package.path.clone();
+
+        // Determine mountpoint: scenery_path/package_name or in-place
+        let mountpoint = if let Some(ref scenery_path) = self.scenery_path {
+            // Mount to Custom Scenery directory with package name
+            let folder_name = package
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("zzXEL_{}_ortho", region));
+            scenery_path.join(&folder_name)
+        } else {
+            // Mount in-place
+            package.path.clone()
+        };
 
         // Skip if already mounted
         if self.is_mounted(&region) {
@@ -208,11 +237,24 @@ impl MountManager {
             }
         };
 
+        // Create mountpoint directory if it doesn't exist
+        if !mountpoint.exists() {
+            if let Err(e) = std::fs::create_dir_all(&mountpoint) {
+                return MountResult::failure(
+                    region,
+                    package.package_type(),
+                    mountpoint,
+                    format!("Failed to create mountpoint directory: {}", e),
+                );
+            }
+        }
+
         // Mount the filesystem
-        // For ortho packages, the package directory IS the mountpoint
-        // (we overlay it with generated DDS files)
+        // Source = the installed package directory
+        // Mountpoint = either in Custom Scenery (if scenery_path set) or in-place
+        let source_str = package.path.to_string_lossy();
         let mountpoint_str = mountpoint.to_string_lossy();
-        match service.serve_passthrough_background(&mountpoint_str, &mountpoint_str) {
+        match service.serve_passthrough_background(&source_str, &mountpoint_str) {
             Ok(session) => {
                 let mount_info = ActiveMount {
                     region: region.clone(),

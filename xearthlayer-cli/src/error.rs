@@ -4,6 +4,7 @@
 //! and appropriate exit codes.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::process;
 use xearthlayer::config::ConfigFileError;
 use xearthlayer::service::ServiceError;
@@ -33,6 +34,8 @@ pub enum CliError {
     Publish(String),
     /// Package manager error
     Packages(String),
+    /// No packages installed
+    NoPackages { install_location: PathBuf },
 }
 
 impl CliError {
@@ -71,6 +74,22 @@ impl CliError {
                 eprintln!();
                 eprintln!("Run 'xearthlayer packages --help' for usage information.");
             }
+            CliError::NoPackages { install_location } => {
+                eprintln!();
+                eprintln!("No ortho packages are installed.");
+                eprintln!();
+                eprintln!("To get started:");
+                eprintln!("  1. View available packages:  xearthlayer packages list");
+                eprintln!("  2. Install a region:         xearthlayer packages install <region>");
+                eprintln!();
+                eprintln!("Example:");
+                eprintln!("  xearthlayer packages install na    # Install North America");
+                eprintln!();
+                eprintln!(
+                    "Packages will be installed to: {}",
+                    install_location.display()
+                );
+            }
             _ => {}
         }
 
@@ -94,6 +113,7 @@ impl fmt::Display for CliError {
             CliError::CacheStats(msg) => write!(f, "Failed to get cache stats: {}", msg),
             CliError::Publish(msg) => write!(f, "Publisher error: {}", msg),
             CliError::Packages(msg) => write!(f, "Package manager error: {}", msg),
+            CliError::NoPackages { .. } => write!(f, "No ortho packages installed"),
         }
     }
 }

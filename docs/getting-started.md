@@ -106,44 +106,43 @@ Success: Installed EU-PARIS (ortho) v1.0.0 to Custom Scenery/zzXEL_eu-paris_orth
 
 **Note:** The package is small (megabytes) because it only contains terrain definitions, not textures.
 
-## Step 2: Start the Streaming Service
+## Step 2: Start XEarthLayer
 
-Now start XEarthLayer to provide the textures:
+Now start XEarthLayer to mount your packages and provide the textures:
 
 ```bash
-xearthlayer start --source "Custom Scenery/zzXEL_eu-paris_ortho"
+xearthlayer run
 ```
 
 ```
-XEarthLayer Streaming Service
-=============================
+XEarthLayer v0.1.0
+========================================
 
-Source:    /path/to/Custom Scenery/zzXEL_eu-paris_ortho
-Mount:     /path/to/Custom Scenery/zzXEL_eu-paris_ortho_xel
-Provider:  Bing Maps
-Cache:     ~/.cache/xearthlayer
+Packages:       /home/user/.xearthlayer/packages
+Custom Scenery: /home/user/X-Plane 12/Custom Scenery
+DDS Format:     BC1
+Provider:       Bing Maps
 
-Service started. Press Ctrl+C to stop.
+Installed ortho packages (1):
+  EU-PARIS v1.0.0
+
+Cache: 2 GB memory, 20 GB disk
+
+Mounting packages to Custom Scenery...
+  ✓ EU-PARIS → /home/user/X-Plane 12/Custom Scenery/zzXEL_eu-paris_ortho
+
+Ready! 1 package(s) mounted
+
+Start X-Plane to use XEarthLayer scenery.
+Press Ctrl+C to stop.
 ```
 
-This creates a virtual mount at `zzXEL_eu-paris_ortho_xel` that:
-- Passes through all files from the source package
+The `run` command automatically:
+- Discovers all installed ortho packages
+- Mounts each package as a FUSE filesystem in Custom Scenery
 - Generates DDS textures on-demand when X-Plane requests them
 
-## Step 3: Configure X-Plane
-
-Add the **mount point** (not the source) to X-Plane:
-
-1. Edit `X-Plane 12/Custom Scenery/scenery_packs.ini`
-2. Add the `_xel` mount point:
-   ```
-   SCENERY_PACK Custom Scenery/zzXEL_eu-paris_ortho_xel/
-   ```
-3. Restart X-Plane if it's running
-
-**Important:** Use the `_xel` mount point, not the original package folder.
-
-## Step 4: Fly!
+## Step 3: Fly!
 
 Start X-Plane and load a flight in the Paris region.
 
@@ -158,8 +157,7 @@ When you're done flying:
 ```bash
 # Press Ctrl+C in the terminal running XEarthLayer
 ^C
-Unmounting...
-Service stopped.
+Shutting down...
 ```
 
 Always stop XEarthLayer cleanly before shutting down.
@@ -173,7 +171,7 @@ xearthlayer packages install na-socal
 xearthlayer packages install eu-alps
 ```
 
-You can run XEarthLayer with multiple source folders, or start multiple instances (one per region).
+All installed packages are mounted automatically when you run `xearthlayer run`.
 
 ## Updating Packages
 
@@ -209,8 +207,8 @@ xearthlayer packages check            # See available packages
 xearthlayer packages install <region> # Install a package
 xearthlayer packages list             # List installed packages
 
-# Streaming
-xearthlayer start --source <path>     # Start streaming service
+# Running
+xearthlayer run                       # Mount all packages and start streaming
 
 # Cache
 xearthlayer cache stats               # View cache usage

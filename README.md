@@ -59,10 +59,9 @@ xearthlayer init
 # Install a regional package
 xearthlayer packages install eu-paris
 
-# Start the streaming service
-xearthlayer start --source "Custom Scenery/zzXEL_eu-paris_ortho"
+# Start XEarthLayer (mounts all installed packages automatically)
+xearthlayer run
 
-# Add the _xel mount point to X-Plane's scenery_packs.ini
 # Fly!
 ```
 
@@ -98,8 +97,13 @@ xearthlayer packages list             # List installed packages
 xearthlayer packages update [region]  # Update packages
 xearthlayer packages remove <region>  # Remove a package
 
-# Streaming Service
-xearthlayer start --source <path>     # Start streaming (mount on <path>_xel)
+# Running (primary command)
+xearthlayer run                       # Mount all packages and start streaming
+
+# Advanced: Single Package Mode
+xearthlayer start --source <path>     # Start streaming for a single scenery pack
+
+# Cache Management
 xearthlayer cache stats               # View cache usage
 xearthlayer cache clear               # Clear cache
 

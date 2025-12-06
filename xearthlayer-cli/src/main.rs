@@ -171,12 +171,12 @@ enum Commands {
         no_cache: bool,
     },
 
-    /// Mount all installed ortho packages for X-Plane
-    Serve {
-        /// Scenery directory containing installed packages (default: from config)
-        #[arg(long)]
-        scenery_dir: Option<PathBuf>,
-
+    /// Start XEarthLayer and mount all installed ortho packages for X-Plane
+    ///
+    /// This is the main command for running XEarthLayer. It discovers all installed
+    /// ortho packages and mounts them as FUSE filesystems in your X-Plane Custom Scenery
+    /// directory. DDS textures are generated on-demand when X-Plane requests them.
+    Run {
         /// Imagery provider (default: from config)
         #[arg(long, value_enum)]
         provider: Option<ProviderType>,
@@ -283,16 +283,14 @@ fn main() {
             provider,
             google_api_key,
         } => run_download(lat, lon, zoom, output, dds_format, provider, google_api_key),
-        Commands::Serve {
-            scenery_dir,
+        Commands::Run {
             provider,
             google_api_key,
             dds_format,
             timeout,
             parallel,
             no_cache,
-        } => run_serve(
-            scenery_dir,
+        } => run_run(
             provider,
             google_api_key,
             dds_format,
@@ -630,12 +628,10 @@ fn run_download(
 }
 
 // ============================================================================
-// Serve Command - Mount All Installed Packages
+// Run Command - Mount All Installed Packages
 // ============================================================================
 
-#[allow(clippy::too_many_arguments)]
-fn run_serve(
-    scenery_dir: Option<PathBuf>,
+fn run_run(
     provider: Option<ProviderType>,
     google_api_key: Option<String>,
     dds_format: Option<DdsCompression>,
@@ -644,26 +640,61 @@ fn run_serve(
     no_cache: bool,
 ) -> Result<(), CliError> {
     let runner = CliRunner::new()?;
-    runner.log_startup("serve");
+    runner.log_startup("run");
     let config = runner.config();
 
-    // Determine scenery directory
-    let scenery_dir = match scenery_dir {
-        Some(dir) => dir,
-        None => config.xplane.scenery_dir.clone().ok_or_else(|| {
+    // Get install location (where packages are stored)
+    let install_location = config.packages.install_location.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".xearthlayer")
+            .join("packages")
+    });
+
+    if !install_location.exists() {
+        return Err(CliError::NoPackages {
+            install_location: install_location.clone(),
+        });
+    }
+
+    // Get Custom Scenery path (where mounts go)
+    let custom_scenery_path = config
+        .packages
+        .custom_scenery_path
+        .clone()
+        .or_else(|| config.xplane.scenery_dir.clone())
+        .ok_or_else(|| {
             CliError::Config(
-                "No scenery directory configured. \
-                 Set scenery_dir in config.ini or use --scenery-dir"
+                "No Custom Scenery path configured. \
+                 Run 'xearthlayer init' or set packages.custom_scenery_path in config.ini"
                     .to_string(),
             )
-        })?,
-    };
+        })?;
 
-    if !scenery_dir.exists() {
+    if !custom_scenery_path.exists() {
         return Err(CliError::Config(format!(
-            "Scenery directory does not exist: {}",
-            scenery_dir.display()
+            "Custom Scenery directory does not exist: {}\n\
+             Check your configuration or run 'xearthlayer init'",
+            custom_scenery_path.display()
         )));
+    }
+
+    // Discover installed packages from install_location
+    let store = LocalPackageStore::new(&install_location);
+    let packages = store
+        .list()
+        .map_err(|e| CliError::Packages(e.to_string()))?;
+
+    // Filter to ortho packages only
+    let ortho_packages: Vec<_> = packages
+        .iter()
+        .filter(|p| p.package_type() == PackageType::Ortho)
+        .collect();
+
+    if ortho_packages.is_empty() {
+        return Err(CliError::NoPackages {
+            install_location: install_location.clone(),
+        });
     }
 
     // Resolve settings from CLI and config
@@ -692,63 +723,42 @@ fn run_serve(
         .build();
 
     // Print banner
-    println!("XEarthLayer Multi-Mount Server v{}", xearthlayer::VERSION);
-    println!("=====================================");
+    println!("XEarthLayer v{}", xearthlayer::VERSION);
+    println!("{}", "=".repeat(40));
     println!();
-    println!("Scenery Dir: {}", scenery_dir.display());
-    println!("DDS Format:  {:?}", texture_config.format());
+    println!("Packages:       {}", install_location.display());
+    println!("Custom Scenery: {}", custom_scenery_path.display());
+    println!("DDS Format:     {:?}", texture_config.format());
+    println!("Provider:       {}", provider_config.name());
     println!();
 
-    // Discover installed packages
-    let store = LocalPackageStore::new(&scenery_dir);
-    let packages = store
-        .list()
-        .map_err(|e| CliError::Packages(e.to_string()))?;
-
-    // Filter to ortho packages only
-    let ortho_packages: Vec<_> = packages
-        .iter()
-        .filter(|p| p.package_type() == PackageType::Ortho)
-        .collect();
-
-    if ortho_packages.is_empty() {
-        println!("No ortho packages found in {}.", scenery_dir.display());
-        println!();
-        println!("Use 'xearthlayer packages install' to install packages first.");
-        return Ok(());
-    }
-
-    println!("Found {} ortho package(s):", ortho_packages.len());
+    // List discovered packages
+    println!("Installed ortho packages ({}):", ortho_packages.len());
     for pkg in &ortho_packages {
-        println!(
-            "  {} v{} - {}",
-            pkg.region(),
-            pkg.version(),
-            pkg.path.display()
-        );
+        println!("  {} v{}", pkg.region().to_uppercase(), pkg.version());
     }
     println!();
 
     // Print cache info
     if !no_cache {
         println!(
-            "Cache: Enabled ({} memory, {} disk)",
+            "Cache: {} memory, {} disk",
             format_size(config.cache.memory_size),
             format_size(config.cache.disk_size)
         );
     } else {
-        println!("Cache: Disabled (all tiles generated fresh)");
+        println!("Cache: Disabled");
     }
     println!();
 
-    // Create mount manager
-    let mut mount_manager = MountManager::new();
+    // Create mount manager with the custom scenery path as target
+    let mut mount_manager = MountManager::with_scenery_path(&custom_scenery_path);
 
     // Create a logger for all services
     let logger: Arc<dyn xearthlayer::log::Logger> = Arc::new(TracingLogger);
 
     // Mount all packages
-    println!("Mounting packages...");
+    println!("Mounting packages to Custom Scenery...");
     let results = mount_manager
         .mount_all(&store, |_pkg| {
             xearthlayer::service::XEarthLayerService::new(
@@ -766,17 +776,15 @@ fn run_serve(
     for result in &results {
         if result.success {
             println!(
-                "  Mounted {} ({}) at {}",
-                result.region,
-                result.package_type,
+                "  ✓ {} → {}",
+                result.region.to_uppercase(),
                 result.mountpoint.display()
             );
             success_count += 1;
         } else {
             println!(
-                "  Failed {} ({}): {}",
-                result.region,
-                result.package_type,
+                "  ✗ {}: {}",
+                result.region.to_uppercase(),
                 result.error.as_deref().unwrap_or("Unknown error")
             );
             failure_count += 1;
@@ -793,7 +801,7 @@ fn run_serve(
     }
 
     println!(
-        "{} package(s) mounted successfully{}",
+        "Ready! {} package(s) mounted{}",
         success_count,
         if failure_count > 0 {
             format!(", {} failed", failure_count)
@@ -802,7 +810,8 @@ fn run_serve(
         }
     );
     println!();
-    println!("Press Ctrl+C to unmount all packages and exit");
+    println!("Start X-Plane to use XEarthLayer scenery.");
+    println!("Press Ctrl+C to stop.");
     println!();
 
     // Set up signal handler for graceful shutdown
@@ -811,7 +820,7 @@ fn run_serve(
 
     ctrlc::set_handler(move || {
         println!();
-        println!("Received shutdown signal, unmounting all packages...");
+        println!("Shutting down...");
         shutdown_clone.store(true, Ordering::SeqCst);
     })
     .map_err(|e| CliError::Config(format!("Failed to set signal handler: {}", e)))?;
@@ -823,7 +832,7 @@ fn run_serve(
 
     // Unmount all packages
     mount_manager.unmount_all();
-    println!("All packages unmounted.");
+    println!("All packages unmounted. Goodbye!");
 
     Ok(())
 }

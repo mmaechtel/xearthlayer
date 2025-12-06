@@ -1,21 +1,20 @@
 # Running the Streaming Service
 
-The XEarthLayer streaming service is the component that generates satellite imagery textures on-demand. It works alongside regional scenery packages to provide complete orthophoto scenery.
+The XEarthLayer streaming service generates satellite imagery textures on-demand. It works alongside regional scenery packages to provide complete orthophoto scenery.
 
-## Understanding the Relationship
+## Quick Start
 
-**Important:** The streaming service does not work standalone. You need:
+The simplest way to run XEarthLayer is with the `run` command:
 
-1. **A regional scenery package** - Contains terrain definitions (DSF/TER files) that reference texture filenames
-2. **The streaming service** - Generates those textures on-demand when X-Plane requests them
+```bash
+xearthlayer run
+```
 
-The package tells X-Plane *what* to display; the streaming service provides *how* it looks.
-
-See [How It Works](how-it-works.md) for the full architectural explanation.
+This automatically discovers all installed ortho packages and mounts them in your X-Plane Custom Scenery directory.
 
 ## How It Works
 
-XEarthLayer creates a virtual filesystem (using FUSE) that overlays a regional scenery package. When X-Plane requests a texture file:
+XEarthLayer creates a virtual filesystem (using FUSE) that overlays regional scenery packages. When X-Plane requests a texture file:
 
 1. XEarthLayer intercepts the DDS request
 2. Downloads satellite imagery tiles from the configured provider
@@ -29,25 +28,100 @@ The result is cached so subsequent requests are instant.
 ## Prerequisites
 
 - **Linux** with FUSE support (most distributions have this built-in)
-- **A regional scenery package** installed (contains DSF/TER files referencing textures)
+- **At least one ortho package installed** (use `xearthlayer packages install <region>`)
 - **Internet connection** for downloading satellite imagery
 
-## Basic Usage
+## The `run` Command
 
-Start the streaming service:
+The `run` command is the primary way to use XEarthLayer:
 
 ```bash
-xearthlayer start --source /path/to/scenery
+xearthlayer run
 ```
 
-This creates a mount point at `/path/to/scenery_xel` that X-Plane should use instead of the original folder.
+Output:
+```
+XEarthLayer v0.1.0
+========================================
+
+Packages:       /home/user/.xearthlayer/packages
+Custom Scenery: /home/user/X-Plane 12/Custom Scenery
+DDS Format:     BC1
+Provider:       Bing Maps
+
+Installed ortho packages (2):
+  EU-PARIS v1.0.0
+  NA-SOCAL v2.1.0
+
+Cache: 2 GB memory, 20 GB disk
+
+Mounting packages to Custom Scenery...
+  ✓ EU-PARIS → /home/user/X-Plane 12/Custom Scenery/zzXEL_eu-paris_ortho
+  ✓ NA-SOCAL → /home/user/X-Plane 12/Custom Scenery/zzXEL_na-socal_ortho
+
+Ready! 2 package(s) mounted
+
+Start X-Plane to use XEarthLayer scenery.
+Press Ctrl+C to stop.
+```
+
+### What `run` Does
+
+1. Reads your configuration from `~/.xearthlayer/config.ini`
+2. Discovers installed ortho packages from `install_location`
+3. Creates FUSE mounts for each package in `custom_scenery_path`
+4. Starts the texture streaming service
+5. Waits for Ctrl+C to cleanly unmount
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `--source <PATH>` | Source scenery folder to overlay |
-| `--mount <PATH>` | Custom mount point (default: `<source>_xel`) |
+| `--provider <TYPE>` | Override imagery provider: `bing`, `go2`, `google` |
+| `--dds-format <FMT>` | Override texture format: `bc1` or `bc3` |
+| `--timeout <SECS>` | Override download timeout |
+| `--parallel <NUM>` | Override parallel downloads |
+| `--no-cache` | Disable caching (not recommended) |
+
+### No Packages Installed
+
+If no ortho packages are installed, `run` provides helpful guidance:
+
+```
+Error: No ortho packages installed
+
+No ortho packages are installed.
+
+To get started:
+  1. View available packages:  xearthlayer packages list
+  2. Install a region:         xearthlayer packages install <region>
+
+Example:
+  xearthlayer packages install na    # Install North America
+
+Packages will be installed to: /home/user/.xearthlayer/packages
+```
+
+## Advanced: Single Package Mode (`start`)
+
+For advanced users, the `start` command allows mounting a single scenery package manually. This is useful for:
+
+- Testing non-package scenery (e.g., Ortho4XP output)
+- Custom mount configurations
+- Debugging
+
+```bash
+xearthlayer start --source /path/to/scenery
+```
+
+This creates a mount point at `/path/to/scenery_xel`.
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--source <PATH>` | Source scenery folder to overlay (required) |
+| `--mountpoint <PATH>` | Custom mount point (default: `<source>_xel`) |
 | `--provider <TYPE>` | Imagery provider: `bing`, `go2`, `google` |
 | `--dds-format <FMT>` | Texture format: `bc1` or `bc3` |
 | `--no-cache` | Disable caching (not recommended) |
@@ -56,46 +130,11 @@ This creates a mount point at `/path/to/scenery_xel` that X-Plane should use ins
 
 ```bash
 xearthlayer start \
-  --source "/home/user/X-Plane 12/Custom Scenery/Ortho4XP_Europe" \
-  --provider bing
+  --source "/home/user/Ortho4XP/Tiles/zOrtho4XP_+37-122" \
+  --provider go2
 ```
 
-Output:
-```
-XEarthLayer Streaming Service
-=============================
-
-Source:    /home/user/X-Plane 12/Custom Scenery/Ortho4XP_Europe
-Mount:     /home/user/X-Plane 12/Custom Scenery/Ortho4XP_Europe_xel
-Provider:  Bing Maps
-Format:    BC1 (DXT1)
-Cache:     ~/.cache/xearthlayer
-
-Service started. Press Ctrl+C to stop.
-```
-
-## X-Plane Configuration
-
-### Using the Mount Point
-
-Configure X-Plane to use the `_xel` mount point instead of the original scenery folder:
-
-1. Edit `X-Plane 12/Custom Scenery/scenery_packs.ini`
-2. Change the path from the original folder to the mount point
-3. Restart X-Plane
-
-Example `scenery_packs.ini` change:
-```
-# Before
-SCENERY_PACK Custom Scenery/Ortho4XP_Europe/
-
-# After
-SCENERY_PACK Custom Scenery/Ortho4XP_Europe_xel/
-```
-
-### Scenery Loading Order
-
-Ensure the streaming scenery loads at the correct priority. Orthophoto scenery should typically load last (lowest priority) so that airports, landmarks, and overlays appear on top.
+When using `start`, you must manually add the `_xel` mount point to X-Plane's `scenery_packs.ini`.
 
 ## Stopping the Service
 
@@ -103,19 +142,11 @@ Press `Ctrl+C` to stop the service cleanly:
 
 ```
 ^C
-Unmounting...
-Service stopped.
-```
-
-Or from another terminal:
-
-```bash
-xearthlayer stop --mount /path/to/mount_xel
+Shutting down...
 ```
 
 **Important:** Always stop the service properly before:
-- Shutting down
-- Moving or deleting the source folder
+- Shutting down your computer
 - Running X-Plane maintenance
 
 ## Performance
@@ -192,10 +223,12 @@ xearthlayer cache clear --disk
 
 ## Imagery Providers
 
+Configure the default provider in `~/.xearthlayer/config.ini` or override at runtime:
+
 ### Bing Maps (Default)
 
 ```bash
-xearthlayer start --source /path/to/scenery --provider bing
+xearthlayer run --provider bing
 ```
 
 - Free, no API key required
@@ -205,7 +238,7 @@ xearthlayer start --source /path/to/scenery --provider bing
 ### Google GO2
 
 ```bash
-xearthlayer start --source /path/to/scenery --provider go2
+xearthlayer run --provider go2
 ```
 
 - Free, no API key required
@@ -215,9 +248,7 @@ xearthlayer start --source /path/to/scenery --provider go2
 ### Google Maps API
 
 ```bash
-xearthlayer start --source /path/to/scenery \
-  --provider google \
-  --google-api-key YOUR_API_KEY
+xearthlayer run --provider google --google-api-key YOUR_API_KEY
 ```
 
 - Requires paid API key
@@ -250,8 +281,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/path/to/xearthlayer start --source /path/to/scenery
-ExecStop=/path/to/xearthlayer stop --mount /path/to/scenery_xel
+ExecStart=/path/to/xearthlayer run
 Restart=on-failure
 
 [Install]
@@ -271,9 +301,7 @@ Add to your shell profile (`~/.bashrc` or `~/.zshrc`):
 
 ```bash
 # Start XEarthLayer if not already running
-if ! mountpoint -q "/path/to/scenery_xel" 2>/dev/null; then
-    xearthlayer start --source /path/to/scenery &
-fi
+pgrep -x xearthlayer > /dev/null || xearthlayer run &
 ```
 
 ## Logging

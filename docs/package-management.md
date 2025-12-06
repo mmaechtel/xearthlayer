@@ -286,9 +286,19 @@ Installed packages appear in your Custom Scenery folder with names like:
 
 ### Package Installation Methods
 
-**Ortho packages** are installed to the package directory (e.g., `~/.xearthlayer/packages/`) and mounted via FUSE to Custom Scenery when XEarthLayer runs.
+**Ortho packages** are installed to the package directory (e.g., `~/.xearthlayer/packages/`) and mounted via FUSE to Custom Scenery when you run `xearthlayer run`.
 
 **Overlay packages** are installed to the package directory, then a symlink is automatically created in Custom Scenery pointing to the installed package. This allows X-Plane to access the overlay files directly without FUSE.
+
+### Running XEarthLayer
+
+After installing packages, start XEarthLayer to mount them:
+
+```bash
+xearthlayer run
+```
+
+This automatically discovers all installed ortho packages and mounts them in Custom Scenery. See [Running the Service](running-service.md) for details.
 
 ### Scenery Load Order
 

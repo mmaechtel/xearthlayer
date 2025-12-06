@@ -11,6 +11,12 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 ## Recent Updates
 
+**2025-12-06**: Added `xearthlayer run` command as primary interface. Automatically discovers and mounts all installed ortho packages to Custom Scenery. User-friendly error messages when no packages installed.
+
+**2025-12-05**: Package Manager download module refactored using SOLID principles. Decomposed 757-line monolithic file into 6 focused modules using Strategy pattern for sequential/parallel downloads.
+
+**2025-12-04**: Package Manager complete with real-time download progress, parallel downloads, and automatic overlay installation.
+
 **2025-11-28**: Package Publisher CLI complete (Phase 4). Implemented using Command Pattern with trait-based dependency injection for testability.
 
 **2025-11-28**: Completed package publisher library (Phases 1-3). Core data structures, Ortho4XP processing, archive building, and library index management.
@@ -265,6 +271,51 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 ---
 
+### ✅ Package Manager (`manager/`)
+
+**Status**: Fully implemented with comprehensive tests
+
+**Purpose**: Discovers, downloads, installs, updates, and removes XEarthLayer Scenery Packages.
+
+**Files**:
+- `config.rs` - Manager configuration
+- `client.rs` - HTTP library client for fetching remote indexes
+- `cache.rs` - Cached library client with TTL
+- `local.rs` - Local package store and discovery
+- `installer.rs` - Package installation orchestration
+- `extractor.rs` - Archive extraction (shell-based for performance)
+- `mounts.rs` - FUSE mount management for ortho packages
+- `symlinks.rs` - Overlay symlink management
+- `updates.rs` - Update detection and version comparison
+- `download/` - Multi-part download system (Strategy pattern)
+
+**Download Module Architecture** (`manager/download/`):
+```
+MultiPartDownloader (orchestrator)
+        │
+        ├── DownloadStrategy (trait)
+        │       ├── SequentialStrategy
+        │       └── ParallelStrategy
+        │
+        ├── HttpDownloader (single file downloads)
+        │
+        ├── DownloadState (progress tracking)
+        │
+        └── ProgressReporter (real-time updates via atomic counters)
+```
+
+**Key Functionality**:
+- Fetch and cache remote library indexes
+- Multi-part parallel downloads with resume support
+- Real-time byte-level progress reporting
+- SHA-256 checksum verification
+- Archive reassembly and extraction
+- FUSE mount registration for ortho packages
+- Symlink creation for overlay packages
+- Automatic overlay installation with ortho packages
+
+---
+
 ## Command-Line Interface (`xearthlayer-cli/`)
 
 ### ✅ CLI Binary
@@ -273,13 +324,17 @@ This document provides a comprehensive overview of all modules in the XEarthLaye
 
 **Core Commands**:
 - `xearthlayer init` - Initialize configuration file
-- `xearthlayer start` - Start XEarthLayer with passthrough filesystem
+- `xearthlayer run` - Mount all installed packages and start streaming (primary command)
+- `xearthlayer start` - Start with single scenery pack (advanced use)
 - `xearthlayer download` - Download a single tile to file
 - `xearthlayer cache` - Cache management (clear, stats)
 
 **Key Features**:
+- Automatic package discovery from `install_location`
+- Multi-mount support (all installed ortho packages mounted simultaneously)
 - Signal handling (Ctrl+C, SIGTERM) with graceful shutdown
 - Automatic FUSE unmount on exit
+- User-friendly error messages with guidance when no packages installed
 - Configuration file override via CLI arguments
 
 ---
@@ -314,6 +369,36 @@ commands/publish/
 - `publish validate` - Validate repository integrity
 
 **Design Pattern**: Command Pattern with trait-based dependency injection enables testable handlers that depend only on interfaces.
+
+---
+
+### ✅ Packages CLI (`commands/packages/`)
+
+**Status**: Fully implemented with Command Pattern architecture
+
+**Purpose**: Command-line interface for package management.
+
+**Architecture**:
+```
+commands/packages/
+├── mod.rs        # Module exports and command dispatch
+├── args.rs       # CLI argument types (clap-derived)
+├── handlers.rs   # Command handlers with progress UI
+└── output.rs     # Output formatting and progress display
+```
+
+**Commands**:
+- `packages list` - List available and installed packages
+- `packages install <region>` - Download and install packages
+- `packages update [region]` - Update installed packages
+- `packages remove <region>` - Remove installed packages
+- `packages check` - Check for available updates
+
+**UI Features**:
+- Real-time download progress with byte-level updates
+- Multi-stage progress indicator (downloading, extracting, installing)
+- Automatic overlay installation prompts
+- Mount status display
 
 ---
 
@@ -368,6 +453,16 @@ xearthlayer-cli
     │       ├─→ cache (memory + disk)
     │       └─→ fuse (virtual filesystem)
     │               └─→ passthrough (overlay mode)
+    ├─→ commands/packages (package management CLI)
+    │       └─→ manager (package operations)
+    │               ├─→ download/ (Strategy pattern)
+    │               │       ├─→ orchestrator (coordinates downloads)
+    │               │       ├─→ strategy (sequential/parallel)
+    │               │       ├─→ http (single file downloads)
+    │               │       └─→ progress (atomic counters)
+    │               ├─→ installer (extraction + setup)
+    │               ├─→ mounts (FUSE coordination)
+    │               └─→ client (library fetching)
     ├─→ commands/publish (publisher CLI)
     │       └─→ publisher (package creation)
     │               ├─→ processor (Ortho4XP scanning)
@@ -379,7 +474,7 @@ xearthlayer-cli
 
 ## Test Coverage
 
-**Current Test Count**: 706+ tests passing
+**Current Test Count**: 843+ tests passing
 
 **Test Types**:
 - Unit tests for all modules
