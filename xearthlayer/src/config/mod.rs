@@ -32,6 +32,7 @@
 
 mod download;
 mod file;
+mod keys;
 mod size;
 mod texture;
 mod xplane;
@@ -39,9 +40,10 @@ mod xplane;
 pub use download::DownloadConfig;
 pub use file::{
     config_directory, config_file_path, CacheSettings, ConfigFile, ConfigFileError,
-    DownloadSettings, GenerationSettings, LoggingSettings, ProviderSettings, TextureSettings,
-    XPlaneSettings,
+    DownloadSettings, GenerationSettings, LoggingSettings, PackagesSettings, ProviderSettings,
+    TextureSettings, XPlaneSettings,
 };
+pub use keys::{ConfigKey, ConfigKeyError};
 pub use size::{format_size, parse_size, Size, SizeParseError};
 pub use texture::TextureConfig;
 pub use xplane::{

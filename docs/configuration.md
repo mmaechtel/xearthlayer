@@ -171,6 +171,34 @@ Controls log output.
 file = ~/.xearthlayer/xearthlayer.log
 ```
 
+### [packages]
+
+Controls package manager behavior.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `library_url` | URL | (none) | URL to the package library index file |
+| `install_location` | path | `~/.xearthlayer/packages` | Directory for storing installed packages |
+| `custom_scenery_path` | path | (auto-detect) | X-Plane Custom Scenery directory for overlay symlinks |
+| `auto_install_overlays` | bool | `false` | Automatically install matching overlay when installing ortho |
+| `temp_dir` | path | system temp | Temporary directory for package downloads |
+
+**Example:**
+```ini
+[packages]
+library_url = https://example.com/xearthlayer_package_library.txt
+install_location = ~/.xearthlayer/packages
+custom_scenery_path = /home/user/X-Plane 12/Custom Scenery
+auto_install_overlays = true
+temp_dir = ~/Downloads/xearthlayer-temp
+```
+
+**Notes:**
+- When `library_url` is set, you don't need to pass `--library-url` to package commands
+- The `temp_dir` is used for downloading archives before extraction; files are cleaned up after installation
+- When `auto_install_overlays` is enabled, installing an ortho package will automatically install the matching overlay package for the same region (if available)
+- If `custom_scenery_path` is not set, it falls back to `[xplane] scenery_dir` or auto-detects from X-Plane installation
+
 ## Complete Example
 
 ```ini
@@ -200,7 +228,80 @@ timeout = 10
 
 [logging]
 file = ~/.xearthlayer/xearthlayer.log
+
+[packages]
+; library_url = https://example.com/xearthlayer_package_library.txt
+; install_location = ~/.xearthlayer/packages
+; custom_scenery_path = /path/to/X-Plane 12/Custom Scenery
+; auto_install_overlays = true
+; temp_dir = ~/Downloads/xearthlayer-temp
 ```
+
+## Config CLI Commands
+
+XEarthLayer provides CLI commands for viewing and modifying configuration settings:
+
+### Show Config File Path
+
+```bash
+xearthlayer config path
+# Output: /home/user/.xearthlayer/config.ini
+```
+
+### List All Settings
+
+```bash
+xearthlayer config list
+```
+
+This displays all configuration settings grouped by section, showing current values or "(not set)" for unset options.
+
+### Get a Setting
+
+```bash
+xearthlayer config get <section.key>
+
+# Examples:
+xearthlayer config get provider.type
+xearthlayer config get cache.memory_size
+xearthlayer config get packages.library_url
+```
+
+### Set a Setting
+
+```bash
+xearthlayer config set <section.key> <value>
+
+# Examples:
+xearthlayer config set provider.type bing
+xearthlayer config set cache.memory_size 4GB
+xearthlayer config set packages.library_url https://example.com/library.txt
+xearthlayer config set packages.auto_install_overlays true
+```
+
+Values are validated before being saved. Invalid values will produce an error message explaining the expected format.
+
+### Available Configuration Keys
+
+| Key | Valid Values | Description |
+|-----|--------------|-------------|
+| `provider.type` | `bing`, `go2`, `google` | Imagery provider |
+| `provider.google_api_key` | string | Google Maps API key |
+| `cache.directory` | path | Cache directory |
+| `cache.memory_size` | size (e.g., `2GB`) | Memory cache size |
+| `cache.disk_size` | size (e.g., `20GB`) | Disk cache size |
+| `texture.format` | `bc1`, `bc3` | DDS compression format |
+| `download.timeout` | positive integer | Chunk download timeout (seconds) |
+| `download.parallel` | positive integer | Max parallel downloads |
+| `generation.threads` | positive integer | Worker threads |
+| `generation.timeout` | positive integer | Tile generation timeout (seconds) |
+| `xplane.scenery_dir` | path | X-Plane Custom Scenery directory |
+| `packages.library_url` | URL | Package library index URL |
+| `packages.install_location` | path | Package installation directory |
+| `packages.custom_scenery_path` | path | Custom Scenery for overlays |
+| `packages.auto_install_overlays` | `true`, `false` | Auto-install matching overlays |
+| `packages.temp_dir` | path | Temporary download directory |
+| `logging.file` | path | Log file location |
 
 ## CLI Overrides
 

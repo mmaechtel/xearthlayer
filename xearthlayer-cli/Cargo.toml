@@ -13,7 +13,13 @@ path = "src/main.rs"
 [dependencies]
 xearthlayer = { path = "../xearthlayer" }
 clap = { version = "4.5", features = ["derive"] }
+semver = "1.0"
 image = "0.25"
 tracing = "0.1"
 fuser = "0.14"
 ctrlc = "3.4"
+dirs = "5"
+
+[dev-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tempfile = "3"

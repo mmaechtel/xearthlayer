@@ -1,138 +1,147 @@
 # XEarthLayer
 
-A high-performance Rust implementation for streaming satellite imagery to X-Plane flight simulator via FUSE virtual filesystem.
+High-quality satellite imagery for X-Plane, streamed on demand.
 
 ## What It Does
 
-XEarthLayer mounts a virtual filesystem that intercepts X-Plane's texture file requests and generates satellite imagery on-demand. Instead of downloading massive scenery packages (100+ GB), it dynamically fetches only the imagery you need as you fly.
+XEarthLayer delivers satellite/aerial imagery to X-Plane without massive downloads. Instead of pre-downloading hundreds of gigabytes of textures, XEarthLayer:
 
-**Key Features:**
-- On-demand satellite imagery from Bing Maps or Google Maps (GO2 - same as Ortho4XP)
-- FUSE passthrough filesystem - real scenery files pass through, DDS textures generated on-demand
-- Parallel tile generation with request coalescing for fast scene loading
-- Two-tier caching (configurable memory + disk, default 2GB + 20GB)
-- BC1/BC3 DDS compression with 5-level mipmap chains
-- Graceful shutdown with automatic FUSE unmount on Ctrl+C/SIGTERM
-- Automatic X-Plane 12 installation detection
-- INI-based configuration at `~/.xearthlayer/config.ini`
+1. **Installs small regional packages** (megabytes) containing terrain definitions
+2. **Streams textures on-demand** as you fly, generating them from satellite imagery providers
+
+The result: complete orthophoto scenery with minimal disk usage and no lengthy initial downloads.
+
+## How It Works
+
+```
+Regional Package (small)          XEarthLayer Service (running)
+┌────────────────────────┐        ┌────────────────────────┐
+│ Terrain definitions    │        │ Satellite Providers    │
+│ (DSF, TER files)       │───────→│ (Bing, Google)         │
+│ References textures    │        │                        │
+│ that don't exist       │        │ Generates DDS textures │
+└────────────────────────┘        │ on-demand              │
+                                  └────────────────────────┘
+                                             │
+                                             ▼
+                                  ┌────────────────────────┐
+                                  │ X-Plane sees complete  │
+                                  │ scenery with textures  │
+                                  └────────────────────────┘
+```
+
+See [How It Works](docs/how-it-works.md) for detailed architecture.
+
+## Features
+
+- Small regional packages (megabytes, not gigabytes)
+- On-demand texture streaming from Bing Maps or Google Maps
+- Two-tier caching for instant repeat visits
+- High-quality BC1/BC3 DDS textures with mipmaps
+- Works with Ortho4XP-generated scenery
+- Linux support (Windows and macOS planned)
 
 ## Quick Start
 
 ```bash
-# Build release binary
+# Build from source
+git clone https://github.com/youruser/xearthlayer.git
+cd xearthlayer
 make release
 
-# Start with a scenery pack (auto-detects X-Plane Custom Scenery folder)
-./target/release/xearthlayer start --source /path/to/z_ortho_scenery
-
-# Or specify mountpoint explicitly
-./target/release/xearthlayer start \
-  --source /path/to/z_ortho_scenery \
-  --mountpoint "/path/to/X-Plane 12/Custom Scenery/z_ortho_scenery"
-```
-
-Press Ctrl+C to unmount when done.
-
-## Using the Makefile
-
-All project operations are available through `make`. Run `make help` for full list.
-
-### Common Commands
-
-| Command | Description |
-|---------|-------------|
-| `make init` | Initialize development environment |
-| `make build` | Build debug version |
-| `make release` | Build optimized release (runs verify first) |
-| `make test` | Run all tests |
-| `make verify` | Run format check, lint, and tests |
-| `make clean` | Remove build artifacts |
-
-### Development Workflow
-
-```bash
-# First time setup
-make init
-
-# Development cycle
-make check          # Fast compilation check
-make test           # Run tests
-make verify         # Full verification (format + lint + test)
-
-# Before committing
-make pre-commit     # Format code and run all checks
-```
-
-### Code Quality
-
-```bash
-make format         # Format code
-make lint           # Run clippy linter
-make coverage       # Generate test coverage report
-make doc-open       # Generate and open documentation
-```
-
-## Contributing
-
-### Development Setup
-
-1. Install Rust via [rustup](https://rustup.rs/)
-2. Clone the repository
-3. Run `make init` to set up the development environment
-4. Run `make verify` to ensure everything works
-
-### Code Guidelines
-
-- Follow TDD (Test-Driven Development) - write tests first
-- Follow SOLID principles - see `docs/DESIGN_PRINCIPLES.md`
-- Run `make pre-commit` before committing
-- Maintain test coverage above 80%
-
-### Pull Request Process
-
-1. Create a feature branch
-2. Write tests for new functionality
-3. Implement the feature
-4. Run `make verify` to ensure all checks pass
-5. Submit PR with clear description
-
-## CLI Commands
-
-```bash
-# Initialize configuration file
+# Initialize configuration
 xearthlayer init
 
-# Start XEarthLayer with a scenery pack (passthrough filesystem)
-xearthlayer start --source <scenery_dir> [--mountpoint <path>]
+# Configure your package library in ~/.xearthlayer/config.ini:
+# [packages]
+# library_url = https://example.com/xearthlayer_package_library.txt
 
-# Download a single tile (for testing)
-xearthlayer download --lat <lat> --lon <lon> --zoom <zoom> --output <file.dds>
+# Install a regional package
+xearthlayer packages install eu-paris
+
+# Start XEarthLayer (mounts all installed packages automatically)
+xearthlayer run
+
+# Fly!
+```
+
+See [Getting Started](docs/getting-started.md) for the complete guide.
+
+## Documentation
+
+### User Guides
+
+| Guide | Description |
+|-------|-------------|
+| [How It Works](docs/how-it-works.md) | Architecture and system overview |
+| [Getting Started](docs/getting-started.md) | First-time setup and usage |
+| [Configuration](docs/configuration.md) | All configuration options |
+| [Package Management](docs/package-management.md) | Installing, updating, removing packages |
+| [Running the Service](docs/running-service.md) | Streaming service options |
+| [Content Publishing](docs/content-publishing.md) | Create packages from Ortho4XP |
+
+### Developer Documentation
+
+See [Developer Documentation](docs/dev/) for architecture, design principles, and implementation details.
+
+## CLI Reference
+
+```bash
+# Setup
+xearthlayer init                      # Create config file
+
+# Package Management
+xearthlayer packages check            # Check available packages
+xearthlayer packages install <region> # Install a package
+xearthlayer packages list             # List installed packages
+xearthlayer packages update [region]  # Update packages
+xearthlayer packages remove <region>  # Remove a package
+
+# Running (primary command)
+xearthlayer run                       # Mount all packages and start streaming
+
+# Advanced: Single Package Mode
+xearthlayer start --source <path>     # Start streaming for a single scenery pack
+
+# Cache Management
+xearthlayer cache stats               # View cache usage
+xearthlayer cache clear               # Clear cache
+
+# Content Publishing
+xearthlayer publish init              # Initialize repository
+xearthlayer publish add --source <path> --region <code>  # Create package
+xearthlayer publish build --region <code>   # Build archives
+xearthlayer publish release --region <code> # Release to library
 ```
 
 Run `xearthlayer --help` for all options.
 
-## Documentation
+## Requirements
 
-| Document | Description |
-|----------|-------------|
-| [Configuration](docs/CONFIGURATION.md) | All configuration settings and INI file reference |
-| [FUSE Filesystem](docs/FUSE_FILESYSTEM.md) | Virtual filesystem architecture and passthrough implementation |
-| [Parallel Processing](docs/PARALLEL_PROCESSING.md) | Thread pool architecture and request coalescing |
-| [Cache Design](docs/CACHE_DESIGN.md) | Two-tier caching strategy (memory + disk) |
-| [Network Statistics](docs/NETWORK_STATS.md) | Download metrics, bandwidth tracking, and periodic logging |
-| [DDS Implementation](docs/DDS_IMPLEMENTATION.md) | BC1/BC3 texture compression and mipmap generation |
-| [Coordinate System](docs/COORDINATE_SYSTEM.md) | Web Mercator projection and tile coordinate system |
-| [Design Principles](docs/DESIGN_PRINCIPLES.md) | SOLID principles and TDD guidelines |
+- **X-Plane 12** (X-Plane 11 may work but is untested)
+- **Linux** with FUSE support
+- **Internet connection** for streaming imagery
 
-## Known Issues
+## Contributing
 
-See [TODO.md](TODO.md) for current bugs and planned enhancements.
+```bash
+# Install Rust via rustup.rs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Clone and build
+git clone https://github.com/youruser/xearthlayer.git
+cd xearthlayer
+make init
+make verify
+```
+
+See [Developer Documentation](docs/dev/) for architecture and guidelines.
 
 ## Credits
 
-This project is architecturally influenced by [AutoOrtho](https://github.com/kubilus1/autoortho) by [kubilus1](https://github.com/kubilus1). XEarthLayer is an independent Rust implementation focused on performance, memory safety, and cross-platform compatibility.
+Architecturally influenced by [AutoOrtho](https://github.com/kubilus1/autoortho) by [kubilus1](https://github.com/kubilus1). XEarthLayer is an independent Rust implementation focused on performance and memory safety.
 
-Developed with assistance from [Claude](https://claude.ai) by Anthropic, using [Claude Code](https://claude.ai/code).
+Developed with assistance from [Claude](https://claude.ai) by Anthropic.
 
 ## License
 
