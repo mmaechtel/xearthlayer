@@ -4,9 +4,9 @@ High-quality satellite imagery for X-Plane, streamed on demand.
 
 ## What It Does
 
-XEarthLayer delivers satellite/aerial imagery to X-Plane without massive downloads. Instead of pre-downloading hundreds of gigabytes of textures, XEarthLayer:
+XEarthLayer delivers satellite/aerial imagery to X-Plane without massive downloads. Instead of pre-downloading thousands of gigabytes of textures, XEarthLayer:
 
-1. **Installs small regional packages** (megabytes) containing terrain definitions
+1. **Installs small regional packages** (single digit gigabytes) containing terrain definitions
 2. **Streams textures on-demand** as you fly, generating them from satellite imagery providers
 
 The result: complete orthophoto scenery with minimal disk usage and no lengthy initial downloads.
@@ -118,9 +118,12 @@ Run `xearthlayer --help` for all options.
 
 ## Requirements
 
-- **X-Plane 12** (X-Plane 11 may work but is untested)
+- **X-Plane 12**
 - **Linux** with FUSE support
-- **Internet connection** for streaming imagery
+- **Modern GPU** with 8GB VRAM or higher, 16GB+ recommended
+- **Fast Internet connection** for streaming imagery, recommended 800Mbps downstream or better
+
+XEarthLayer is not tested with X-Plane 11, but should work in principle. The scenery packages that are provided by this project are designed for X-Plane 12 only. XEarthLayer using regional scenery packages published for X-Plane 11 should work without issue, your mileage may vary.
 
 ## Contributing
 
@@ -142,6 +145,8 @@ See [Developer Documentation](docs/dev/) for architecture and guidelines.
 Architecturally influenced by [AutoOrtho](https://github.com/kubilus1/autoortho) by [kubilus1](https://github.com/kubilus1). XEarthLayer is an independent Rust implementation focused on performance and memory safety.
 
 Developed with assistance from [Claude](https://claude.ai) by Anthropic.
+
+Made with :heart: in Californa.
 
 ## License
 
