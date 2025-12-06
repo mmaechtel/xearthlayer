@@ -156,6 +156,10 @@ pub struct InstallArgs {
     pub library_url: String,
     pub install_dir: PathBuf,
     pub temp_dir: PathBuf,
+    /// Path to X-Plane Custom Scenery directory for overlay symlinks.
+    pub custom_scenery_path: Option<PathBuf>,
+    /// Automatically install overlay package when installing ortho for the same region.
+    pub auto_install_overlays: bool,
 }
 
 /// Arguments for the update command.
@@ -174,6 +178,8 @@ pub struct RemoveArgs {
     pub package_type: PackageType,
     pub install_dir: PathBuf,
     pub force: bool,
+    /// Path to X-Plane Custom Scenery directory for overlay symlinks.
+    pub custom_scenery_path: Option<PathBuf>,
 }
 
 /// Arguments for the info command.

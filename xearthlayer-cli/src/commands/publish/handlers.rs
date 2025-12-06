@@ -87,13 +87,24 @@ impl CommandHandler for ScanHandler {
     type Args = ScanArgs;
 
     fn execute(args: Self::Args, ctx: &CommandContext<'_>) -> Result<(), CliError> {
+        let package_type = PackageType::from(args.package_type);
+
+        let source_type = match package_type {
+            PackageType::Ortho => "Ortho4XP tiles",
+            PackageType::Overlay => "Ortho4XP overlays",
+        };
+
         ctx.output.println(&format!(
-            "Scanning Ortho4XP output at: {}",
+            "Scanning {} at: {}",
+            source_type,
             args.source.display()
         ));
         ctx.output.newline();
 
-        let scan_result = ctx.publisher.scan_scenery(&args.source)?;
+        let scan_result = match package_type {
+            PackageType::Ortho => ctx.publisher.scan_scenery(&args.source)?,
+            PackageType::Overlay => ctx.publisher.scan_overlay(&args.source)?,
+        };
 
         print_scan_result(ctx.output, &scan_result);
 

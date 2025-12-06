@@ -19,9 +19,15 @@ scenery_dir = /path/to/X-Plane 12/Custom Scenery
 
 [packages]
 library_url = https://example.com/xearthlayer_package_library.txt
+install_location = ~/.xearthlayer/packages
+auto_install_overlays = true
 ```
 
 With this configured, you won't need to pass `--library-url` to every command.
+
+### Auto-Install Overlays
+
+When `auto_install_overlays = true`, installing an ortho package will automatically install the matching overlay package for the same region (if available). This saves time when setting up new regions.
 
 ## Commands
 
@@ -273,10 +279,18 @@ If a download fails:
 
 ## X-Plane Integration
 
-Installed packages are placed in your Custom Scenery folder with names like:
+Installed packages appear in your Custom Scenery folder with names like:
 
 - `zzXEL_eu-paris_ortho` (orthophoto)
 - `yzXEL_eu-paris_overlay` (overlay)
+
+### Package Installation Methods
+
+**Ortho packages** are installed to the package directory (e.g., `~/.xearthlayer/packages/`) and mounted via FUSE to Custom Scenery when XEarthLayer runs.
+
+**Overlay packages** are installed to the package directory, then a symlink is automatically created in Custom Scenery pointing to the installed package. This allows X-Plane to access the overlay files directly without FUSE.
+
+### Scenery Load Order
 
 The `zz` and `yz` prefixes ensure correct scenery loading order in X-Plane:
 

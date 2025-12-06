@@ -630,12 +630,13 @@ mod scan_tests {
 
         let args = ScanArgs {
             source: PathBuf::from("/ortho4xp/tiles"),
+            package_type: PackageTypeArg::Ortho,
         };
 
         let result = ScanHandler::execute(args, &ctx);
 
         assert!(result.is_ok());
-        assert!(output.contains("Scanning Ortho4XP output"));
+        assert!(output.contains("Scanning Ortho4XP tiles"));
         assert!(output.contains("Tiles:  2"));
         assert!(output.contains("+37-122"));
         assert!(output.contains("+38-122"));
@@ -652,6 +653,7 @@ mod scan_tests {
 
         let args = ScanArgs {
             source: PathBuf::from("/ortho4xp/tiles"),
+            package_type: PackageTypeArg::Ortho,
         };
 
         let result = ScanHandler::execute(args, &ctx);
@@ -670,6 +672,7 @@ mod scan_tests {
 
         let args = ScanArgs {
             source: PathBuf::from("/nonexistent"),
+            package_type: PackageTypeArg::Ortho,
         };
 
         let result = ScanHandler::execute(args, &ctx);

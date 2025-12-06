@@ -141,7 +141,11 @@ pub fn build_archive(
         split_archive(&archive_path, config.part_size)?
     } else {
         // Single part - rename to add .aa suffix for consistency
-        let part_path = archive_path.with_extension("tar.gz.aa");
+        // Note: We can't use with_extension here because the archive name already
+        // has .tar.gz extension, and with_extension would only replace .gz
+        let mut part_filename = archive_path.as_os_str().to_os_string();
+        part_filename.push(".aa");
+        let part_path = PathBuf::from(part_filename);
         fs::rename(&archive_path, &part_path).map_err(|e| PublishError::WriteFailed {
             path: part_path.clone(),
             source: e,

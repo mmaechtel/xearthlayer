@@ -4,7 +4,9 @@
 //! business logic for its respective command.
 
 use xearthlayer::config::format_size;
-use xearthlayer::manager::{MountStatus, PackageStatus};
+use xearthlayer::manager::{
+    create_overlay_symlink, remove_overlay_symlink, MountStatus, PackageStatus,
+};
 use xearthlayer::package::PackageType;
 
 use super::args::{CheckArgs, InfoArgs, InstallArgs, ListArgs, RemoveArgs, UpdateArgs};
@@ -181,6 +183,101 @@ impl CommandHandler for CheckHandler {
 /// Handler for the `packages install` command.
 pub struct InstallHandler;
 
+impl InstallHandler {
+    /// Create overlay symlink if custom_scenery_path is configured.
+    fn create_symlink_if_configured(
+        install_path: &std::path::Path,
+        custom_scenery_path: &Option<std::path::PathBuf>,
+        ctx: &CommandContext<'_>,
+    ) {
+        let Some(ref scenery_path) = custom_scenery_path else {
+            ctx.output
+                .println("Note: No Custom Scenery path configured. Symlink not created.");
+            ctx.output.println(
+                "Set 'custom_scenery_path' in config to enable automatic symlink creation.",
+            );
+            return;
+        };
+
+        ctx.output.println("Creating symlink in Custom Scenery...");
+        match create_overlay_symlink(install_path, scenery_path) {
+            Ok(symlink_path) => {
+                ctx.output
+                    .success(&format!("Created symlink: {}", symlink_path.display()));
+            }
+            Err(e) => {
+                ctx.output
+                    .error(&format!("Warning: Failed to create symlink: {}", e));
+                ctx.output.println(
+                    "You may need to manually create a symlink in your Custom Scenery folder.",
+                );
+            }
+        }
+    }
+
+    /// Install an overlay package for auto_install_overlays feature.
+    fn install_overlay_for_region(
+        region: &str,
+        library: &xearthlayer::package::PackageLibrary,
+        args: &InstallArgs,
+        ctx: &CommandContext<'_>,
+    ) {
+        // Find overlay entry in library
+        let overlay_entry = library.entries.iter().find(|e| {
+            e.title.to_lowercase() == region.to_lowercase()
+                && e.package_type == PackageType::Overlay
+        });
+
+        let Some(overlay_entry) = overlay_entry else {
+            return; // No overlay available for this region
+        };
+
+        ctx.output.newline();
+        ctx.output.println(&format!(
+            "Auto-installing overlay package for {}...",
+            region
+        ));
+
+        // Fetch and install overlay
+        let metadata = match ctx.manager.fetch_metadata(&overlay_entry.metadata_url) {
+            Ok(m) => m,
+            Err(e) => {
+                ctx.output
+                    .error(&format!("Failed to fetch overlay metadata: {}", e));
+                return;
+            }
+        };
+
+        ctx.output.println(&format!(
+            "Overlay package: {} v{}",
+            metadata.title, metadata.package_version
+        ));
+
+        let result =
+            match ctx
+                .manager
+                .install_package(&metadata, &args.install_dir, &args.temp_dir, None)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    ctx.output
+                        .error(&format!("Failed to install overlay package: {}", e));
+                    return;
+                }
+            };
+
+        ctx.output.success(&format!(
+            "Installed overlay {} v{} to {}",
+            result.region,
+            result.version,
+            result.install_path.display()
+        ));
+
+        // Create symlink for the overlay
+        Self::create_symlink_if_configured(&result.install_path, &args.custom_scenery_path, ctx);
+    }
+}
+
 impl CommandHandler for InstallHandler {
     type Args = InstallArgs;
 
@@ -231,12 +328,16 @@ impl CommandHandler for InstallHandler {
         ));
         ctx.output.newline();
 
-        // Install the package (without progress callback due to lifetime constraints)
-        let result =
-            ctx.manager
-                .install_package(&metadata, &args.install_dir, &args.temp_dir, None)?;
+        // Install the package with progress reporting
+        let progress_callback = ctx.output.create_progress_callback();
+        let result = ctx.manager.install_package(
+            &metadata,
+            &args.install_dir,
+            &args.temp_dir,
+            Some(progress_callback),
+        )?;
 
-        ctx.output.newline();
+        ctx.output.progress_done();
         ctx.output.success(&format!(
             "Installed {} ({}) v{} to {}",
             result.region,
@@ -249,6 +350,21 @@ impl CommandHandler for InstallHandler {
             format_size(result.bytes_downloaded as usize),
             result.files_extracted
         ));
+
+        // Create symlink for overlay packages
+        if args.package_type == PackageType::Overlay {
+            ctx.output.newline();
+            Self::create_symlink_if_configured(
+                &result.install_path,
+                &args.custom_scenery_path,
+                ctx,
+            );
+        }
+
+        // Auto-install overlay when installing ortho (if enabled)
+        if args.package_type == PackageType::Ortho && args.auto_install_overlays {
+            Self::install_overlay_for_region(&args.region, &library, &args, ctx);
+        }
 
         Ok(())
     }
@@ -455,6 +571,29 @@ impl CommandHandler for RemoveHandler {
         {
             ctx.output.println("Removal cancelled.");
             return Ok(());
+        }
+
+        // Remove symlink for overlay packages first
+        if args.package_type == PackageType::Overlay {
+            if let Some(ref custom_scenery_path) = args.custom_scenery_path {
+                ctx.output
+                    .println("Removing symlink from Custom Scenery...");
+                match remove_overlay_symlink(&args.region, custom_scenery_path) {
+                    Ok(true) => {
+                        ctx.output.success("Symlink removed.");
+                    }
+                    Ok(false) => {
+                        ctx.output.println("No symlink found to remove.");
+                    }
+                    Err(e) => {
+                        ctx.output
+                            .error(&format!("Warning: Failed to remove symlink: {}", e));
+                        ctx.output.println(
+                            "You may need to manually remove the symlink from your Custom Scenery folder.",
+                        );
+                    }
+                }
+            }
         }
 
         // Remove the package

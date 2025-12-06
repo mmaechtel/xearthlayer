@@ -44,14 +44,34 @@ fn load_config() -> ConfigFile {
 
 /// Get the default installation directory.
 ///
-/// Uses the config file's scenery_dir if available, otherwise falls back to
-/// a sensible default.
+/// Priority:
+/// 1. packages.install_location from config
+/// 2. ~/.xearthlayer/packages (default)
 fn default_install_dir(config: &ConfigFile) -> PathBuf {
+    config.packages.install_location.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".xearthlayer")
+            .join("packages")
+    })
+}
+
+/// Get the Custom Scenery directory for overlay symlinks.
+///
+/// Priority:
+/// 1. packages.custom_scenery_path from config
+/// 2. xplane.scenery_dir from config
+/// 3. Auto-detect from X-Plane installation
+fn default_custom_scenery_dir(config: &ConfigFile) -> Option<PathBuf> {
     config
-        .xplane
-        .scenery_dir
+        .packages
+        .custom_scenery_path
         .clone()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .or_else(|| config.xplane.scenery_dir.clone())
+        .or_else(|| {
+            // Try auto-detect from X-Plane
+            xearthlayer::config::detect_custom_scenery().ok()
+        })
 }
 
 /// Get the default temporary directory.
@@ -131,6 +151,8 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
                 library_url: require_library_url(library_url, &config)?,
                 install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
                 temp_dir: temp_dir.unwrap_or_else(|| default_temp_dir(&config)),
+                custom_scenery_path: default_custom_scenery_dir(&config),
+                auto_install_overlays: config.packages.auto_install_overlays,
             },
             &ctx,
         ),
@@ -165,6 +187,7 @@ pub fn run(command: PackagesCommands) -> Result<(), CliError> {
                 package_type: r#type.into(),
                 install_dir: install_dir.unwrap_or_else(|| default_install_dir(&config)),
                 force,
+                custom_scenery_path: default_custom_scenery_dir(&config),
             },
             &ctx,
         ),

@@ -115,6 +115,13 @@ pub struct PackagesSettings {
     /// URL to the package library index.
     /// This is where the package manager fetches the list of available packages.
     pub library_url: Option<String>,
+    /// Local directory for installed packages (default: ~/.xearthlayer/packages).
+    pub install_location: Option<PathBuf>,
+    /// X-Plane Custom Scenery directory for overlay symlinks.
+    /// If None, auto-detects from xplane.scenery_dir or ~/.x-plane/x-plane_install_12.txt
+    pub custom_scenery_path: Option<PathBuf>,
+    /// Automatically install overlay packages when installing ortho for same region.
+    pub auto_install_overlays: bool,
     /// Temporary directory for downloads (default: system temp dir).
     pub temp_dir: Option<PathBuf>,
 }
@@ -157,6 +164,9 @@ impl Default for ConfigFile {
             xplane: XPlaneSettings { scenery_dir: None },
             packages: PackagesSettings {
                 library_url: None,
+                install_location: None,
+                custom_scenery_path: None,
+                auto_install_overlays: false,
                 temp_dir: None,
             },
             logging: LoggingSettings {
@@ -345,6 +355,22 @@ impl ConfigFile {
                     config.packages.library_url = Some(v.to_string());
                 }
             }
+            if let Some(v) = section.get("install_location") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    config.packages.install_location = Some(expand_tilde(v));
+                }
+            }
+            if let Some(v) = section.get("custom_scenery_path") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    config.packages.custom_scenery_path = Some(expand_tilde(v));
+                }
+            }
+            if let Some(v) = section.get("auto_install_overlays") {
+                let v = v.trim().to_lowercase();
+                config.packages.auto_install_overlays = v == "true" || v == "1" || v == "yes";
+            }
             if let Some(v) = section.get("temp_dir") {
                 let v = v.trim();
                 if !v.is_empty() {
@@ -376,6 +402,23 @@ impl ConfigFile {
             .map(|p| path_to_string(p))
             .unwrap_or_default();
         let library_url = self.packages.library_url.as_deref().unwrap_or("");
+        let install_location = self
+            .packages
+            .install_location
+            .as_ref()
+            .map(|p| path_to_string(p))
+            .unwrap_or_default();
+        let custom_scenery_path = self
+            .packages
+            .custom_scenery_path
+            .as_ref()
+            .map(|p| path_to_string(p))
+            .unwrap_or_default();
+        let auto_install_overlays = if self.packages.auto_install_overlays {
+            "true"
+        } else {
+            "false"
+        };
         let temp_dir = self
             .packages
             .temp_dir
@@ -435,6 +478,13 @@ scenery_dir = {}
 ; URL to the XEarthLayer package library index
 ; This is where available packages are discovered for 'xearthlayer packages check/install'
 library_url = {}
+; Local directory for installed packages (default: ~/.xearthlayer/packages)
+install_location = {}
+; X-Plane Custom Scenery directory for overlay symlinks
+; If empty, uses xplane.scenery_dir or auto-detects
+custom_scenery_path = {}
+; Automatically install overlay packages when installing ortho for same region
+auto_install_overlays = {}
 ; Temporary directory for package downloads (default: system temp dir)
 ; Large packages are downloaded here before extraction
 temp_dir = {}
@@ -454,6 +504,9 @@ file = {}
             self.generation.timeout,
             scenery_dir,
             library_url,
+            install_location,
+            custom_scenery_path,
+            auto_install_overlays,
             temp_dir,
             path_to_string(&self.logging.file),
         )

@@ -157,11 +157,17 @@ Key settings in `~/.xearthlayer/config.ini`:
 
 ```ini
 [packages]
-# Remote library index location
-library_root = https://packages.xearthlayer.org
+# Remote library index URL
+library_url = https://packages.xearthlayer.org/xearthlayer_package_library.txt
 
 # Local package storage location
 install_location = ~/.xearthlayer/packages
+
+# X-Plane Custom Scenery path for overlay symlinks
+custom_scenery_path = /path/to/X-Plane 12/Custom Scenery
+
+# Automatically install matching overlay when installing ortho
+auto_install_overlays = true
 ```
 
 ## Next Steps

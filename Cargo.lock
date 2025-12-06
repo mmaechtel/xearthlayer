@@ -3103,6 +3103,7 @@ dependencies = [
  "chrono",
  "clap",
  "ctrlc",
+ "dirs",
  "fuser",
  "image",
  "semver",

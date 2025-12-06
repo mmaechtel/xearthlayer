@@ -73,6 +73,16 @@ pub enum ManagerError {
 
     /// Network timeout.
     Timeout { url: String, timeout_secs: u64 },
+
+    /// Invalid path provided.
+    InvalidPath(String),
+
+    /// Symlink operation failed.
+    SymlinkFailed {
+        source: PathBuf,
+        target: PathBuf,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ManagerError {
@@ -161,6 +171,20 @@ impl std::fmt::Display for ManagerError {
             Self::HttpError(msg) => write!(f, "HTTP error: {}", msg),
             Self::Timeout { url, timeout_secs } => {
                 write!(f, "request to {} timed out after {}s", url, timeout_secs)
+            }
+            Self::InvalidPath(msg) => write!(f, "invalid path: {}", msg),
+            Self::SymlinkFailed {
+                source,
+                target,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "symlink operation failed ({} -> {}): {}",
+                    source.display(),
+                    target.display(),
+                    reason
+                )
             }
         }
     }

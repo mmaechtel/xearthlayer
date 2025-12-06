@@ -38,6 +38,20 @@ impl Output for ConsoleOutput {
         print!("{}", message);
         io::stdout().flush().ok();
     }
+
+    fn progress_done(&self) {
+        // Print newline to preserve the final progress state
+        println!();
+    }
+
+    fn create_progress_callback(&self) -> ProgressCallback {
+        Box::new(|stage, progress, message| {
+            let percent = (progress * 100.0).min(100.0) as u8;
+            let stage_name = stage.name();
+            print!("\r{stage_name}... {percent}% {message:<50}");
+            io::stdout().flush().ok();
+        })
+    }
 }
 
 // ============================================================================

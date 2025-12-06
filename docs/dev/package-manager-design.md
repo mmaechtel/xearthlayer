@@ -49,16 +49,19 @@ Settings in `~/.xearthlayer/config.ini`:
 ```ini
 [packages]
 # URL to the package library index
-library_root = https://packages.xearthlayer.org
+library_url = https://packages.xearthlayer.org/xearthlayer_package_library.txt
 
 # Local directory for package storage
 install_location = ~/.xearthlayer/packages
 
-# Number of parallel download connections
-download_threads = 4
+# X-Plane Custom Scenery path for overlay symlinks
+custom_scenery_path = /path/to/X-Plane 12/Custom Scenery
 
-# Download chunk size for resume support (bytes)
-download_chunk_size = 10485760  # 10MB
+# Automatically install matching overlay when installing ortho
+auto_install_overlays = true
+
+# Temporary directory for downloads
+temp_dir = /tmp/xearthlayer
 ```
 
 ## Local Package Discovery

@@ -76,7 +76,13 @@ pub fn run(command: PublishCommands) -> Result<(), CliError> {
             InitHandler::execute(InitArgs { path, part_size }, &ctx)
         }
 
-        PublishCommands::Scan { source } => ScanHandler::execute(ScanArgs { source }, &ctx),
+        PublishCommands::Scan { source, r#type } => ScanHandler::execute(
+            ScanArgs {
+                source,
+                package_type: r#type,
+            },
+            &ctx,
+        ),
 
         PublishCommands::Add {
             source,

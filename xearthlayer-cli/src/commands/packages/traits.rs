@@ -32,6 +32,17 @@ pub trait Output: Send + Sync {
     #[allow(dead_code)]
     fn print(&self, message: &str);
 
+    /// Signal that progress display is complete.
+    ///
+    /// Call this after progress operations are done to ensure proper output formatting.
+    fn progress_done(&self);
+
+    /// Create a progress callback for package installation.
+    ///
+    /// Returns a boxed callback compatible with the manager's install function.
+    /// The callback is responsible for displaying progress information.
+    fn create_progress_callback(&self) -> ProgressCallback;
+
     /// Print an empty line.
     fn newline(&self) {
         self.println("");

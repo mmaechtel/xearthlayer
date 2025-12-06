@@ -69,12 +69,16 @@ Archive part size: 500 MB
 Preview what tiles will be included before adding them:
 
 ```bash
+# Scan ortho tiles (default)
 xearthlayer publish scan --source /path/to/Ortho4XP_Tiles
+
+# Scan overlay tiles
+xearthlayer publish scan --source /path/to/Overlay_Tiles --type overlay
 ```
 
 Output:
 ```
-Scanning Ortho4XP output at: /path/to/Ortho4XP_Tiles
+Scanning Ortho4XP tiles at: /path/to/Ortho4XP_Tiles
 
 Scan Results
 ============

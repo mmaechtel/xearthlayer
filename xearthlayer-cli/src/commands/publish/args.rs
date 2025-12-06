@@ -68,6 +68,10 @@ pub enum PublishCommands {
         /// Path to Ortho4XP Tiles directory
         #[arg(long)]
         source: PathBuf,
+
+        /// Package type to scan for
+        #[arg(long, value_enum, default_value = "ortho")]
+        r#type: PackageTypeArg,
     },
 
     /// Process Ortho4XP tiles into a package
@@ -220,6 +224,7 @@ pub struct InitArgs {
 /// Arguments for the scan command.
 pub struct ScanArgs {
     pub source: PathBuf,
+    pub package_type: PackageTypeArg,
 }
 
 /// Arguments for the add command.
