@@ -10,10 +10,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::package::{PackageMetadata, PackageType};
 
-use super::download::{DownloadState, MultiPartDownloader};
+use super::download::{DownloadState, MultiPartDownloader, MultiPartProgressCallback};
 use super::error::{ManagerError, ManagerResult};
 use super::extractor::ShellExtractor;
 use super::local::LocalPackageStore;
@@ -62,6 +63,22 @@ impl InstallStage {
             Self::Cleanup => "Cleaning up",
             Self::Complete => "Complete",
         }
+    }
+
+    /// Whether this stage has indeterminate progress (no meaningful percentage).
+    ///
+    /// Indeterminate stages should show a spinner or similar indicator
+    /// rather than a percentage progress bar.
+    pub fn is_indeterminate(&self) -> bool {
+        matches!(
+            self,
+            Self::FetchingMetadata
+                | Self::Verifying
+                | Self::Reassembling
+                | Self::Extracting
+                | Self::Installing
+                | Self::Cleanup
+        )
     }
 }
 
@@ -179,6 +196,9 @@ impl<C: LibraryClient> PackageInstaller<C> {
         let package_type = metadata.package_type;
         let version = metadata.package_version.clone();
 
+        // Wrap callback in Arc for sharing with download progress
+        let on_progress = on_progress.map(Arc::new);
+
         // Report progress helper
         let report = |stage: InstallStage, progress: f64, message: &str| {
             if let Some(ref cb) = on_progress {
@@ -220,22 +240,48 @@ impl<C: LibraryClient> PackageInstaller<C> {
             .collect();
 
         // Stage 2: Download all parts
-        report(
-            InstallStage::Downloading,
-            0.0,
-            &format!("Downloading {} parts...", metadata.parts.len()),
-        );
-
         let mut download_state = DownloadState::new(urls, checksums, destinations.clone());
         let downloader = MultiPartDownloader::with_settings(
             std::time::Duration::from_secs(300),
             self.parallel_downloads,
         );
 
-        // Download without per-part progress (we report at stage level)
-        downloader.download_all(&mut download_state, None)?;
+        // Query sizes via HEAD requests for accurate progress
+        report(
+            InstallStage::Downloading,
+            0.0,
+            &format!("Preparing {} parts...", metadata.parts.len()),
+        );
+        downloader.query_sizes(&mut download_state);
 
-        let bytes_downloaded = download_state.total_bytes;
+        // Create download progress callback that bridges to InstallProgressCallback
+        // Signature: (bytes_downloaded, total_bytes, parts_completed, total_parts)
+        let download_progress: Option<MultiPartProgressCallback> = on_progress.as_ref().map(|cb| {
+            let cb = Arc::clone(cb);
+            let boxed: MultiPartProgressCallback = Box::new(
+                move |bytes: u64, total_bytes: u64, completed: usize, total: usize| {
+                    // Use byte-based progress if total size is known
+                    let progress = if total_bytes > 0 {
+                        (bytes as f64 / total_bytes as f64).min(1.0)
+                    } else if total > 0 {
+                        completed as f64 / total as f64
+                    } else {
+                        0.0
+                    };
+                    let message = format!(
+                        "{:.1} / {:.1} MB",
+                        bytes as f64 / 1_048_576.0,
+                        total_bytes as f64 / 1_048_576.0,
+                    );
+                    cb(InstallStage::Downloading, progress, &message);
+                },
+            );
+            boxed
+        });
+
+        downloader.download_all(&mut download_state, download_progress)?;
+
+        let bytes_downloaded = download_state.bytes_downloaded;
         report(
             InstallStage::Downloading,
             1.0,
@@ -421,6 +467,21 @@ mod tests {
     fn test_install_stage_equality() {
         assert_eq!(InstallStage::Downloading, InstallStage::Downloading);
         assert_ne!(InstallStage::Downloading, InstallStage::Extracting);
+    }
+
+    #[test]
+    fn test_install_stage_is_indeterminate() {
+        // Indeterminate stages - no meaningful percentage
+        assert!(InstallStage::FetchingMetadata.is_indeterminate());
+        assert!(InstallStage::Verifying.is_indeterminate());
+        assert!(InstallStage::Reassembling.is_indeterminate());
+        assert!(InstallStage::Extracting.is_indeterminate());
+        assert!(InstallStage::Installing.is_indeterminate());
+        assert!(InstallStage::Cleanup.is_indeterminate());
+
+        // Determinate stages - show percentage progress
+        assert!(!InstallStage::Downloading.is_indeterminate());
+        assert!(!InstallStage::Complete.is_indeterminate());
     }
 
     #[test]

@@ -5,12 +5,12 @@
 //! - HTTP Range request support for resumable downloads
 //! - SHA-256 checksum verification
 //! - Progress callbacks for UI updates
-//! - Parallel download support
+//! - Parallel download support with real-time byte-level progress
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,9 +20,9 @@ use sha2::{Digest, Sha256};
 use super::error::{ManagerError, ManagerResult};
 use super::traits::{PackageDownloader, ProgressCallback};
 
-/// Progress callback for multi-part downloads.
-/// Arguments: (parts_completed, total_parts, total_bytes_downloaded)
-pub type MultiPartProgressCallback = Box<dyn Fn(usize, usize, u64) + Send + Sync>;
+/// Progress callback for multi-part downloads with real-time byte-level updates.
+/// Arguments: (bytes_downloaded, total_bytes, parts_completed, total_parts)
+pub type MultiPartProgressCallback = Box<dyn Fn(u64, u64, usize, usize) + Send + Sync>;
 
 /// Default timeout for HTTP requests in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 300; // 5 minutes
@@ -70,6 +70,24 @@ impl HttpDownloader {
             .expect("Failed to create HTTP client");
 
         Self { client, timeout }
+    }
+
+    /// Get the file size from a URL via HEAD request.
+    ///
+    /// Returns 0 if the size cannot be determined.
+    pub fn get_file_size(&self, url: &str) -> u64 {
+        self.client
+            .head(url)
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| {
+                r.headers()
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
     }
 
     /// Download a file with resumption support.
@@ -314,8 +332,10 @@ pub struct DownloadState {
     pub total_parts: usize,
     /// Number of parts downloaded.
     pub downloaded_parts: usize,
-    /// Total bytes downloaded.
-    pub total_bytes: u64,
+    /// Total bytes downloaded so far.
+    pub bytes_downloaded: u64,
+    /// Total expected size of all parts (from HEAD requests).
+    pub total_size: u64,
     /// List of URLs to download.
     pub urls: Vec<String>,
     /// Corresponding checksums for each URL.
@@ -337,7 +357,8 @@ impl DownloadState {
         Self {
             total_parts,
             downloaded_parts: 0,
-            total_bytes: 0,
+            bytes_downloaded: 0,
+            total_size: 0,
             urls,
             checksums,
             destinations,
@@ -350,12 +371,17 @@ impl DownloadState {
         self.downloaded_parts == self.total_parts && self.failed.is_empty()
     }
 
-    /// Get the progress as a percentage.
+    /// Get the progress as a percentage based on bytes.
     pub fn progress_percent(&self) -> f64 {
-        if self.total_parts == 0 {
-            100.0
+        if self.total_size == 0 {
+            // Fall back to part-based progress if total size unknown
+            if self.total_parts == 0 {
+                100.0
+            } else {
+                (self.downloaded_parts as f64 / self.total_parts as f64) * 100.0
+            }
         } else {
-            (self.downloaded_parts as f64 / self.total_parts as f64) * 100.0
+            (self.bytes_downloaded as f64 / self.total_size as f64) * 100.0
         }
     }
 }
@@ -391,6 +417,36 @@ impl MultiPartDownloader {
         }
     }
 
+    /// Query the total size of all parts via HEAD requests.
+    ///
+    /// This updates `state.total_size` with the sum of all part sizes.
+    /// HEAD requests are made in parallel for efficiency.
+    pub fn query_sizes(&self, state: &mut DownloadState) {
+        use std::thread;
+
+        if state.urls.is_empty() {
+            return;
+        }
+
+        // Query sizes in parallel
+        let urls = state.urls.clone();
+        let timeout = self.downloader.timeout;
+
+        let handles: Vec<_> = urls
+            .into_iter()
+            .map(|url| {
+                thread::spawn(move || {
+                    let downloader = HttpDownloader::with_timeout(timeout);
+                    downloader.get_file_size(&url)
+                })
+            })
+            .collect();
+
+        let total_size: u64 = handles.into_iter().filter_map(|h| h.join().ok()).sum();
+
+        state.total_size = total_size;
+    }
+
     /// Download all parts of a package.
     ///
     /// Parts are downloaded sequentially or in parallel depending on configuration.
@@ -402,19 +458,52 @@ impl MultiPartDownloader {
     ) -> ManagerResult<()> {
         use std::thread;
 
+        // Wrap callback in Arc for sharing
+        let on_progress: Option<Arc<MultiPartProgressCallback>> = on_progress.map(Arc::new);
+
+        // Capture total_size for progress callbacks
+        let total_size = state.total_size;
+
         if self.parallel_downloads <= 1 {
-            // Sequential download
+            // Sequential download with real-time progress
             for i in 0..state.total_parts {
                 let url = &state.urls[i];
                 let checksum = &state.checksums[i];
                 let dest = &state.destinations[i];
 
-                match self.downloader.download(url, dest, Some(checksum)) {
+                // Create per-download progress callback for real-time updates
+                let base_bytes = state.bytes_downloaded;
+                let completed_parts = state.downloaded_parts;
+                let total_parts = state.total_parts;
+
+                let result = if let Some(ref cb) = on_progress {
+                    let cb = Arc::clone(cb);
+                    let progress_cb: ProgressCallback =
+                        Box::new(move |downloaded: u64, _total: u64| {
+                            cb(
+                                base_bytes + downloaded,
+                                total_size,
+                                completed_parts,
+                                total_parts,
+                            );
+                        });
+                    self.downloader
+                        .download_with_progress(url, dest, Some(checksum), progress_cb)
+                } else {
+                    self.downloader.download(url, dest, Some(checksum))
+                };
+
+                match result {
                     Ok(bytes) => {
                         state.downloaded_parts += 1;
-                        state.total_bytes += bytes;
+                        state.bytes_downloaded += bytes;
                         if let Some(ref cb) = on_progress {
-                            cb(state.downloaded_parts, state.total_parts, state.total_bytes);
+                            cb(
+                                state.bytes_downloaded,
+                                total_size,
+                                state.downloaded_parts,
+                                state.total_parts,
+                            );
                         }
                     }
                     Err(_) => {
@@ -423,10 +512,37 @@ impl MultiPartDownloader {
                 }
             }
         } else {
-            // Parallel download using thread pool
-            let total_downloaded = Arc::new(AtomicU64::new(0));
-            let parts_completed = Arc::new(AtomicU64::new(0));
+            // Parallel download with real-time progress reporting
+            // Each part gets its own atomic counter for in-progress bytes
+            let part_progress: Arc<Vec<AtomicU64>> =
+                Arc::new((0..state.total_parts).map(|_| AtomicU64::new(0)).collect());
+            let parts_completed = Arc::new(AtomicUsize::new(0));
+            let downloads_done = Arc::new(AtomicBool::new(false));
             let failed_parts = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            // Spawn progress reporter thread if callback provided
+            let reporter_handle = on_progress.as_ref().map(|cb| {
+                let part_progress = Arc::clone(&part_progress);
+                let parts_completed = Arc::clone(&parts_completed);
+                let downloads_done = Arc::clone(&downloads_done);
+                let total_parts = state.total_parts;
+                let cb = Arc::clone(cb);
+
+                thread::spawn(move || {
+                    while !downloads_done.load(Ordering::SeqCst) {
+                        // Sum progress from all parts
+                        let bytes: u64 =
+                            part_progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
+                        let completed = parts_completed.load(Ordering::SeqCst);
+                        cb(bytes, total_size, completed, total_parts);
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    // Final report
+                    let bytes: u64 = part_progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
+                    let completed = parts_completed.load(Ordering::SeqCst);
+                    cb(bytes, total_size, completed, total_parts);
+                })
+            });
 
             // Chunk the work into batches
             let mut handles = Vec::new();
@@ -439,16 +555,31 @@ impl MultiPartDownloader {
                     let url = state.urls[i].clone();
                     let checksum = state.checksums[i].clone();
                     let dest = state.destinations[i].clone();
-                    let total_downloaded = Arc::clone(&total_downloaded);
+                    let part_progress = Arc::clone(&part_progress);
                     let parts_completed = Arc::clone(&parts_completed);
                     let failed_parts = Arc::clone(&failed_parts);
                     let timeout = self.downloader.timeout;
+                    let part_index = i;
 
                     let handle = thread::spawn(move || {
                         let downloader = HttpDownloader::with_timeout(timeout);
-                        match downloader.download(&url, &dest, Some(&checksum)) {
+                        // Create per-download progress callback that updates this part's counter
+                        let progress_counter = Arc::clone(&part_progress);
+                        let progress_cb: ProgressCallback =
+                            Box::new(move |downloaded: u64, _total: u64| {
+                                // Update this specific part's progress
+                                progress_counter[part_index].store(downloaded, Ordering::SeqCst);
+                            });
+
+                        match downloader.download_with_progress(
+                            &url,
+                            &dest,
+                            Some(&checksum),
+                            progress_cb,
+                        ) {
                             Ok(bytes) => {
-                                total_downloaded.fetch_add(bytes, Ordering::SeqCst);
+                                // Set final size for this part
+                                part_progress[part_index].store(bytes, Ordering::SeqCst);
                                 parts_completed.fetch_add(1, Ordering::SeqCst);
                             }
                             Err(_) => {
@@ -464,18 +595,17 @@ impl MultiPartDownloader {
                 for handle in handles.drain(..) {
                     handle.join().ok();
                 }
+            }
 
-                // Report progress after each batch
-                if let Some(ref cb) = on_progress {
-                    let completed = parts_completed.load(Ordering::SeqCst) as usize;
-                    let bytes = total_downloaded.load(Ordering::SeqCst);
-                    cb(completed, state.total_parts, bytes);
-                }
+            // Signal reporter to stop and wait for it
+            downloads_done.store(true, Ordering::SeqCst);
+            if let Some(handle) = reporter_handle {
+                handle.join().ok();
             }
 
             // Update state with final results
-            state.downloaded_parts = parts_completed.load(Ordering::SeqCst) as usize;
-            state.total_bytes = total_downloaded.load(Ordering::SeqCst);
+            state.downloaded_parts = parts_completed.load(Ordering::SeqCst);
+            state.bytes_downloaded = part_progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
             state.failed = failed_parts.lock().unwrap().clone();
         }
 
@@ -501,7 +631,7 @@ impl MultiPartDownloader {
             match self.downloader.download(url, dest, Some(checksum)) {
                 Ok(bytes) => {
                     state.downloaded_parts += 1;
-                    state.total_bytes += bytes;
+                    state.bytes_downloaded += bytes;
                 }
                 Err(_) => {
                     state.failed.push(i);

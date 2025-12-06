@@ -252,20 +252,30 @@ impl InstallHandler {
             "Overlay package: {} v{}",
             metadata.title, metadata.package_version
         ));
+        ctx.output.println(&format!(
+            "Parts: {} ({})",
+            metadata.parts.len(),
+            metadata.filename
+        ));
+        ctx.output.newline();
 
-        let result =
-            match ctx
-                .manager
-                .install_package(&metadata, &args.install_dir, &args.temp_dir, None)
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    ctx.output
-                        .error(&format!("Failed to install overlay package: {}", e));
-                    return;
-                }
-            };
+        // Install with progress callback
+        let progress_callback = ctx.output.create_progress_callback();
+        let result = match ctx.manager.install_package(
+            &metadata,
+            &args.install_dir,
+            &args.temp_dir,
+            Some(progress_callback),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                ctx.output
+                    .error(&format!("Failed to install overlay package: {}", e));
+                return;
+            }
+        };
 
+        ctx.output.progress_done();
         ctx.output.success(&format!(
             "Installed overlay {} v{} to {}",
             result.region,
@@ -491,13 +501,15 @@ impl CommandHandler for UpdateHandler {
                 }
             };
 
+            let progress_callback = ctx.output.create_progress_callback();
             match ctx.manager.install_package(
                 &metadata,
                 &args.install_dir,
                 &args.temp_dir,
-                None, // Simpler progress for batch updates
+                Some(progress_callback),
             ) {
                 Ok(result) => {
+                    ctx.output.progress_done();
                     ctx.output.success(&format!(
                         "Updated {} ({}) to v{}",
                         result.region, result.package_type, result.version
@@ -505,6 +517,7 @@ impl CommandHandler for UpdateHandler {
                     success_count += 1;
                 }
                 Err(e) => {
+                    ctx.output.progress_done();
                     ctx.output.error(&format!("Failed to update: {}", e));
                     error_count += 1;
                 }

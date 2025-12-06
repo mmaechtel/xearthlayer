@@ -45,10 +45,18 @@ impl Output for ConsoleOutput {
     }
 
     fn create_progress_callback(&self) -> ProgressCallback {
-        Box::new(|stage, progress, message| {
-            let percent = (progress * 100.0).min(100.0) as u8;
+        Box::new(move |stage, progress, message| {
             let stage_name = stage.name();
-            print!("\r{stage_name}... {percent}% {message:<50}");
+
+            if stage.is_indeterminate() {
+                // Show simple indicator for indeterminate stages
+                // (these operations are blocking and only report at start/end)
+                print!("\r{stage_name}... {message:<60}");
+            } else {
+                // Show percentage for determinate stages (Downloading, Complete)
+                let percent = (progress * 100.0).min(100.0) as u8;
+                print!("\r{stage_name}... {percent}% {message:<50}");
+            }
             io::stdout().flush().ok();
         })
     }
