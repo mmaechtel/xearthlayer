@@ -50,6 +50,18 @@ Tracking issues discovered during development and testing.
 
 ## Future Enhancements
 
+### E5: Diagnostic Magenta Chunks
+- Encode job ID or error code into failed magenta placeholder chunks
+- Allows user to visually identify a failed chunk in the simulator and cross-reference with logs/metrics
+- Implementation ideas:
+  - Render job ID as text overlay on the magenta chunk
+  - Encode as QR code for easy scanning
+  - Use subtle color variations to encode numeric ID
+- Benefits:
+  - Direct visual-to-debug correlation
+  - No need to guess which tile failed from coordinates alone
+  - Useful for bug reports from users
+
 ### E2: Tile Pre-fetching
 - Predict which tiles will be needed based on aircraft position/heading
 - Generate tiles before X-Plane requests them
