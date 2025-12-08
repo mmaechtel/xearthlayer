@@ -1,6 +1,6 @@
 # Async Pipeline Architecture
 
-**Status**: Design approved, implementation pending
+**Status**: Phase 1 complete, Phase 2 in progress
 **Created**: 2025-12-07
 **Last Updated**: 2025-12-07
 
@@ -1374,22 +1374,168 @@ impl Default for TelemetryConfig {
 
 ---
 
+## Implementation Notes
+
+This section documents design decisions made during implementation that deviate from or extend the original design.
+
+### Dependency Inversion for Tokio Runtime
+
+**Decision**: Abstract Tokio-specific operations behind traits to follow the Dependency Inversion Principle (DIP).
+
+**Rationale**: The original design had pipeline stages directly calling Tokio primitives (`spawn_blocking`, `JoinSet`, `timeout`). This created tight coupling that made unit testing difficult without a Tokio runtime.
+
+**Implementation**:
+
+```rust
+// Executor traits in pipeline/executor.rs
+pub trait BlockingExecutor: Send + Sync + 'static {
+    fn execute_blocking<F, R>(&self, f: F)
+        -> Pin<Box<dyn Future<Output = Result<R, ExecutorError>> + Send>>
+    where F: FnOnce() -> R + Send + 'static, R: Send + 'static;
+}
+
+pub trait ConcurrentRunner: Send + Sync + 'static {
+    fn run_concurrent<F, R>(&self, futures: Vec<F>) -> ConcurrentResults<R>
+    where F: Future<Output = R> + Send + 'static, R: Send + 'static;
+}
+
+pub trait Timer: Send + Sync + 'static {
+    fn timeout<F, R>(&self, duration: Duration, future: F)
+        -> Pin<Box<dyn Future<Output = Result<R, ExecutorError>> + Send>>;
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+}
+```
+
+**Implementations**:
+- `TokioExecutor` - Production implementation using Tokio primitives
+- `SyncExecutor` - Test implementation that executes synchronously (no runtime needed)
+
+**Benefits**:
+- Pipeline stages can be unit tested without `#[tokio::test]`
+- Opens door for alternative runtime support (async-std, etc.)
+- Clearer separation between business logic and runtime mechanics
+
+### Adapter Pattern for Existing Types
+
+**Decision**: Use the Adapter pattern to bridge pipeline traits to existing implementations rather than modifying existing code.
+
+**Rationale**: The existing `Provider`, `TextureEncoder`, and cache implementations are stable and well-tested. Modifying them to implement pipeline traits would risk regressions and violate the Open-Closed Principle.
+
+**Implementation**: Each adapter in its own module under `pipeline/adapters/`:
+
+```
+pipeline/adapters/
+├── mod.rs                 # Re-exports all adapters
+├── provider.rs            # ProviderAdapter
+├── texture_encoder.rs     # TextureEncoderAdapter<E>
+├── memory_cache.rs        # MemoryCacheAdapter
+└── disk_cache.rs          # DiskCacheAdapter, NullDiskCache
+```
+
+**Adapter Summary**:
+
+| Adapter | Pipeline Trait | Wraps | Key Responsibility |
+|---------|----------------|-------|-------------------|
+| `ProviderAdapter` | `ChunkProvider` | `Arc<dyn Provider>` | Async wrapper via `spawn_blocking`, error mapping with retry semantics |
+| `TextureEncoderAdapter<E>` | `TextureEncoderAsync` | `E: TextureEncoder` | Error type conversion |
+| `MemoryCacheAdapter` | `MemoryCache` | `cache::MemoryCache` | Inject provider/format into `CacheKey` |
+| `DiskCacheAdapter` | `DiskCache` | Filesystem | Async chunk-level caching with `tokio::fs` |
+| `NullDiskCache` | `DiskCache` | Nothing | No-op for testing/disabled cache |
+
+**Error Mapping Strategy** (ProviderAdapter):
+
+| ProviderError | ChunkDownloadError | Rationale |
+|---------------|-------------------|-----------|
+| `HttpError` | Retryable | Network issues are often transient |
+| `UnsupportedCoordinates` | Permanent | Retrying won't help |
+| `UnsupportedZoom` | Permanent | Retrying won't help |
+| `InvalidResponse` | Permanent | Server returned bad data |
+| `ProviderSpecific` | Permanent | Conservative default |
+
+### Chunk-Level Disk Cache
+
+**Decision**: The pipeline's `DiskCache` trait operates at chunk granularity (256×256 images) rather than tile granularity (4096×4096 DDS files).
+
+**Rationale**: Per the architecture design, chunk-level caching provides:
+- Better failure resilience (partial progress preserved)
+- Higher effective capacity (JPEG chunks vs DDS tiles)
+- Faster cold starts (reuse chunks across tiles)
+
+**Directory Structure**:
+```
+{cache_dir}/chunks/{provider}/{zoom}/{tile_row}/{tile_col}/{chunk_row}_{chunk_col}.jpg
+```
+
+**Note**: This is separate from the existing `cache::DiskCache` which stores complete DDS tiles. The two caches serve different purposes:
+- Chunk cache: Persists downloaded imagery across sessions
+- Tile cache: Would cache assembled DDS files (not currently implemented in pipeline)
+
+### Pipeline Context Type Parameters
+
+**Decision**: `PipelineContext` uses 5 type parameters rather than trait objects.
+
+```rust
+pub struct PipelineContext<P, E, M, D, X>
+where
+    P: ChunkProvider,
+    E: TextureEncoderAsync,
+    M: MemoryCache,
+    D: DiskCache,
+    X: BlockingExecutor,
+```
+
+**Rationale**:
+- Enables monomorphization for better performance
+- Allows different concrete types in tests vs production
+- Type safety at compile time
+
+**Trade-off**: More verbose type signatures, but this is contained within the pipeline module.
+
+### Module Organization
+
+**Decision**: Pipeline module organized by responsibility:
+
+```
+pipeline/
+├── mod.rs           # Public API exports
+├── context.rs       # PipelineContext, trait definitions
+├── error.rs         # ChunkResults, JobError, StageError
+├── executor.rs      # BlockingExecutor, TokioExecutor, etc.
+├── job.rs           # Job, JobId, JobResult, Priority
+├── processor.rs     # process_job, process_tile orchestration
+├── adapters/        # Adapter implementations (separate module)
+└── stages/          # Pipeline stage implementations
+    ├── mod.rs
+    ├── download.rs
+    ├── assembly.rs
+    ├── encode.rs
+    └── cache.rs
+```
+
+**Rationale**: Single Responsibility Principle - each file has one reason to change.
+
+---
+
 ## Migration Path
 
-### Phase 1: Core Pipeline
+### Phase 1: Core Pipeline ✅ Complete
 
-1. Implement Job and Task models
-2. Implement async download stage with JoinSet
-3. Implement assembly stage with spawn_blocking
-4. Implement encode stage with spawn_blocking
-5. Unit test each stage in isolation
+1. ✅ Implement Job and Task models (`job.rs`, `error.rs`)
+2. ✅ Implement async download stage with JoinSet (`stages/download.rs`)
+3. ✅ Implement assembly stage with spawn_blocking (`stages/assembly.rs`)
+4. ✅ Implement encode stage with spawn_blocking (`stages/encode.rs`)
+5. ✅ Implement cache stage (`stages/cache.rs`)
+6. ✅ Implement processor orchestration (`processor.rs`)
+7. ✅ Apply DIP for Tokio runtime (`executor.rs`)
+8. ✅ Create adapters for existing types (`adapters/`)
+9. ✅ Unit test each stage in isolation (72 pipeline tests)
 
-### Phase 2: FUSE Integration
+### Phase 2: FUSE Integration 🚧 In Progress
 
-1. Create new AsyncPassthroughFS
-2. Implement multi-threaded FUSE dispatch
-3. Wire up job submission channel
-4. Integration test with mock pipeline
+1. ⏳ Create new AsyncPassthroughFS
+2. ⏳ Implement multi-threaded FUSE dispatch
+3. ⏳ Wire up job submission channel
+4. ⏳ Integration test with mock pipeline
 
 ### Phase 3: Full Integration
 
@@ -1436,3 +1582,5 @@ impl Default for TelemetryConfig {
 | 2025-12-07 | Added caching architecture with two-tier design (memory tiles, disk chunks) |
 | 2025-12-07 | Added request coalescing design |
 | 2025-12-07 | Added telemetry architecture with tracing integration and CLI visualization |
+| 2025-12-07 | Phase 1 complete: Core pipeline, DIP for Tokio, adapters for existing types |
+| 2025-12-07 | Added Implementation Notes section documenting design decisions |
