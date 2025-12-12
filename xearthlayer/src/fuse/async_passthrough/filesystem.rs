@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// Time-to-live for attribute caching.
 const TTL: Duration = Duration::from_secs(1);
@@ -157,7 +157,7 @@ impl AsyncPassthroughFS {
 
         match result {
             Ok(Ok(response)) => {
-                info!(
+                debug!(
                     job_id = %job_id,
                     cache_hit = response.cache_hit,
                     duration_ms = response.duration.as_millis(),

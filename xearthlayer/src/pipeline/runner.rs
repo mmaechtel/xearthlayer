@@ -151,7 +151,7 @@ async fn process_dds_request<P, E, M, D, X>(
     D: DiskCache,
     X: BlockingExecutor,
 {
-    info!(
+    debug!(
         job_id = %request.job_id,
         tile = ?request.tile,
         "Processing DDS request - starting pipeline"
@@ -169,7 +169,7 @@ async fn process_dds_request<P, E, M, D, X>(
     )
     .await;
 
-    info!(
+    debug!(
         job_id = %request.job_id,
         success = result.is_ok(),
         "Pipeline processing finished"
@@ -190,7 +190,7 @@ async fn process_dds_request<P, E, M, D, X>(
 
     // Send response back to FUSE handler
     // Ignore error if receiver dropped (FUSE handler timed out)
-    info!(
+    debug!(
         job_id = %request.job_id,
         data_len = response.data.len(),
         "Sending response"
@@ -271,7 +271,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
         }
         CoalesceResult::NewRequest { .. } => {
             // This is the first request for this tile - process it
-            info!(
+            debug!(
                 job_id = %job_id,
                 tile = ?tile,
                 "Processing DDS request - starting pipeline"
@@ -289,7 +289,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
             )
             .await;
 
-            info!(
+            debug!(
                 job_id = %job_id,
                 success = result.is_ok(),
                 "Pipeline processing finished"
@@ -311,7 +311,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
             coalescer.complete(tile, response.clone()).await;
 
             // Send response back to the original requester
-            info!(
+            debug!(
                 job_id = %job_id,
                 data_len = response.data.len(),
                 "Sending response"

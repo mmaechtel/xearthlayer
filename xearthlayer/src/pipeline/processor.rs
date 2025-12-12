@@ -18,7 +18,7 @@ use crate::pipeline::{
 };
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 /// Processes a job through all pipeline stages.
 ///
@@ -56,7 +56,7 @@ where
 
     // Stage 0: Check memory cache
     if let Some(cached_data) = check_memory_cache(tile, ctx.memory_cache.as_ref()) {
-        info!(job_id = %job_id, "Memory cache hit");
+        debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
     }
 
@@ -88,7 +88,7 @@ where
     cache_stage(job_id, tile, &dds_data, Arc::clone(&ctx.memory_cache)).await;
 
     let duration = start.elapsed();
-    info!(
+    debug!(
         job_id = %job_id,
         duration_ms = duration.as_millis(),
         failed_chunks,
@@ -130,7 +130,7 @@ where
 
     // Stage 0: Check memory cache
     if let Some(cached_data) = check_memory_cache(tile, memory_cache.as_ref()) {
-        info!(job_id = %job_id, "Memory cache hit");
+        debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
     }
 
