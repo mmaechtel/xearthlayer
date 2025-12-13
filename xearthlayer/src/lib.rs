@@ -30,6 +30,7 @@ pub mod pipeline;
 pub mod provider;
 pub mod publisher;
 pub mod service;
+pub mod telemetry;
 pub mod texture;
 pub mod tile;
 

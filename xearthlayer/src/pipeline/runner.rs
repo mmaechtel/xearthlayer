@@ -16,6 +16,7 @@ use crate::pipeline::{
     process_tile, BlockingExecutor, ChunkProvider, DiskCache, MemoryCache, PipelineConfig,
     TextureEncoderAsync,
 };
+use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::{debug, error, info, instrument};
@@ -83,10 +84,47 @@ where
     D: DiskCache + 'static,
     X: BlockingExecutor + 'static,
 {
+    create_dds_handler_with_metrics(
+        provider,
+        encoder,
+        memory_cache,
+        disk_cache,
+        executor,
+        config,
+        runtime_handle,
+        None,
+    )
+}
+
+/// Creates a `DdsHandler` with optional telemetry metrics collection.
+///
+/// This is the full version that accepts an optional `PipelineMetrics` for
+/// telemetry collection. Use `create_dds_handler` for the simpler API without metrics.
+#[allow(clippy::too_many_arguments)]
+pub fn create_dds_handler_with_metrics<P, E, M, D, X>(
+    provider: Arc<P>,
+    encoder: Arc<E>,
+    memory_cache: Arc<M>,
+    disk_cache: Arc<D>,
+    executor: Arc<X>,
+    config: PipelineConfig,
+    runtime_handle: Handle,
+    metrics: Option<Arc<PipelineMetrics>>,
+) -> DdsHandler
+where
+    P: ChunkProvider + 'static,
+    E: TextureEncoderAsync + 'static,
+    M: MemoryCache + 'static,
+    D: DiskCache + 'static,
+    X: BlockingExecutor + 'static,
+{
     // Create shared coalescer for all requests
     let coalescer = Arc::new(RequestCoalescer::new());
 
-    info!("Created DDS handler with request coalescing enabled");
+    info!(
+        metrics_enabled = metrics.is_some(),
+        "Created DDS handler with request coalescing enabled"
+    );
 
     Arc::new(move |request: DdsRequest| {
         let provider = Arc::clone(&provider);
@@ -95,6 +133,7 @@ where
         let disk_cache = Arc::clone(&disk_cache);
         let executor = Arc::clone(&executor);
         let coalescer = Arc::clone(&coalescer);
+        let metrics = metrics.clone();
         let config = config.clone();
         let job_id = request.job_id;
         let tile = request.tile;
@@ -115,6 +154,7 @@ where
                 disk_cache,
                 executor,
                 coalescer,
+                metrics,
                 config,
             )
             .await;
@@ -166,6 +206,7 @@ async fn process_dds_request<P, E, M, D, X>(
         disk_cache,
         executor.as_ref(),
         &config,
+        None, // No metrics for legacy non-coalescing path
     )
     .await;
 
@@ -213,6 +254,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
     disk_cache: Arc<D>,
     executor: Arc<X>,
     coalescer: Arc<RequestCoalescer>,
+    metrics: Option<Arc<PipelineMetrics>>,
     config: PipelineConfig,
 ) where
     P: ChunkProvider,
@@ -224,12 +266,22 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
     let tile = request.tile;
     let job_id = request.job_id;
 
+    // Record job start
+    if let Some(ref m) = metrics {
+        m.job_started();
+    }
+
     // Try to register this request with the coalescer
     let coalesce_result = coalescer.register(tile).await;
 
     match coalesce_result {
         CoalesceResult::Coalesced(mut rx) => {
             // Another request is in flight - wait for its result
+            // Record this as a coalesced job
+            if let Some(ref m) = metrics {
+                m.job_coalesced();
+            }
+
             debug!(
                 job_id = %job_id,
                 tile = ?tile,
@@ -268,6 +320,11 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
 
             // Send response back to FUSE handler
             let _ = request.result_tx.send(response);
+
+            // Record job completion (coalesced jobs still count as completed)
+            if let Some(ref m) = metrics {
+                m.job_completed();
+            }
         }
         CoalesceResult::NewRequest { .. } => {
             // This is the first request for this tile - process it
@@ -286,6 +343,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
                 disk_cache,
                 executor.as_ref(),
                 &config,
+                metrics.clone(),
             )
             .await;
 
@@ -296,9 +354,19 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
             );
 
             let response = match result {
-                Ok(job_result) => DdsResponse::from(job_result),
+                Ok(job_result) => {
+                    // Record successful completion
+                    if let Some(ref m) = metrics {
+                        m.job_completed();
+                    }
+                    DdsResponse::from(job_result)
+                }
                 Err(e) => {
                     error!(error = %e, "Pipeline processing failed");
+                    // Record job failure
+                    if let Some(ref m) = metrics {
+                        m.job_failed();
+                    }
                     DdsResponse {
                         data: crate::fuse::generate_default_placeholder().unwrap_or_default(),
                         cache_hit: false,

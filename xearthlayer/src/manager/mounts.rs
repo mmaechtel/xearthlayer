@@ -7,14 +7,30 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fuser::BackgroundSession;
 
+use crate::fuse::SpawnedMountHandle as Fuse3SpawnedHandle;
 use crate::package::PackageType;
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
+use crate::telemetry::TelemetrySnapshot;
 
 use super::local::{InstalledPackage, LocalPackageStore};
 use super::{ManagerError, ManagerResult};
+
+/// Active mount session - can be either fuser (legacy) or fuse3 (async).
+///
+/// The session is stored to keep the mount alive. When dropped, the filesystem
+/// is automatically unmounted.
+#[allow(dead_code)] // Fields are intentionally kept to trigger cleanup on drop
+enum MountSession {
+    /// Legacy fuser-based session (single-threaded FUSE handler).
+    Fuser(BackgroundSession),
+    /// Fuse3-based session (async multi-threaded FUSE handler).
+    /// Uses SpawnedMountHandle which can be safely dropped from any context.
+    Fuse3(Fuse3SpawnedHandle),
+}
 
 /// Result of mounting a single package.
 #[derive(Debug)]
@@ -80,8 +96,8 @@ pub struct ActiveMount {
 /// Overlay packages are not mounted via FUSE since they contain only
 /// static DSF files that don't need on-demand generation.
 pub struct MountManager {
-    /// Active background sessions, keyed by region.
-    sessions: HashMap<String, BackgroundSession>,
+    /// Active mount sessions, keyed by region.
+    sessions: HashMap<String, MountSession>,
     /// Services that own the Tokio runtimes - MUST be kept alive while sessions are active.
     /// The service contains the runtime that processes DDS generation requests.
     services: HashMap<String, XEarthLayerService>,
@@ -90,6 +106,8 @@ pub struct MountManager {
     /// Target scenery directory for mounts (e.g., X-Plane Custom Scenery).
     /// If None, packages are mounted in-place.
     scenery_path: Option<PathBuf>,
+    /// Whether to use fuse3 (async multi-threaded) instead of fuser (legacy).
+    use_fuse3: bool,
 }
 
 impl MountManager {
@@ -100,6 +118,7 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: None,
+            use_fuse3: false,
         }
     }
 
@@ -113,7 +132,19 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: Some(scenery_path.to_path_buf()),
+            use_fuse3: false,
         }
+    }
+
+    /// Enable fuse3 async multi-threaded backend.
+    ///
+    /// When enabled, mounts will use the fuse3 library which runs all FUSE
+    /// operations asynchronously on the Tokio runtime, enabling true parallel
+    /// I/O processing. This provides better performance for high-concurrency
+    /// scenarios like X-Plane scene loading.
+    pub fn with_fuse3(mut self, use_fuse3: bool) -> Self {
+        self.use_fuse3 = use_fuse3;
+        self
     }
 
     /// Get the number of active mounts.
@@ -259,7 +290,23 @@ impl MountManager {
         // Mountpoint = either in Custom Scenery (if scenery_path set) or in-place
         let source_str = package.path.to_string_lossy();
         let mountpoint_str = mountpoint.to_string_lossy();
-        match service.serve_passthrough_background(&source_str, &mountpoint_str) {
+
+        // Choose backend based on use_fuse3 setting
+        let mount_result = if self.use_fuse3 {
+            // Use fuse3 async multi-threaded backend with spawned task
+            // This uses SpawnedMountHandle which can be safely dropped from any context
+            service
+                .runtime_handle()
+                .block_on(service.serve_passthrough_fuse3_spawned(&source_str, &mountpoint_str))
+                .map(MountSession::Fuse3)
+        } else {
+            // Use legacy fuser single-threaded backend
+            service
+                .serve_passthrough_background(&source_str, &mountpoint_str)
+                .map(MountSession::Fuser)
+        };
+
+        match mount_result {
             Ok(session) => {
                 let mount_info = ActiveMount {
                     region: region.clone(),
@@ -301,6 +348,8 @@ impl MountManager {
         }
 
         // Remove session first - Drop will trigger unmount
+        // For Fuse3 sessions (SpawnedMountHandle), drop uses fusermount as fallback
+        // For Fuser sessions (BackgroundSession), drop handles cleanup automatically
         self.sessions.remove(&key);
         // Then remove service - this shuts down the runtime
         self.services.remove(&key);
@@ -317,12 +366,113 @@ impl MountManager {
         let keys: Vec<String> = self.sessions.keys().cloned().collect();
 
         for key in keys.into_iter().rev() {
-            // Remove session first to unmount filesystem
+            // Remove session first - Drop will trigger unmount
+            // For Fuse3 sessions (SpawnedMountHandle), drop uses fusermount as fallback
+            // For Fuser sessions (BackgroundSession), drop handles cleanup automatically
             self.sessions.remove(&key);
-            // Then remove service to shut down runtime
+            // Then remove service - this shuts down the runtime
             self.services.remove(&key);
             self.mounts.remove(&key);
         }
+    }
+
+    /// Get aggregated telemetry from all mounted services.
+    ///
+    /// This combines metrics from all active service instances into a single
+    /// snapshot for display purposes.
+    pub fn aggregated_telemetry(&self) -> TelemetrySnapshot {
+        let mut total = TelemetrySnapshot {
+            uptime: Duration::ZERO,
+            fuse_requests_active: 0,
+            fuse_requests_waiting: 0,
+            jobs_submitted: 0,
+            jobs_completed: 0,
+            jobs_failed: 0,
+            jobs_active: 0,
+            jobs_coalesced: 0,
+            chunks_downloaded: 0,
+            chunks_failed: 0,
+            chunks_retried: 0,
+            bytes_downloaded: 0,
+            downloads_active: 0,
+            memory_cache_hits: 0,
+            memory_cache_misses: 0,
+            memory_cache_hit_rate: 0.0,
+            disk_cache_hits: 0,
+            disk_cache_misses: 0,
+            disk_cache_hit_rate: 0.0,
+            encodes_completed: 0,
+            encodes_active: 0,
+            bytes_encoded: 0,
+            jobs_per_second: 0.0,
+            chunks_per_second: 0.0,
+            bytes_per_second: 0.0,
+            peak_bytes_per_second: 0.0,
+            total_download_time_ms: 0,
+            total_assembly_time_ms: 0,
+            total_encode_time_ms: 0,
+        };
+
+        for service in self.services.values() {
+            let snapshot = service.telemetry_snapshot();
+
+            // Use the longest uptime (first service started)
+            if snapshot.uptime > total.uptime {
+                total.uptime = snapshot.uptime;
+            }
+
+            // Sum all counters
+            total.fuse_requests_active += snapshot.fuse_requests_active;
+            total.fuse_requests_waiting += snapshot.fuse_requests_waiting;
+            total.jobs_submitted += snapshot.jobs_submitted;
+            total.jobs_completed += snapshot.jobs_completed;
+            total.jobs_failed += snapshot.jobs_failed;
+            total.jobs_active += snapshot.jobs_active;
+            total.jobs_coalesced += snapshot.jobs_coalesced;
+            total.chunks_downloaded += snapshot.chunks_downloaded;
+            total.chunks_failed += snapshot.chunks_failed;
+            total.chunks_retried += snapshot.chunks_retried;
+            total.bytes_downloaded += snapshot.bytes_downloaded;
+            total.downloads_active += snapshot.downloads_active;
+            total.memory_cache_hits += snapshot.memory_cache_hits;
+            total.memory_cache_misses += snapshot.memory_cache_misses;
+            total.disk_cache_hits += snapshot.disk_cache_hits;
+            total.disk_cache_misses += snapshot.disk_cache_misses;
+            total.encodes_completed += snapshot.encodes_completed;
+            total.encodes_active += snapshot.encodes_active;
+            total.bytes_encoded += snapshot.bytes_encoded;
+            total.total_download_time_ms += snapshot.total_download_time_ms;
+            total.total_assembly_time_ms += snapshot.total_assembly_time_ms;
+            total.total_encode_time_ms += snapshot.total_encode_time_ms;
+
+            // Use the highest peak from any service
+            if snapshot.peak_bytes_per_second > total.peak_bytes_per_second {
+                total.peak_bytes_per_second = snapshot.peak_bytes_per_second;
+            }
+        }
+
+        // Recalculate rates based on aggregated data
+        let uptime_secs = total.uptime.as_secs_f64().max(0.001);
+        total.jobs_per_second = total.jobs_completed as f64 / uptime_secs;
+        total.chunks_per_second = total.chunks_downloaded as f64 / uptime_secs;
+        total.bytes_per_second = total.bytes_downloaded as f64 / uptime_secs;
+
+        // Recalculate cache hit rates
+        let memory_total = total.memory_cache_hits + total.memory_cache_misses;
+        total.memory_cache_hit_rate = if memory_total > 0 {
+            total.memory_cache_hits as f64 / memory_total as f64
+        } else {
+            0.0
+        };
+
+        let disk_total = total.disk_cache_hits + total.disk_cache_misses;
+        total.disk_cache_hit_rate = if disk_total > 0 {
+            total.disk_cache_hits as f64 / disk_total as f64
+        } else {
+            0.0
+        };
+
+        total
     }
 }
 

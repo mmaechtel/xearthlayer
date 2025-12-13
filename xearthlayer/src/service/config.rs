@@ -42,6 +42,8 @@ pub struct ServiceConfig {
     generation_threads: Option<usize>,
     /// Timeout in seconds for generating a single tile
     generation_timeout: Option<u64>,
+    /// Quiet mode - disables periodic stats logging (for TUI mode)
+    quiet_mode: bool,
 }
 
 impl ServiceConfig {
@@ -94,6 +96,11 @@ impl ServiceConfig {
     pub fn generation_timeout(&self) -> Option<u64> {
         self.generation_timeout
     }
+
+    /// Check if quiet mode is enabled (disables periodic stats logging).
+    pub fn quiet_mode(&self) -> bool {
+        self.quiet_mode
+    }
 }
 
 impl Default for ServiceConfig {
@@ -108,6 +115,7 @@ impl Default for ServiceConfig {
             cache_disk_size: None,
             generation_threads: None,
             generation_timeout: None,
+            quiet_mode: false,
         }
     }
 }
@@ -126,6 +134,7 @@ pub struct ServiceConfigBuilder {
     cache_disk_size: Option<usize>,
     generation_threads: Option<usize>,
     generation_timeout: Option<u64>,
+    quiet_mode: Option<bool>,
 }
 
 impl ServiceConfigBuilder {
@@ -183,6 +192,12 @@ impl ServiceConfigBuilder {
         self
     }
 
+    /// Enable quiet mode (disables periodic stats logging).
+    pub fn quiet_mode(mut self, quiet: bool) -> Self {
+        self.quiet_mode = Some(quiet);
+        self
+    }
+
     /// Build the configuration with defaults for unset values.
     pub fn build(self) -> ServiceConfig {
         ServiceConfig {
@@ -195,6 +210,7 @@ impl ServiceConfigBuilder {
             cache_disk_size: self.cache_disk_size,
             generation_threads: self.generation_threads,
             generation_timeout: self.generation_timeout,
+            quiet_mode: self.quiet_mode.unwrap_or(false),
         }
     }
 }

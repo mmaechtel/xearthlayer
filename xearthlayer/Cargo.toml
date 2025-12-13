@@ -18,7 +18,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "local-time"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 tracing-appender = "0.2"
+# FUSE libraries - fuser (legacy, single-threaded) and fuse3 (new, async multi-threaded)
 fuser = "0.14"
+fuse3 = { version = "0.8", features = ["tokio-runtime", "unprivileged"] }
 libc = "0.2"
 regex = "1.10"
 thiserror = "1.0"
@@ -27,6 +29,8 @@ rust-ini = "0.21"
 semver = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 sha2 = "0.10"
+futures = "0.3"
+bytes = "1.11.0"
 
 [dev-dependencies]
 proptest = "1.4"

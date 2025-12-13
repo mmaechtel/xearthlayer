@@ -6,6 +6,7 @@
 
 use crate::coord::TileCoord;
 use crate::pipeline::{JobId, MemoryCache};
+use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -55,15 +56,31 @@ where
 ///
 /// * `tile` - The tile coordinates to check
 /// * `memory_cache` - The memory cache to check
+/// * `metrics` - Optional telemetry metrics
 ///
 /// # Returns
 ///
 /// The cached DDS data if present.
-pub fn check_memory_cache<M>(tile: TileCoord, memory_cache: &M) -> Option<Vec<u8>>
+pub fn check_memory_cache<M>(
+    tile: TileCoord,
+    memory_cache: &M,
+    metrics: Option<&Arc<PipelineMetrics>>,
+) -> Option<Vec<u8>>
 where
     M: MemoryCache,
 {
-    memory_cache.get(tile.row, tile.col, tile.zoom)
+    let result = memory_cache.get(tile.row, tile.col, tile.zoom);
+
+    // Record cache hit/miss
+    if let Some(m) = metrics {
+        if result.is_some() {
+            m.memory_cache_hit();
+        } else {
+            m.memory_cache_miss();
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -133,7 +150,7 @@ mod tests {
 
         cache.put(100, 200, 16, dds_data.clone());
 
-        let result = check_memory_cache(tile, &cache);
+        let result = check_memory_cache(tile, &cache, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), dds_data);
     }
@@ -147,7 +164,7 @@ mod tests {
             zoom: 16,
         };
 
-        let result = check_memory_cache(tile, &cache);
+        let result = check_memory_cache(tile, &cache, None);
         assert!(result.is_none());
     }
 

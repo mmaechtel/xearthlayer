@@ -173,10 +173,21 @@ pub struct AsyncReqwestClient {
 
 impl AsyncReqwestClient {
     /// Creates a new AsyncReqwestClient with default configuration.
+    ///
+    /// Optimized for high-throughput satellite imagery download:
+    /// - Large connection pool with high idle limits
+    /// - TCP keepalive to maintain warm connections
+    /// - TCP nodelay for reduced latency
     pub fn new() -> Result<Self, ProviderError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent(DEFAULT_USER_AGENT)
+            // Connection pooling - keep many connections alive for parallel requests
+            .pool_max_idle_per_host(128)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            // TCP optimizations
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .map_err(|e| {
                 ProviderError::HttpError(format!("Failed to create async HTTP client: {}", e))
@@ -190,6 +201,12 @@ impl AsyncReqwestClient {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .user_agent(DEFAULT_USER_AGENT)
+            // Connection pooling - keep many connections alive for parallel requests
+            .pool_max_idle_per_host(128)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            // TCP optimizations
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .map_err(|e| {
                 ProviderError::HttpError(format!("Failed to create async HTTP client: {}", e))

@@ -16,6 +16,7 @@ use crate::pipeline::{
     BlockingExecutor, ChunkProvider, DiskCache, Job, JobError, JobId, JobResult, MemoryCache,
     PipelineConfig, PipelineContext, TextureEncoderAsync,
 };
+use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, instrument};
@@ -38,10 +39,11 @@ use tracing::{debug, instrument};
 /// - Individual chunk failures result in magenta placeholders, not job failure
 /// - Only catastrophic failures (e.g., all chunks fail, encoding crashes) fail the job
 /// - A job always produces _some_ result (possibly all magenta)
-#[instrument(skip(ctx), fields(job_id = %job.id, tile = ?job.tile_coords))]
+#[instrument(skip(ctx, metrics), fields(job_id = %job.id, tile = ?job.tile_coords))]
 pub async fn process_job<P, E, M, D, X>(
     job: Job,
     ctx: &PipelineContext<P, E, M, D, X>,
+    metrics: Option<Arc<PipelineMetrics>>,
 ) -> Result<JobResult, JobError>
 where
     P: ChunkProvider,
@@ -55,7 +57,8 @@ where
     let tile = job.tile_coords;
 
     // Stage 0: Check memory cache
-    if let Some(cached_data) = check_memory_cache(tile, ctx.memory_cache.as_ref()) {
+    if let Some(cached_data) = check_memory_cache(tile, ctx.memory_cache.as_ref(), metrics.as_ref())
+    {
         debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
     }
@@ -67,6 +70,7 @@ where
         Arc::clone(&ctx.provider),
         Arc::clone(&ctx.disk_cache),
         &ctx.config,
+        metrics.clone(),
     )
     .await;
 
@@ -81,6 +85,7 @@ where
         image,
         Arc::clone(&ctx.encoder),
         ctx.executor.as_ref(),
+        metrics,
     )
     .await?;
 
@@ -118,6 +123,7 @@ pub async fn process_tile<P, E, M, D, X>(
     disk_cache: Arc<D>,
     executor: &X,
     config: &PipelineConfig,
+    metrics: Option<Arc<PipelineMetrics>>,
 ) -> Result<JobResult, JobError>
 where
     P: ChunkProvider,
@@ -129,7 +135,7 @@ where
     let start = Instant::now();
 
     // Stage 0: Check memory cache
-    if let Some(cached_data) = check_memory_cache(tile, memory_cache.as_ref()) {
+    if let Some(cached_data) = check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()) {
         debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
     }
@@ -141,6 +147,7 @@ where
         Arc::clone(&provider),
         Arc::clone(&disk_cache),
         config,
+        metrics.clone(),
     )
     .await;
 
@@ -150,7 +157,7 @@ where
     let image = assembly_stage(job_id, chunks, executor).await?;
 
     // Stage 3: Encode to DDS
-    let dds_data = encode_stage(job_id, image, encoder, executor).await?;
+    let dds_data = encode_stage(job_id, image, encoder, executor, metrics).await?;
 
     // Stage 4: Write to memory cache
     cache_stage(job_id, tile, &dds_data, memory_cache).await;
@@ -322,6 +329,7 @@ mod tests {
             disk_cache,
             &executor,
             &config,
+            None,
         )
         .await;
 
@@ -357,6 +365,7 @@ mod tests {
             disk_cache,
             &executor,
             &config,
+            None,
         )
         .await;
 
@@ -393,6 +402,7 @@ mod tests {
             disk_cache,
             &executor,
             &config,
+            None,
         )
         .await;
 
@@ -430,6 +440,7 @@ mod tests {
             Arc::clone(&disk_cache),
             &executor,
             &config,
+            None,
         )
         .await;
 

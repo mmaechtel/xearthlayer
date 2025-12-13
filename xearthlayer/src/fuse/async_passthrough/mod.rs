@@ -28,9 +28,10 @@
 
 mod attributes;
 mod filesystem;
-mod inode;
+pub mod inode;
 mod types;
 
 // Re-export public API
 pub use filesystem::AsyncPassthroughFS;
+pub use inode::InodeManager;
 pub use types::{DdsHandler, DdsRequest, DdsResponse};

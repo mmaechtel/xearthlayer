@@ -61,5 +61,5 @@ pub use error::{ChunkFailure, ChunkResults, ChunkSuccess, JobError, StageError};
 pub use executor::{BlockingExecutor, ConcurrentRunner, ExecutorError, Timer, TokioExecutor};
 pub use job::{Job, JobId, JobResult, Priority};
 pub use processor::{process_job, process_tile};
-pub use runner::create_dds_handler;
+pub use runner::{create_dds_handler, create_dds_handler_with_metrics};
 pub use stages::{assembly_stage, cache_stage, download_stage, encode_stage};

@@ -6,7 +6,9 @@
 
 use crate::coord::TileCoord;
 use crate::pipeline::{ChunkProvider, ChunkResults, DiskCache, JobId, PipelineConfig};
+use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::{debug, instrument, warn};
 
@@ -29,13 +31,14 @@ use tracing::{debug, instrument, warn};
 /// # Returns
 ///
 /// `ChunkResults` containing successful downloads and failures.
-#[instrument(skip(provider, disk_cache, config), fields(job_id = %job_id))]
+#[instrument(skip(provider, disk_cache, config, metrics), fields(job_id = %job_id))]
 pub async fn download_stage<P, D>(
     job_id: JobId,
     tile: TileCoord,
     provider: Arc<P>,
     disk_cache: Arc<D>,
     config: &PipelineConfig,
+    metrics: Option<Arc<PipelineMetrics>>,
 ) -> ChunkResults
 where
     P: ChunkProvider,
@@ -48,6 +51,7 @@ where
     for chunk in tile.chunks() {
         let provider = Arc::clone(&provider);
         let disk_cache = Arc::clone(&disk_cache);
+        let metrics = metrics.clone();
         let timeout = config.request_timeout;
         let max_retries = config.max_retries;
 
@@ -60,6 +64,7 @@ where
                 disk_cache,
                 timeout,
                 max_retries,
+                metrics,
             )
             .await
         });
@@ -119,6 +124,7 @@ struct ChunkError {
 }
 
 /// Downloads a single chunk, checking cache first.
+#[allow(clippy::too_many_arguments)]
 async fn download_chunk_with_cache<P, D>(
     tile: TileCoord,
     chunk_row: u8,
@@ -127,6 +133,7 @@ async fn download_chunk_with_cache<P, D>(
     disk_cache: Arc<D>,
     timeout: std::time::Duration,
     max_retries: u32,
+    metrics: Option<Arc<PipelineMetrics>>,
 ) -> Result<ChunkData, ChunkError>
 where
     P: ChunkProvider,
@@ -137,11 +144,20 @@ where
         .get(tile.row, tile.col, tile.zoom, chunk_row, chunk_col)
         .await
     {
+        // Record disk cache hit
+        if let Some(ref m) = metrics {
+            m.disk_cache_hit();
+        }
         return Ok(ChunkData {
             row: chunk_row,
             col: chunk_col,
             data: cached,
         });
+    }
+
+    // Record disk cache miss
+    if let Some(ref m) = metrics {
+        m.disk_cache_miss();
     }
 
     // Calculate global coordinates for the provider
@@ -152,6 +168,12 @@ where
     // Try downloading with retries
     let mut last_error = String::new();
     for attempt in 1..=max_retries {
+        // Record download start
+        if let Some(ref m) = metrics {
+            m.download_started();
+        }
+        let start = Instant::now();
+
         match tokio::time::timeout(
             timeout,
             provider.download_chunk(global_row, global_col, chunk_zoom),
@@ -159,6 +181,13 @@ where
         .await
         {
             Ok(Ok(data)) => {
+                // Record successful download
+                let duration_us = start.elapsed().as_micros() as u64;
+                let bytes = data.len() as u64;
+                if let Some(ref m) = metrics {
+                    m.download_completed(bytes, duration_us);
+                }
+
                 // Success - cache the chunk (fire and forget, don't block on cache write)
                 let dc = Arc::clone(&disk_cache);
                 let chunk_data = data.clone();
@@ -177,14 +206,34 @@ where
                 });
             }
             Ok(Err(e)) => {
+                // Record failed download
+                if let Some(ref m) = metrics {
+                    m.download_failed();
+                }
                 last_error = e.message.clone();
                 if !e.is_retryable {
                     // Permanent error, don't retry
                     break;
                 }
+                // Record retry
+                if attempt < max_retries {
+                    if let Some(ref m) = metrics {
+                        m.download_retried();
+                    }
+                }
             }
             Err(_) => {
+                // Record failed download (timeout)
+                if let Some(ref m) = metrics {
+                    m.download_failed();
+                }
                 last_error = "timeout".to_string();
+                // Record retry
+                if attempt < max_retries {
+                    if let Some(ref m) = metrics {
+                        m.download_retried();
+                    }
+                }
             }
         }
 
@@ -348,7 +397,7 @@ mod tests {
             zoom: 16,
         };
 
-        let results = download_stage(JobId::new(), tile, provider, cache, &config).await;
+        let results = download_stage(JobId::new(), tile, provider, cache, &config, None).await;
 
         assert_eq!(results.success_count(), 256);
         assert_eq!(results.failure_count(), 0);
@@ -375,7 +424,7 @@ mod tests {
             zoom: 16,
         };
 
-        let results = download_stage(JobId::new(), tile, provider, cache, &config).await;
+        let results = download_stage(JobId::new(), tile, provider, cache, &config, None).await;
 
         assert_eq!(results.success_count(), 255);
         assert_eq!(results.failure_count(), 1);
@@ -394,7 +443,7 @@ mod tests {
             zoom: 16,
         };
 
-        let results = download_stage(JobId::new(), tile, provider, cache, &config).await;
+        let results = download_stage(JobId::new(), tile, provider, cache, &config, None).await;
 
         assert_eq!(results.success_count(), 256);
 

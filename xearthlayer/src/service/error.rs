@@ -26,6 +26,8 @@ pub enum ServiceError {
     InvalidZoom { zoom: u8, min: u8, max: u8 },
     /// Failed to create Tokio runtime
     RuntimeError(String),
+    /// FUSE mount or operation error
+    FuseError(String),
 }
 
 impl fmt::Display for ServiceError {
@@ -48,6 +50,7 @@ impl fmt::Display for ServiceError {
                 )
             }
             Self::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            Self::FuseError(msg) => write!(f, "FUSE error: {}", msg),
         }
     }
 }
