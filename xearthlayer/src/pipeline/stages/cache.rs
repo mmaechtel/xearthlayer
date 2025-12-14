@@ -5,10 +5,11 @@
 //! at the chunk level.
 
 use crate::coord::TileCoord;
+use crate::fuse::EXPECTED_DDS_SIZE;
 use crate::pipeline::{JobId, MemoryCache};
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 /// Stores a generated tile in the memory cache.
 ///
@@ -77,6 +78,19 @@ where
             m.memory_cache_hit();
         } else {
             m.memory_cache_miss();
+        }
+    }
+
+    // Validate cached data size - log warning if unexpected
+    // This helps trace the source of corrupted DDS data
+    if let Some(ref data) = result {
+        if data.len() != EXPECTED_DDS_SIZE {
+            warn!(
+                tile = ?tile,
+                actual_size = data.len(),
+                expected_size = EXPECTED_DDS_SIZE,
+                "Memory cache returned DDS with unexpected size - possible cache corruption"
+            );
         }
     }
 

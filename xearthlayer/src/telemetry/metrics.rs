@@ -138,9 +138,20 @@ impl PipelineMetrics {
 
     // === Job tracking ===
 
-    /// Record a job starting.
-    pub fn job_started(&self) {
+    /// Record a job being submitted to the pipeline.
+    ///
+    /// Call this when a FUSE request arrives, before coalescing check.
+    pub fn job_submitted(&self) {
         self.jobs_submitted.fetch_add(1, Ordering::Relaxed);
+        self.fuse_requests_waiting.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a job starting active processing.
+    ///
+    /// Call this when a job actually starts processing (after coalescing check).
+    /// The job moves from "waiting" to "active" state.
+    pub fn job_started(&self) {
+        self.fuse_requests_waiting.fetch_sub(1, Ordering::Relaxed);
         self.jobs_active.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -386,10 +397,18 @@ mod tests {
     fn test_job_lifecycle() {
         let metrics = PipelineMetrics::new();
 
-        metrics.job_started();
-        assert_eq!(metrics.jobs_active.load(Ordering::Relaxed), 1);
+        // Job submitted - now waiting
+        metrics.job_submitted();
         assert_eq!(metrics.jobs_submitted.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.fuse_requests_waiting.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.jobs_active.load(Ordering::Relaxed), 0);
 
+        // Job starts processing - moves from waiting to active
+        metrics.job_started();
+        assert_eq!(metrics.fuse_requests_waiting.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.jobs_active.load(Ordering::Relaxed), 1);
+
+        // Job completes
         metrics.job_completed();
         assert_eq!(metrics.jobs_active.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.jobs_completed.load(Ordering::Relaxed), 1);
@@ -399,6 +418,7 @@ mod tests {
     fn test_job_failure() {
         let metrics = PipelineMetrics::new();
 
+        metrics.job_submitted();
         metrics.job_started();
         metrics.job_failed();
 
@@ -439,6 +459,7 @@ mod tests {
 
         // Complete some work
         for _ in 0..10 {
+            metrics.job_submitted();
             metrics.job_started();
             metrics.job_completed();
         }
@@ -452,6 +473,7 @@ mod tests {
     fn test_reset() {
         let metrics = PipelineMetrics::new();
 
+        metrics.job_submitted();
         metrics.job_started();
         metrics.job_completed();
         metrics.download_started();

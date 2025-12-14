@@ -9,6 +9,7 @@
 //! 6. Return result
 
 use crate::coord::TileCoord;
+use crate::fuse::EXPECTED_DDS_SIZE;
 use crate::pipeline::stages::{
     assembly_stage, cache_stage, check_memory_cache, download_stage, encode_stage,
 };
@@ -19,7 +20,7 @@ use crate::pipeline::{
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 /// Processes a job through all pipeline stages.
 ///
@@ -89,8 +90,41 @@ where
     )
     .await?;
 
-    // Stage 4: Write to memory cache
-    cache_stage(job_id, tile, &dds_data, Arc::clone(&ctx.memory_cache)).await;
+    // Validate encoded DDS size - log warning if unexpected
+    // This helps trace the source of corrupted DDS data
+    if dds_data.len() != EXPECTED_DDS_SIZE {
+        warn!(
+            job_id = %job_id,
+            tile = ?tile,
+            actual_size = dds_data.len(),
+            expected_size = EXPECTED_DDS_SIZE,
+            failed_chunks,
+            "Encoded DDS has unexpected size - may cause validation to substitute placeholder"
+        );
+    }
+
+    // Validate DDS magic bytes
+    if dds_data.len() < 4 || &dds_data[0..4] != b"DDS " {
+        warn!(
+            job_id = %job_id,
+            tile = ?tile,
+            size = dds_data.len(),
+            "Encoded DDS has invalid magic bytes - will be replaced with placeholder"
+        );
+    }
+
+    // Stage 4: Write to memory cache (only if no failed chunks)
+    // We don't cache tiles with magenta placeholders - they would return
+    // corrupted imagery on subsequent requests
+    if failed_chunks == 0 {
+        cache_stage(job_id, tile, &dds_data, Arc::clone(&ctx.memory_cache)).await;
+    } else {
+        debug!(
+            job_id = %job_id,
+            failed_chunks,
+            "Skipping memory cache write due to failed chunks"
+        );
+    }
 
     let duration = start.elapsed();
     debug!(
@@ -159,8 +193,40 @@ where
     // Stage 3: Encode to DDS
     let dds_data = encode_stage(job_id, image, encoder, executor, metrics).await?;
 
-    // Stage 4: Write to memory cache
-    cache_stage(job_id, tile, &dds_data, memory_cache).await;
+    // Validate encoded DDS size - log warning if unexpected
+    if dds_data.len() != EXPECTED_DDS_SIZE {
+        warn!(
+            job_id = %job_id,
+            tile = ?tile,
+            actual_size = dds_data.len(),
+            expected_size = EXPECTED_DDS_SIZE,
+            failed_chunks,
+            "Encoded DDS has unexpected size - may cause validation to substitute placeholder"
+        );
+    }
+
+    // Validate DDS magic bytes
+    if dds_data.len() < 4 || &dds_data[0..4] != b"DDS " {
+        warn!(
+            job_id = %job_id,
+            tile = ?tile,
+            size = dds_data.len(),
+            "Encoded DDS has invalid magic bytes - will be replaced with placeholder"
+        );
+    }
+
+    // Stage 4: Write to memory cache (only if no failed chunks)
+    // We don't cache tiles with magenta placeholders - they would return
+    // corrupted imagery on subsequent requests
+    if failed_chunks == 0 {
+        cache_stage(job_id, tile, &dds_data, memory_cache).await;
+    } else {
+        debug!(
+            job_id = %job_id,
+            failed_chunks,
+            "Skipping memory cache write due to failed chunks"
+        );
+    }
 
     let duration = start.elapsed();
 
@@ -447,5 +513,51 @@ mod tests {
         // Verify it's now in cache
         let cached = memory_cache.get(100, 200, 16);
         assert!(cached.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_process_tile_with_failures_does_not_cache() {
+        // Use FailingProvider which causes all chunks to fail
+        let provider = Arc::new(FailingProvider);
+        let encoder = Arc::new(MockEncoder);
+        let memory_cache = Arc::new(MockMemoryCache::new());
+        let disk_cache = Arc::new(NullDiskCache);
+        let executor = TokioExecutor::new();
+        let config = PipelineConfig {
+            max_retries: 1,
+            ..Default::default()
+        };
+
+        let tile = TileCoord {
+            row: 100,
+            col: 200,
+            zoom: 16,
+        };
+
+        // Process the tile (will have failed chunks)
+        let result = process_tile(
+            JobId::new(),
+            tile,
+            Arc::clone(&provider),
+            Arc::clone(&encoder),
+            Arc::clone(&memory_cache),
+            Arc::clone(&disk_cache),
+            &executor,
+            &config,
+            None,
+        )
+        .await;
+
+        // Job should succeed (with magenta placeholders)
+        assert!(result.is_ok());
+        let job_result = result.unwrap();
+        assert_eq!(job_result.failed_chunks, 256);
+
+        // But tile should NOT be in cache (we don't cache tiles with failures)
+        let cached = memory_cache.get(100, 200, 16);
+        assert!(
+            cached.is_none(),
+            "Tiles with failed chunks should not be cached"
+        );
     }
 }

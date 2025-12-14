@@ -10,7 +10,7 @@
 //! common during X-Plane's burst loading patterns where multiple file handles
 //! request the same texture concurrently.
 
-use crate::fuse::{DdsHandler, DdsRequest, DdsResponse};
+use crate::fuse::{DdsHandler, DdsRequest, DdsResponse, EXPECTED_DDS_SIZE};
 use crate::pipeline::coalesce::{CoalesceResult, RequestCoalescer};
 use crate::pipeline::{
     process_tile, BlockingExecutor, ChunkProvider, DiskCache, MemoryCache, PipelineConfig,
@@ -19,7 +19,7 @@ use crate::pipeline::{
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Creates a `DdsHandler` that processes requests through the async pipeline.
 ///
@@ -222,7 +222,7 @@ async fn process_dds_request<P, E, M, D, X>(
             error!(error = %e, "Pipeline processing failed");
             // Return placeholder on error
             DdsResponse {
-                data: crate::fuse::generate_default_placeholder().unwrap_or_default(),
+                data: crate::fuse::get_default_placeholder(),
                 cache_hit: false,
                 duration: std::time::Duration::ZERO,
             }
@@ -266,20 +266,21 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
     let tile = request.tile;
     let job_id = request.job_id;
 
-    // Record job start
+    // Record job submission (request arrived, now waiting for processing)
     if let Some(ref m) = metrics {
-        m.job_started();
+        m.job_submitted();
     }
 
-    // Try to register this request with the coalescer
-    let coalesce_result = coalescer.register(tile).await;
+    // Try to register this request with the coalescer (lock-free)
+    let coalesce_result = coalescer.register(tile);
 
     match coalesce_result {
         CoalesceResult::Coalesced(mut rx) => {
             // Another request is in flight - wait for its result
-            // Record this as a coalesced job
+            // This request moves from "waiting" to being serviced by an existing job
             if let Some(ref m) = metrics {
                 m.job_coalesced();
+                m.job_started(); // Moves from waiting to active (shared with existing)
             }
 
             debug!(
@@ -290,12 +291,25 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
 
             let response = match rx.recv().await {
                 Ok(result) => {
+                    let data_len = result.data.len();
                     debug!(
                         job_id = %job_id,
                         tile = ?tile,
-                        data_len = result.data.len(),
+                        data_len,
                         "Received coalesced result"
                     );
+
+                    // Validate coalesced data size
+                    if data_len != EXPECTED_DDS_SIZE {
+                        warn!(
+                            job_id = %job_id,
+                            tile = ?tile,
+                            actual_size = data_len,
+                            expected_size = EXPECTED_DDS_SIZE,
+                            "Coalesced result has unexpected size - FUSE layer will validate"
+                        );
+                    }
+
                     DdsResponse {
                         data: (*result.data).clone(),
                         cache_hit: result.cache_hit,
@@ -311,7 +325,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
                         "Coalesced request failed - channel closed"
                     );
                     DdsResponse {
-                        data: crate::fuse::generate_default_placeholder().unwrap_or_default(),
+                        data: crate::fuse::get_default_placeholder(),
                         cache_hit: false,
                         duration: std::time::Duration::ZERO,
                     }
@@ -328,6 +342,11 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
         }
         CoalesceResult::NewRequest { .. } => {
             // This is the first request for this tile - process it
+            // Move from "waiting" to "active" state
+            if let Some(ref m) = metrics {
+                m.job_started();
+            }
+
             debug!(
                 job_id = %job_id,
                 tile = ?tile,
@@ -359,6 +378,20 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
                     if let Some(ref m) = metrics {
                         m.job_completed();
                     }
+
+                    // Validate generated data size before sending
+                    if job_result.dds_data.len() != EXPECTED_DDS_SIZE {
+                        warn!(
+                            job_id = %job_id,
+                            tile = ?tile,
+                            actual_size = job_result.dds_data.len(),
+                            expected_size = EXPECTED_DDS_SIZE,
+                            cache_hit = job_result.cache_hit,
+                            failed_chunks = job_result.failed_chunks,
+                            "Generated DDS has unexpected size - FUSE layer will validate"
+                        );
+                    }
+
                     DdsResponse::from(job_result)
                 }
                 Err(e) => {
@@ -368,7 +401,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
                         m.job_failed();
                     }
                     DdsResponse {
-                        data: crate::fuse::generate_default_placeholder().unwrap_or_default(),
+                        data: crate::fuse::get_default_placeholder(),
                         cache_hit: false,
                         duration: std::time::Duration::ZERO,
                     }
@@ -376,7 +409,7 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
             };
 
             // Complete the coalesced request - broadcasts to all waiters
-            coalescer.complete(tile, response.clone()).await;
+            coalescer.complete(tile, response.clone());
 
             // Send response back to the original requester
             debug!(

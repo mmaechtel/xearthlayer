@@ -34,15 +34,8 @@ impl Widget for PipelineWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::default().borders(Borders::NONE);
 
-        // Calculate stage metrics
-        // FUSE waiting = jobs_submitted - jobs_completed - jobs_failed - jobs_active
-        let fuse_waiting = self
-            .snapshot
-            .jobs_submitted
-            .saturating_sub(self.snapshot.jobs_completed)
-            .saturating_sub(self.snapshot.jobs_failed)
-            .saturating_sub(self.snapshot.jobs_active as u64);
-
+        // Get stage metrics from snapshot
+        let fuse_waiting = self.snapshot.fuse_requests_waiting;
         let download_active = self.snapshot.downloads_active;
         let encode_active = self.snapshot.encodes_active;
         let completed = self.snapshot.jobs_completed;

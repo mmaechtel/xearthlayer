@@ -20,17 +20,15 @@
 //!
 //! # Implementation
 //!
-//! Uses a `HashMap<TileCoord, Vec<Sender>>` to track in-flight requests.
-//! When a new request arrives:
-//! - If no in-flight request exists, create one and process the tile
-//! - If an in-flight request exists, add this sender to the waiter list
-//! - When processing completes, send result to all waiters and remove from map
+//! Uses `DashMap` for lock-free concurrent access, allowing high-throughput
+//! registration without lock contention. Statistics use atomic counters.
 
 use crate::coord::TileCoord;
 use crate::fuse::DdsResponse;
-use std::collections::HashMap;
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tracing::{debug, info};
 
 /// Tracks in-flight requests for request coalescing.
@@ -38,16 +36,21 @@ use tracing::{debug, info};
 /// Thread-safe structure that tracks which tiles are currently being processed,
 /// allowing duplicate requests to wait for the same result instead of triggering
 /// duplicate work.
+///
+/// Uses `DashMap` for lock-free concurrent access, enabling high-throughput
+/// request registration during X-Plane's burst loading patterns.
 pub struct RequestCoalescer {
     /// In-flight requests: tile -> broadcast sender for result
-    /// Using broadcast so multiple receivers can get the same result
-    in_flight: Mutex<HashMap<TileCoord, broadcast::Sender<CoalescedResult>>>,
-    /// Statistics
-    stats: Mutex<CoalescerStats>,
+    /// Using DashMap for lock-free concurrent access
+    in_flight: DashMap<TileCoord, broadcast::Sender<CoalescedResult>>,
+    /// Statistics using atomic counters for lock-free updates
+    total_requests: AtomicU64,
+    coalesced_requests: AtomicU64,
+    new_requests: AtomicU64,
 }
 
 /// Statistics for monitoring coalescing effectiveness.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CoalescerStats {
     /// Total requests received
     pub total_requests: u64,
@@ -90,8 +93,10 @@ impl RequestCoalescer {
     /// Creates a new request coalescer.
     pub fn new() -> Self {
         Self {
-            in_flight: Mutex::new(HashMap::new()),
-            stats: Mutex::new(CoalescerStats::default()),
+            in_flight: DashMap::new(),
+            total_requests: AtomicU64::new(0),
+            coalesced_requests: AtomicU64::new(0),
+            new_requests: AtomicU64::new(0),
         }
     }
 
@@ -102,44 +107,46 @@ impl RequestCoalescer {
     ///
     /// Returns `CoalesceResult::Coalesced` with a receiver if another request is already
     /// in flight, meaning the caller should wait on the receiver for the result.
-    pub(crate) async fn register(&self, tile: TileCoord) -> CoalesceResult {
-        let mut in_flight = self.in_flight.lock().await;
-        let mut stats = self.stats.lock().await;
+    ///
+    /// This method is lock-free and can handle high-throughput concurrent registration.
+    pub(crate) fn register(&self, tile: TileCoord) -> CoalesceResult {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        stats.total_requests += 1;
-
-        if let Some(tx) = in_flight.get(&tile) {
-            // Request already in-flight, subscribe to result
-            let rx = tx.subscribe();
-            stats.coalesced_requests += 1;
-            debug!(
-                tile = ?tile,
-                coalesced = stats.coalesced_requests,
-                "Coalescing request - waiting for in-flight processing"
-            );
-            CoalesceResult::Coalesced(rx)
-        } else {
-            // New request, create broadcast channel
-            // Use capacity of 16 - typical case is 1-4 concurrent requests for same tile
-            let (tx, _rx) = broadcast::channel(16);
-            in_flight.insert(tile, tx.clone());
-            stats.new_requests += 1;
-            debug!(
-                tile = ?tile,
-                in_flight_count = in_flight.len(),
-                "New request - starting processing"
-            );
-            CoalesceResult::NewRequest { tile, sender: tx }
+        // Use entry API for atomic check-and-insert
+        // This avoids the race condition of check-then-insert
+        match self.in_flight.entry(tile) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                // Request already in-flight, subscribe to result
+                let rx = entry.get().subscribe();
+                self.coalesced_requests.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    tile = ?tile,
+                    coalesced = self.coalesced_requests.load(Ordering::Relaxed),
+                    "Coalescing request - waiting for in-flight processing"
+                );
+                CoalesceResult::Coalesced(rx)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                // New request, create broadcast channel
+                // Use capacity of 16 - typical case is 1-4 concurrent requests for same tile
+                let (tx, _rx) = broadcast::channel(16);
+                entry.insert(tx.clone());
+                self.new_requests.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    tile = ?tile,
+                    in_flight_count = self.in_flight.len(),
+                    "New request - starting processing"
+                );
+                CoalesceResult::NewRequest { tile, sender: tx }
+            }
         }
     }
 
     /// Completes a request, broadcasting the result to all waiters.
     ///
     /// This should be called by the original processor when it finishes.
-    pub async fn complete(&self, tile: TileCoord, response: DdsResponse) {
-        let mut in_flight = self.in_flight.lock().await;
-
-        if let Some(tx) = in_flight.remove(&tile) {
+    pub fn complete(&self, tile: TileCoord, response: DdsResponse) {
+        if let Some((_, tx)) = self.in_flight.remove(&tile) {
             let result = CoalescedResult {
                 data: Arc::new(response.data),
                 cache_hit: response.cache_hit,
@@ -162,24 +169,23 @@ impl RequestCoalescer {
     }
 
     /// Returns a snapshot of the current statistics.
-    pub async fn stats(&self) -> CoalescerStats {
-        let stats = self.stats.lock().await;
+    pub fn stats(&self) -> CoalescerStats {
         CoalescerStats {
-            total_requests: stats.total_requests,
-            coalesced_requests: stats.coalesced_requests,
-            new_requests: stats.new_requests,
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            coalesced_requests: self.coalesced_requests.load(Ordering::Relaxed),
+            new_requests: self.new_requests.load(Ordering::Relaxed),
         }
     }
 
     /// Returns the number of currently in-flight requests.
-    pub async fn in_flight_count(&self) -> usize {
-        self.in_flight.lock().await.len()
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
     }
 
     /// Logs current statistics.
-    pub async fn log_stats(&self) {
-        let stats = self.stats.lock().await;
-        let in_flight_count = self.in_flight.lock().await.len();
+    pub fn log_stats(&self) {
+        let stats = self.stats();
+        let in_flight_count = self.in_flight_count();
 
         info!(
             total_requests = stats.total_requests,
@@ -272,7 +278,7 @@ mod tests {
         let coalescer = RequestCoalescer::new();
         let tile = test_tile(100, 200);
 
-        let result = coalescer.register(tile).await;
+        let result = coalescer.register(tile);
 
         assert!(result.is_new_request());
         assert_eq!(result.tile(), Some(tile));
@@ -284,11 +290,11 @@ mod tests {
         let tile = test_tile(100, 200);
 
         // First request
-        let first = coalescer.register(tile).await;
+        let first = coalescer.register(tile);
         assert!(first.is_new_request());
 
         // Second request for same tile should be coalesced
-        let second = coalescer.register(tile).await;
+        let second = coalescer.register(tile);
         assert!(!second.is_new_request());
         assert_eq!(second.tile(), None);
     }
@@ -299,8 +305,8 @@ mod tests {
         let tile1 = test_tile(100, 200);
         let tile2 = test_tile(100, 201);
 
-        let first = coalescer.register(tile1).await;
-        let second = coalescer.register(tile2).await;
+        let first = coalescer.register(tile1);
+        let second = coalescer.register(tile2);
 
         assert!(first.is_new_request());
         assert!(second.is_new_request());
@@ -312,14 +318,14 @@ mod tests {
         let tile = test_tile(100, 200);
 
         // First request
-        let _first = coalescer.register(tile).await;
+        let _first = coalescer.register(tile);
 
         // Second request for same tile
-        let second = coalescer.register(tile).await;
+        let second = coalescer.register(tile);
 
         // Complete the request
         let response = test_response();
-        coalescer.complete(tile, response.clone()).await;
+        coalescer.complete(tile, response.clone());
 
         // Second request should receive the result
         if let CoalesceResult::Coalesced(mut rx) = second {
@@ -338,12 +344,12 @@ mod tests {
         let tile = test_tile(100, 200);
 
         // First request (will process)
-        let _first = coalescer.register(tile).await;
+        let _first = coalescer.register(tile);
 
         // Multiple coalesced requests
-        let waiter1 = coalescer.register(tile).await;
-        let waiter2 = coalescer.register(tile).await;
-        let waiter3 = coalescer.register(tile).await;
+        let waiter1 = coalescer.register(tile);
+        let waiter2 = coalescer.register(tile);
+        let waiter3 = coalescer.register(tile);
 
         // Spawn waiters
         let coalescer_clone = Arc::clone(&coalescer);
@@ -362,7 +368,7 @@ mod tests {
 
         // Complete the request
         let response = test_response();
-        coalescer_clone.complete(tile, response).await;
+        coalescer_clone.complete(tile, response);
 
         // All waiters should receive the result
         for handle in handles {
@@ -377,14 +383,14 @@ mod tests {
         let tile = test_tile(100, 200);
 
         // Register and complete
-        let _first = coalescer.register(tile).await;
-        assert_eq!(coalescer.in_flight_count().await, 1);
+        let _first = coalescer.register(tile);
+        assert_eq!(coalescer.in_flight_count(), 1);
 
-        coalescer.complete(tile, test_response()).await;
-        assert_eq!(coalescer.in_flight_count().await, 0);
+        coalescer.complete(tile, test_response());
+        assert_eq!(coalescer.in_flight_count(), 0);
 
         // New request for same tile should be new (not coalesced)
-        let second = coalescer.register(tile).await;
+        let second = coalescer.register(tile);
         assert!(second.is_new_request());
     }
 
@@ -394,14 +400,14 @@ mod tests {
         let tile = test_tile(100, 200);
 
         // First request
-        let _first = coalescer.register(tile).await;
+        let _first = coalescer.register(tile);
 
         // Three coalesced requests
-        let _c1 = coalescer.register(tile).await;
-        let _c2 = coalescer.register(tile).await;
-        let _c3 = coalescer.register(tile).await;
+        let _c1 = coalescer.register(tile);
+        let _c2 = coalescer.register(tile);
+        let _c3 = coalescer.register(tile);
 
-        let stats = coalescer.stats().await;
+        let stats = coalescer.stats();
         assert_eq!(stats.total_requests, 4);
         assert_eq!(stats.new_requests, 1);
         assert_eq!(stats.coalesced_requests, 3);
@@ -417,7 +423,7 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let c = Arc::clone(&coalescer);
-            handles.push(tokio::spawn(async move { c.register(tile).await }));
+            handles.push(tokio::spawn(async move { c.register(tile) }));
         }
 
         // Wait for all to complete
@@ -441,16 +447,16 @@ mod tests {
         let tile = test_tile(100, 200);
 
         // First request
-        let _first = coalescer.register(tile).await;
+        let _first = coalescer.register(tile);
 
         // Coalesced request
-        let second = coalescer.register(tile).await;
+        let second = coalescer.register(tile);
 
         // Complete in background
         let c = Arc::clone(&coalescer);
         tokio::spawn(async move {
             sleep(Duration::from_millis(10)).await;
-            c.complete(tile, test_response()).await;
+            c.complete(tile, test_response());
         });
 
         // Wait for result
@@ -465,10 +471,47 @@ mod tests {
         let coalescer = RequestCoalescer::new();
         let tile = test_tile(100, 200);
 
-        let first = coalescer.register(tile).await;
+        let first = coalescer.register(tile);
 
         // wait_for_coalesced on a new request should return None
         let result = first.wait_for_coalesced().await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_high_throughput_registration() {
+        // Test that registration is truly lock-free under high contention
+        let coalescer = Arc::new(RequestCoalescer::new());
+        let num_tiles = 100;
+        let requests_per_tile = 10;
+
+        let mut handles = vec![];
+
+        // Spawn many concurrent registrations for different tiles
+        for tile_id in 0..num_tiles {
+            for _ in 0..requests_per_tile {
+                let c = Arc::clone(&coalescer);
+                handles.push(tokio::spawn(async move {
+                    let tile = test_tile(tile_id, 0);
+                    c.register(tile)
+                }));
+            }
+        }
+
+        // Wait for all
+        let results: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Should have num_tiles new requests (one per tile)
+        let new_count = results.iter().filter(|r| r.is_new_request()).count();
+        assert_eq!(new_count, num_tiles as usize);
+
+        // Stats should reflect total
+        let stats = coalescer.stats();
+        assert_eq!(stats.total_requests, (num_tiles * requests_per_tile) as u64);
+        assert_eq!(stats.new_requests, num_tiles as u64);
     }
 }

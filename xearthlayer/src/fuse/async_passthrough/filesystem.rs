@@ -9,7 +9,7 @@ use super::attributes::{
 use super::inode::InodeManager;
 use super::types::{DdsHandler, DdsRequest, DdsResponse};
 use crate::coord::TileCoord;
-use crate::fuse::{generate_default_placeholder, parse_dds_filename, DdsFilename};
+use crate::fuse::{get_default_placeholder, parse_dds_filename, DdsFilename};
 use crate::pipeline::JobId;
 use fuser::{FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
 use libc::{ENOENT, ENOTDIR};
@@ -169,7 +169,7 @@ impl AsyncPassthroughFS {
             Ok(Err(_)) => {
                 // Channel closed - sender dropped
                 error!(job_id = %job_id, "DDS generation channel closed unexpectedly");
-                generate_default_placeholder().unwrap_or_default()
+                get_default_placeholder()
             }
             Err(_) => {
                 // Timeout
@@ -178,7 +178,7 @@ impl AsyncPassthroughFS {
                     timeout_secs = self.generation_timeout.as_secs(),
                     "DDS generation timed out"
                 );
-                generate_default_placeholder().unwrap_or_default()
+                get_default_placeholder()
             }
         }
     }

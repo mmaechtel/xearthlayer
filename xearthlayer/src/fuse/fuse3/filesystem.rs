@@ -7,7 +7,9 @@ use super::inode::InodeManager;
 use super::types::{Fuse3Error, Fuse3Result, MountHandle};
 use crate::coord::TileCoord;
 use crate::fuse::async_passthrough::{DdsHandler, DdsRequest};
-use crate::fuse::{generate_default_placeholder, parse_dds_filename, DdsFilename};
+use crate::fuse::{
+    get_default_placeholder, parse_dds_filename, validate_dds_or_placeholder, DdsFilename,
+};
 use crate::pipeline::JobId;
 use bytes::Bytes;
 use fuse3::raw::prelude::*;
@@ -220,7 +222,7 @@ impl Fuse3PassthroughFS {
         (self.dds_handler)(request);
 
         // Await response with timeout (fully async - no blocking!)
-        match tokio::time::timeout(self.generation_timeout, rx).await {
+        let data = match tokio::time::timeout(self.generation_timeout, rx).await {
             Ok(Ok(response)) => {
                 debug!(
                     job_id = %job_id,
@@ -234,7 +236,7 @@ impl Fuse3PassthroughFS {
             Ok(Err(_)) => {
                 // Channel closed - sender dropped
                 error!(job_id = %job_id, "DDS generation channel closed unexpectedly");
-                generate_default_placeholder().unwrap_or_default()
+                get_default_placeholder()
             }
             Err(_) => {
                 // Timeout
@@ -243,9 +245,14 @@ impl Fuse3PassthroughFS {
                     timeout_secs = self.generation_timeout.as_secs(),
                     "DDS generation timed out"
                 );
-                generate_default_placeholder().unwrap_or_default()
+                get_default_placeholder()
             }
-        }
+        };
+
+        // Critical: Validate DDS before returning to X-Plane
+        // Invalid DDS data causes X-Plane to crash
+        let context = format!("tile({},{},{})", tile.row, tile.col, tile.zoom);
+        validate_dds_or_placeholder(data, &context)
     }
 
     /// Convert chunk-level coordinates to tile-level coordinates.
@@ -601,7 +608,7 @@ mod tests {
     fn create_test_handler() -> DdsHandler {
         Arc::new(|req: DdsRequest| {
             let response = DdsResponse {
-                data: vec![0xDD, 0x53, 0x20, 0x00], // DDS magic bytes
+                data: vec![0xDD, 0x53, 0x20, 0x00], // Invalid DDS (wrong size/magic)
                 cache_hit: false,
                 duration: Duration::from_millis(100),
             };
@@ -635,9 +642,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_dds() {
+    async fn test_request_dds_invalid_returns_placeholder() {
+        // Test that invalid DDS data (wrong size/format) is replaced with placeholder
         let temp_dir = tempfile::tempdir().unwrap();
-        let handler = create_test_handler();
+        let handler = create_test_handler(); // Returns only 4 bytes (invalid DDS)
 
         let fs = Fuse3PassthroughFS::new(temp_dir.path().to_path_buf(), handler, 1024);
 
@@ -649,6 +657,10 @@ mod tests {
         };
 
         let data = fs.request_dds(&coords).await;
-        assert_eq!(data, vec![0xDD, 0x53, 0x20, 0x00]);
+
+        // Invalid DDS should be replaced with placeholder
+        // Placeholder is 4096×4096 BC1 with 5 mipmaps = 11,174,016 bytes
+        assert_eq!(data.len(), 11_174_016);
+        assert_eq!(&data[0..4], b"DDS "); // Valid DDS magic
     }
 }
