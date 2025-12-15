@@ -19,6 +19,9 @@ tracing = "0.1"
 fuser = "0.14"
 ctrlc = "3.4"
 dirs = "5"
+ratatui = "0.29"
+crossterm = "0.28"
+atty = "0.2"
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
