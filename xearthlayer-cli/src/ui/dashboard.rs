@@ -96,9 +96,12 @@ impl Dashboard {
         let sample_interval = now.duration_since(self.last_draw).as_secs_f64();
         self.last_draw = now;
 
-        // Update network history with instantaneous throughput
-        self.network_history
-            .update(snapshot.bytes_downloaded, sample_interval);
+        // Update network history with instantaneous throughput and chunks/sec
+        self.network_history.update(
+            snapshot.bytes_downloaded,
+            snapshot.chunks_downloaded,
+            sample_interval,
+        );
 
         let uptime = self.start_time.elapsed();
         let cache_config = CacheConfig {

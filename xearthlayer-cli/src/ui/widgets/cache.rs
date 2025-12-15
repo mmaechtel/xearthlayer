@@ -59,14 +59,62 @@ impl<'a> CacheWidget<'a> {
     }
 
     fn progress_bar(current: usize, max: usize, width: usize) -> String {
+        // Handle edge cases where max might be 0 or current might exceed max
         let ratio = if max > 0 {
-            (current as f64 / max as f64).min(1.0)
+            (current as f64 / max as f64).clamp(0.0, 1.0)
+        } else if current > 0 {
+            // If max is 0 but we have data, show as full
+            1.0
         } else {
             0.0
         };
         let filled = (ratio * width as f64).round() as usize;
         let empty = width.saturating_sub(filled);
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+    }
+
+    /// Progress bar for u64 values with fractional block support.
+    ///
+    /// Uses Unicode partial block characters (▏▎▍▌▋▊▉█) to show
+    /// sub-character precision, giving 8x the visual resolution.
+    fn progress_bar_u64(current: u64, max: u64, width: usize) -> String {
+        // Fractional block characters: 1/8 through 8/8
+        const BLOCKS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+        let ratio = if max > 0 {
+            (current as f64 / max as f64).clamp(0.0, 1.0)
+        } else if current > 0 {
+            1.0
+        } else {
+            0.0
+        };
+
+        // Calculate total eighths filled (width * 8 possible positions)
+        let total_eighths = (ratio * (width * 8) as f64) as usize;
+
+        // Full blocks and remaining eighths
+        let full_blocks = total_eighths / 8;
+        let remainder_eighths = total_eighths % 8;
+
+        let mut result = String::with_capacity(width);
+
+        // Add full blocks
+        for _ in 0..full_blocks {
+            result.push('█');
+        }
+
+        // Add partial block if there's a remainder
+        if full_blocks < width && remainder_eighths > 0 {
+            result.push(BLOCKS[remainder_eighths]);
+        }
+
+        // Fill remaining with empty
+        let chars_used = full_blocks + if remainder_eighths > 0 { 1 } else { 0 };
+        for _ in chars_used..width {
+            result.push('░');
+        }
+
+        result
     }
 }
 
@@ -125,9 +173,10 @@ impl Widget for CacheWidget<'_> {
             ),
         ]);
 
-        // Disk cache line
-        let disk_current = self.snapshot.disk_cache_size_bytes as usize;
-        let disk_bar = Self::progress_bar(disk_current, self.config.disk_max_bytes, 16);
+        // Disk cache line - use u64 directly for large cache sizes
+        let disk_current = self.snapshot.disk_cache_size_bytes;
+        let disk_max = self.config.disk_max_bytes as u64;
+        let disk_bar = Self::progress_bar_u64(disk_current, disk_max, 16);
         let disk_hits = self.snapshot.disk_cache_hits;
         let disk_misses = self.snapshot.disk_cache_misses;
         let disk_hit_rate = self.snapshot.disk_cache_hit_rate * 100.0;
@@ -141,7 +190,7 @@ impl Widget for CacheWidget<'_> {
             Span::styled(
                 format!(
                     "{} / {}",
-                    Self::format_bytes(disk_current),
+                    Self::format_bytes(disk_current as usize),
                     Self::format_bytes(self.config.disk_max_bytes)
                 ),
                 Style::default().fg(Color::Blue),

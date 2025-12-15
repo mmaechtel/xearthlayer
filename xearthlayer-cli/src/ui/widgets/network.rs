@@ -24,6 +24,10 @@ pub struct NetworkHistory {
     last_bytes_downloaded: u64,
     /// Current instantaneous throughput.
     current_bps: f64,
+    /// Last total chunks downloaded (for delta calculation).
+    last_chunks_downloaded: u64,
+    /// Current instantaneous chunks per second.
+    current_chunks_per_sec: f64,
 }
 
 impl NetworkHistory {
@@ -34,21 +38,39 @@ impl NetworkHistory {
             peak_bps: 0.0,
             last_bytes_downloaded: 0,
             current_bps: 0.0,
+            last_chunks_downloaded: 0,
+            current_chunks_per_sec: 0.0,
         }
     }
 
     /// Update with new telemetry snapshot.
     ///
-    /// Calculates instantaneous throughput as the delta in bytes downloaded
-    /// since the last sample, divided by the sample interval (assumed ~100ms).
-    pub fn update(&mut self, bytes_downloaded: u64, sample_interval_secs: f64) {
+    /// Calculates instantaneous throughput as the delta in bytes/chunks downloaded
+    /// since the last sample, divided by the sample interval.
+    pub fn update(
+        &mut self,
+        bytes_downloaded: u64,
+        chunks_downloaded: u64,
+        sample_interval_secs: f64,
+    ) {
         // Calculate bytes downloaded since last sample
         let bytes_delta = bytes_downloaded.saturating_sub(self.last_bytes_downloaded);
         self.last_bytes_downloaded = bytes_downloaded;
 
+        // Calculate chunks downloaded since last sample
+        let chunks_delta = chunks_downloaded.saturating_sub(self.last_chunks_downloaded);
+        self.last_chunks_downloaded = chunks_downloaded;
+
         // Calculate instantaneous throughput (bytes per second)
         let instant_bps = if sample_interval_secs > 0.0 {
             bytes_delta as f64 / sample_interval_secs
+        } else {
+            0.0
+        };
+
+        // Calculate instantaneous chunks per second
+        self.current_chunks_per_sec = if sample_interval_secs > 0.0 {
+            chunks_delta as f64 / sample_interval_secs
         } else {
             0.0
         };
@@ -70,6 +92,11 @@ impl NetworkHistory {
     /// Get the current instantaneous throughput.
     pub fn current(&self) -> f64 {
         self.current_bps
+    }
+
+    /// Get the current instantaneous chunks per second.
+    pub fn chunks_per_sec(&self) -> f64 {
+        self.current_chunks_per_sec
     }
 
     /// Get the peak throughput.
@@ -109,13 +136,12 @@ impl NetworkHistory {
 
 /// Widget displaying network throughput.
 pub struct NetworkWidget<'a> {
-    snapshot: &'a TelemetrySnapshot,
     history: &'a NetworkHistory,
 }
 
 impl<'a> NetworkWidget<'a> {
-    pub fn new(snapshot: &'a TelemetrySnapshot, history: &'a NetworkHistory) -> Self {
-        Self { snapshot, history }
+    pub fn new(_snapshot: &'a TelemetrySnapshot, history: &'a NetworkHistory) -> Self {
+        Self { history }
     }
 
     fn format_throughput(bps: f64) -> String {
@@ -163,8 +189,8 @@ impl Widget for NetworkWidget<'_> {
             Span::raw("   "),
             Span::styled("Chunks: ", Style::default().fg(Color::White)),
             Span::styled(
-                format!("{:.1}/s", self.snapshot.chunks_per_second),
-                Style::default().fg(if self.snapshot.chunks_per_second > 0.0 {
+                format!("{:.1}/s", self.history.chunks_per_sec()),
+                Style::default().fg(if self.history.chunks_per_sec() > 0.0 {
                     Color::Yellow
                 } else {
                     Color::DarkGray

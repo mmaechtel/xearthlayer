@@ -288,6 +288,31 @@ impl XEarthLayerService {
         // Create pipeline telemetry metrics
         let metrics = Arc::new(PipelineMetrics::new());
 
+        // Initialize disk cache size from existing cache directory
+        // This runs in the background to avoid blocking startup for large caches
+        if let Some(ref dir) = cache_dir {
+            let chunks_dir = dir.join("chunks");
+            if chunks_dir.exists() {
+                let metrics_clone = Arc::clone(&metrics);
+                let chunks_dir_clone = chunks_dir.clone();
+                runtime_handle.spawn(async move {
+                    match calculate_directory_size(&chunks_dir_clone).await {
+                        Ok(size) => {
+                            metrics_clone.set_disk_cache_size(size);
+                            tracing::info!(
+                                size_bytes = size,
+                                size_human = %crate::config::format_size(size as usize),
+                                "Initialized disk cache size from existing cache"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to calculate disk cache size");
+                        }
+                    }
+                });
+            }
+        }
+
         Ok(Self {
             config,
             provider_name,
@@ -373,11 +398,9 @@ impl XEarthLayerService {
                 .set_memory_cache_size(mem_cache.size_bytes() as u64);
         }
 
-        // Get disk cache size from CacheSystem
-        if let Some(cache_system) = self.cache.as_any().downcast_ref::<CacheSystem>() {
-            self.metrics
-                .set_disk_cache_size(cache_system.disk_size_bytes() as u64);
-        }
+        // Note: Disk cache size (chunk-level) is tracked incrementally in the
+        // download stage via add_disk_cache_bytes(). We don't query CacheSystem
+        // here because that tracks tile-level cache, not chunk-level.
     }
 
     /// Get a reference to the pipeline metrics for direct access.
@@ -577,6 +600,39 @@ impl XEarthLayerService {
         let config = self.create_mount_config();
         FuseMountService::mount_fuse3_spawned(&config, source_dir, mountpoint).await
     }
+}
+
+/// Calculate the total size of a directory recursively.
+///
+/// This is used to initialize the disk cache size metric on startup.
+/// For large caches (100GB+), this runs asynchronously to avoid blocking.
+async fn calculate_directory_size(path: &std::path::Path) -> std::io::Result<u64> {
+    use tokio::fs;
+
+    let mut total_size = 0u64;
+    let mut dirs_to_scan = vec![path.to_path_buf()];
+
+    while let Some(dir) = dirs_to_scan.pop() {
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue, // Skip directories we can't read
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let metadata = match entry.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue, // Skip entries we can't stat
+            };
+
+            if metadata.is_dir() {
+                dirs_to_scan.push(entry.path());
+            } else if metadata.is_file() {
+                total_size += metadata.len();
+            }
+        }
+    }
+
+    Ok(total_size)
 }
 
 #[cfg(test)]
