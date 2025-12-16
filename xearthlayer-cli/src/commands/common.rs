@@ -10,18 +10,23 @@ use crate::error::CliError;
 /// Imagery provider selection for CLI arguments.
 #[derive(Debug, Clone, ValueEnum, PartialEq)]
 pub enum ProviderType {
+    /// ArcGIS World Imagery (no API key required, global coverage)
+    Arcgis,
     /// Bing Maps aerial imagery (no API key required)
     Bing,
     /// Google Maps via public tile servers (no API key required, same as Ortho4XP GO2)
     Go2,
     /// Google Maps official API (requires API key, has usage limits)
     Google,
+    /// USGS orthoimagery (no API key required, US coverage only)
+    Usgs,
 }
 
 impl ProviderType {
     /// Convert to a ProviderConfig, requiring API key for Google provider.
     pub fn to_config(&self, api_key: Option<String>) -> Result<ProviderConfig, CliError> {
         match self {
+            ProviderType::Arcgis => Ok(ProviderConfig::arcgis()),
             ProviderType::Bing => Ok(ProviderConfig::bing()),
             ProviderType::Go2 => Ok(ProviderConfig::go2()),
             ProviderType::Google => {
@@ -34,15 +39,18 @@ impl ProviderType {
                 })?;
                 Ok(ProviderConfig::google(key))
             }
+            ProviderType::Usgs => Ok(ProviderConfig::usgs()),
         }
     }
 
     /// Parse from config file string.
     pub fn from_config_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            "arcgis" => Some(ProviderType::Arcgis),
             "bing" => Some(ProviderType::Bing),
             "go2" => Some(ProviderType::Go2),
             "google" => Some(ProviderType::Google),
+            "usgs" => Some(ProviderType::Usgs),
             _ => None,
         }
     }

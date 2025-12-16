@@ -8,11 +8,13 @@
 //! - [`ProviderFactory`] - Creates sync `Provider` instances (legacy)
 //! - [`AsyncProviderFactory`] - Creates `AsyncProvider` instances (preferred)
 
+use super::arcgis::{ArcGisProvider, AsyncArcGisProvider};
 use super::bing::{AsyncBingMapsProvider, BingMapsProvider};
 use super::go2::{AsyncGo2Provider, Go2Provider};
 use super::google::{AsyncGoogleMapsProvider, GoogleMapsProvider};
 use super::http::{AsyncReqwestClient, ReqwestClient};
 use super::types::{AsyncProvider, Provider, ProviderError};
+use super::usgs::{AsyncUsgsProvider, UsgsProvider};
 use std::sync::Arc;
 
 /// Configuration for creating a provider.
@@ -36,6 +38,12 @@ use std::sync::Arc;
 /// ```
 #[derive(Debug, Clone)]
 pub enum ProviderConfig {
+    /// ArcGIS World Imagery satellite provider.
+    ///
+    /// No API key required - uses Esri's public World Imagery basemap.
+    /// Global coverage with high resolution in populated areas.
+    ArcGis,
+
     /// Bing Maps satellite imagery provider.
     ///
     /// No API key required - uses public Bing Maps tile servers.
@@ -55,9 +63,20 @@ pub enum ProviderConfig {
         /// Google Maps Platform API key
         api_key: String,
     },
+
+    /// USGS (United States Geological Survey) imagery provider.
+    ///
+    /// No API key required - free access to USGS orthoimagery.
+    /// Coverage is limited to the United States.
+    Usgs,
 }
 
 impl ProviderConfig {
+    /// Create an ArcGIS World Imagery provider configuration.
+    pub fn arcgis() -> Self {
+        Self::ArcGis
+    }
+
     /// Create a Bing Maps provider configuration.
     pub fn bing() -> Self {
         Self::Bing
@@ -75,12 +94,19 @@ impl ProviderConfig {
         }
     }
 
+    /// Create a USGS imagery provider configuration.
+    pub fn usgs() -> Self {
+        Self::Usgs
+    }
+
     /// Returns the provider name for this configuration.
     pub fn name(&self) -> &str {
         match self {
+            Self::ArcGis => "ArcGIS",
             Self::Bing => "Bing Maps",
             Self::Go2 => "Google GO2",
             Self::Google { .. } => "Google Maps",
+            Self::Usgs => "USGS",
         }
     }
 
@@ -136,6 +162,12 @@ impl ProviderFactory {
         config: &ProviderConfig,
     ) -> Result<(Arc<dyn Provider>, String, u8), ProviderError> {
         match config {
+            ProviderConfig::ArcGis => {
+                let provider = ArcGisProvider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
             ProviderConfig::Bing => {
                 let provider = BingMapsProvider::new(self.http_client);
                 let name = provider.name().to_string();
@@ -150,6 +182,12 @@ impl ProviderFactory {
             }
             ProviderConfig::Google { api_key } => {
                 let provider = GoogleMapsProvider::new(self.http_client, api_key.clone())?;
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
+            ProviderConfig::Usgs => {
+                let provider = UsgsProvider::new(self.http_client);
                 let name = provider.name().to_string();
                 let max_zoom = provider.max_zoom();
                 Ok((Arc::new(provider), name, max_zoom))
@@ -188,41 +226,51 @@ pub struct AsyncProviderFactory {
 /// This allows the factory to return different concrete provider types
 /// while maintaining a common interface.
 pub enum AsyncProviderType {
+    ArcGis(AsyncArcGisProvider<AsyncReqwestClient>),
     Bing(AsyncBingMapsProvider<AsyncReqwestClient>),
     Go2(AsyncGo2Provider<AsyncReqwestClient>),
     Google(AsyncGoogleMapsProvider<AsyncReqwestClient>),
+    Usgs(AsyncUsgsProvider<AsyncReqwestClient>),
 }
 
 impl AsyncProvider for AsyncProviderType {
     async fn download_chunk(&self, row: u32, col: u32, zoom: u8) -> Result<Vec<u8>, ProviderError> {
         match self {
+            Self::ArcGis(p) => p.download_chunk(row, col, zoom).await,
             Self::Bing(p) => p.download_chunk(row, col, zoom).await,
             Self::Go2(p) => p.download_chunk(row, col, zoom).await,
             Self::Google(p) => p.download_chunk(row, col, zoom).await,
+            Self::Usgs(p) => p.download_chunk(row, col, zoom).await,
         }
     }
 
     fn name(&self) -> &str {
         match self {
+            Self::ArcGis(p) => p.name(),
             Self::Bing(p) => p.name(),
             Self::Go2(p) => p.name(),
             Self::Google(p) => p.name(),
+            Self::Usgs(p) => p.name(),
         }
     }
 
     fn min_zoom(&self) -> u8 {
         match self {
+            Self::ArcGis(p) => p.min_zoom(),
             Self::Bing(p) => p.min_zoom(),
             Self::Go2(p) => p.min_zoom(),
             Self::Google(p) => p.min_zoom(),
+            Self::Usgs(p) => p.min_zoom(),
         }
     }
 
     fn max_zoom(&self) -> u8 {
         match self {
+            Self::ArcGis(p) => p.max_zoom(),
             Self::Bing(p) => p.max_zoom(),
             Self::Go2(p) => p.max_zoom(),
             Self::Google(p) => p.max_zoom(),
+            Self::Usgs(p) => p.max_zoom(),
         }
     }
 }
@@ -251,6 +299,12 @@ impl AsyncProviderFactory {
         config: &ProviderConfig,
     ) -> Result<(AsyncProviderType, String, u8), ProviderError> {
         match config {
+            ProviderConfig::ArcGis => {
+                let provider = AsyncArcGisProvider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((AsyncProviderType::ArcGis(provider), name, max_zoom))
+            }
             ProviderConfig::Bing => {
                 let provider = AsyncBingMapsProvider::new(self.http_client);
                 let name = provider.name().to_string();
@@ -270,6 +324,12 @@ impl AsyncProviderFactory {
                 let max_zoom = provider.max_zoom();
                 Ok((AsyncProviderType::Google(provider), name, max_zoom))
             }
+            ProviderConfig::Usgs => {
+                let provider = AsyncUsgsProvider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((AsyncProviderType::Usgs(provider), name, max_zoom))
+            }
         }
     }
 }
@@ -277,6 +337,13 @@ impl AsyncProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_provider_config_arcgis() {
+        let config = ProviderConfig::arcgis();
+        assert_eq!(config.name(), "ArcGIS");
+        assert!(!config.requires_api_key());
+    }
 
     #[test]
     fn test_provider_config_bing() {
@@ -306,6 +373,13 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_config_usgs() {
+        let config = ProviderConfig::usgs();
+        assert_eq!(config.name(), "USGS");
+        assert!(!config.requires_api_key());
+    }
+
+    #[test]
     fn test_provider_config_clone() {
         let config = ProviderConfig::google("api_key");
         let cloned = config.clone();
@@ -324,6 +398,20 @@ mod tests {
         let config = ProviderConfig::Go2;
         let debug_str = format!("{:?}", config);
         assert!(debug_str.contains("Go2"));
+    }
+
+    #[test]
+    fn test_provider_config_arcgis_debug() {
+        let config = ProviderConfig::ArcGis;
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("ArcGis"));
+    }
+
+    #[test]
+    fn test_provider_config_usgs_debug() {
+        let config = ProviderConfig::Usgs;
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("Usgs"));
     }
 
     // Note: Factory tests that create real HTTP clients are integration tests
