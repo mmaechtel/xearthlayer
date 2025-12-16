@@ -7,12 +7,12 @@ CARGO := cargo
 CARGO_FLAGS :=
 COVERAGE_MIN := 80
 
-# Colors for output
-RED := \033[0;31m
-GREEN := \033[0;32m
-YELLOW := \033[0;33m
-BLUE := \033[0;36m
-NC := \033[0m # No Color
+# Colors for output (using shell printf for proper escape sequence handling)
+RED := $(shell printf '\033[0;31m')
+GREEN := $(shell printf '\033[0;32m')
+YELLOW := $(shell printf '\033[0;33m')
+BLUE := $(shell printf '\033[0;36m')
+NC := $(shell printf '\033[0m')
 
 .DEFAULT_GOAL := help
 
@@ -30,8 +30,9 @@ help: ## Show this help message
 init: ## Initialize development environment
 	@echo "$(BLUE)Initializing development environment...$(NC)"
 	@command -v cargo >/dev/null 2>&1 || { echo "$(RED)Error: cargo not found. Install Rust from https://rustup.rs/$(NC)"; exit 1; }
+	@command -v rustup >/dev/null 2>&1 || { echo "$(RED)Error: rustup not found. Install Rust via rustup from https://rustup.rs/$(NC)"; exit 1; }
 	@command -v rustfmt >/dev/null 2>&1 || rustup component add rustfmt
-	@command -v clippy >/dev/null 2>&1 || rustup component add clippy
+	@command -v cargo-clippy >/dev/null 2>&1 || rustup component add clippy
 	@echo "$(GREEN)Development environment ready!$(NC)"
 
 .PHONY: dev
@@ -120,17 +121,20 @@ coverage-check: ## Check if coverage meets minimum threshold
 .PHONY: format
 format: ## Format code with rustfmt
 	@echo "$(BLUE)Formatting code...$(NC)"
+	@command -v rustfmt >/dev/null 2>&1 || { echo "$(RED)Error: rustfmt not found. Run 'make init' or 'rustup component add rustfmt'$(NC)"; exit 1; }
 	$(CARGO) fmt
 	@echo "$(GREEN)Code formatted!$(NC)"
 
 .PHONY: format-check
 format-check: ## Check code formatting without modifying
 	@echo "$(BLUE)Checking code formatting...$(NC)"
+	@command -v rustfmt >/dev/null 2>&1 || { echo "$(RED)Error: rustfmt not found. Run 'make init' or 'rustup component add rustfmt'$(NC)"; exit 1; }
 	$(CARGO) fmt -- --check
 
 .PHONY: lint
 lint: ## Run clippy linter
 	@echo "$(BLUE)Running clippy linter...$(NC)"
+	@command -v cargo-clippy >/dev/null 2>&1 || { echo "$(RED)Error: clippy not found. Run 'make init' or 'rustup component add clippy'$(NC)"; exit 1; }
 	$(CARGO) clippy $(CARGO_FLAGS) -- -D warnings
 
 .PHONY: lint-fix
