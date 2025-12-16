@@ -22,6 +22,18 @@ pub trait HttpClient: Send + Sync {
     /// The response body as bytes or an error.
     fn get(&self, url: &str) -> Result<Vec<u8>, ProviderError>;
 
+    /// Performs an HTTP GET request with Bearer token authentication.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL to request
+    /// * `bearer_token` - The bearer token for Authorization header
+    ///
+    /// # Returns
+    ///
+    /// The response body as bytes or an error.
+    fn get_with_bearer(&self, url: &str, bearer_token: &str) -> Result<Vec<u8>, ProviderError>;
+
     /// Performs an HTTP POST request with JSON body.
     ///
     /// # Arguments
@@ -50,6 +62,22 @@ pub trait AsyncHttpClient: Send + Sync {
     ///
     /// The response body as bytes or an error.
     fn get(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ProviderError>> + Send;
+
+    /// Performs an async HTTP GET request with Bearer token authentication.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL to request
+    /// * `bearer_token` - The bearer token for Authorization header
+    ///
+    /// # Returns
+    ///
+    /// The response body as bytes or an error.
+    fn get_with_bearer(
+        &self,
+        url: &str,
+        bearer_token: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, ProviderError>> + Send;
 
     /// Performs an async HTTP POST request with JSON body.
     ///
@@ -118,6 +146,30 @@ impl HttpClient for ReqwestClient {
         let response = self
             .client
             .get(url)
+            .send()
+            .map_err(|e| ProviderError::HttpError(format!("Request failed: {}", e)))?;
+
+        // Check HTTP status
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpError(format!(
+                "HTTP {} from {}",
+                response.status(),
+                url
+            )));
+        }
+
+        // Read response body
+        response
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
+    }
+
+    fn get_with_bearer(&self, url: &str, bearer_token: &str) -> Result<Vec<u8>, ProviderError> {
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", bearer_token))
             .send()
             .map_err(|e| ProviderError::HttpError(format!("Request failed: {}", e)))?;
 
@@ -250,6 +302,36 @@ impl AsyncHttpClient for AsyncReqwestClient {
             .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
     }
 
+    async fn get_with_bearer(
+        &self,
+        url: &str,
+        bearer_token: &str,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", bearer_token))
+            .send()
+            .await
+            .map_err(|e| ProviderError::HttpError(format!("Request failed: {}", e)))?;
+
+        // Check HTTP status
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpError(format!(
+                "HTTP {} from {}",
+                response.status(),
+                url
+            )));
+        }
+
+        // Read response body
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
+    }
+
     async fn post_json(&self, url: &str, json_body: &str) -> Result<Vec<u8>, ProviderError> {
         let response = self
             .client
@@ -293,6 +375,14 @@ pub mod tests {
             self.response.clone()
         }
 
+        fn get_with_bearer(
+            &self,
+            _url: &str,
+            _bearer_token: &str,
+        ) -> Result<Vec<u8>, ProviderError> {
+            self.response.clone()
+        }
+
         fn post_json(&self, _url: &str, _json_body: &str) -> Result<Vec<u8>, ProviderError> {
             self.response.clone()
         }
@@ -306,6 +396,14 @@ pub mod tests {
 
     impl AsyncHttpClient for MockAsyncHttpClient {
         async fn get(&self, _url: &str) -> Result<Vec<u8>, ProviderError> {
+            self.response.clone()
+        }
+
+        async fn get_with_bearer(
+            &self,
+            _url: &str,
+            _bearer_token: &str,
+        ) -> Result<Vec<u8>, ProviderError> {
             self.response.clone()
         }
 

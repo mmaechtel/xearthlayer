@@ -108,13 +108,8 @@ fn fetch_credentials_sync<C: HttpClient>(
 
     let ddg_token = extract_ddg_token(&ddg_text)?;
 
-    // Step 2: Fetch Apple bootstrap with bearer token
-    // Note: We need to make a request with Authorization header
-    // Since our HttpClient trait doesn't support custom headers for GET,
-    // we'll use post_json with an empty body as a workaround, or add the token as needed
-    // For now, we'll try fetching with a custom approach
-    let bootstrap_url = format!("{}&token={}", APPLE_BOOTSTRAP_URL, ddg_token);
-    let bootstrap_response = http_client.get(&bootstrap_url)?;
+    // Step 2: Fetch Apple bootstrap with bearer token in Authorization header
+    let bootstrap_response = http_client.get_with_bearer(APPLE_BOOTSTRAP_URL, &ddg_token)?;
     let bootstrap_text = String::from_utf8(bootstrap_response)
         .map_err(|e| ProviderError::InvalidResponse(format!("Invalid UTF-8 from Apple: {}", e)))?;
 
@@ -133,9 +128,10 @@ async fn fetch_credentials_async<C: AsyncHttpClient>(
 
     let ddg_token = extract_ddg_token(&ddg_text)?;
 
-    // Step 2: Fetch Apple bootstrap with bearer token
-    let bootstrap_url = format!("{}&token={}", APPLE_BOOTSTRAP_URL, ddg_token);
-    let bootstrap_response = http_client.get(&bootstrap_url).await?;
+    // Step 2: Fetch Apple bootstrap with bearer token in Authorization header
+    let bootstrap_response = http_client
+        .get_with_bearer(APPLE_BOOTSTRAP_URL, &ddg_token)
+        .await?;
     let bootstrap_text = String::from_utf8(bootstrap_response)
         .map_err(|e| ProviderError::InvalidResponse(format!("Invalid UTF-8 from Apple: {}", e)))?;
 
