@@ -144,11 +144,16 @@ async fn fetch_credentials_async<C: AsyncHttpClient>(
 
 /// Extract the bearer token from DuckDuckGo's response.
 fn extract_ddg_token(response: &str) -> Result<String, ProviderError> {
-    // DuckDuckGo returns JavaScript that contains the token
-    // Format varies but typically includes the token in quotes
-    // Example: DDG.Data.mapsAPIKey = "token_here";
+    let trimmed = response.trim();
 
-    // Try to find token patterns
+    // DuckDuckGo now returns a raw JWT token directly
+    // Format: eyJhbGciOiJFUzI1NiIsImtpZCI6...
+    if trimmed.starts_with("eyJ") && trimmed.len() > 50 {
+        return Ok(trimmed.to_string());
+    }
+
+    // Legacy format: JavaScript that contains the token in quotes
+    // Example: DDG.Data.mapsAPIKey = "token_here";
     for pattern in &["mapsAPIKey", "mk_token", "token"] {
         if let Some(pos) = response.find(pattern) {
             let after_key = &response[pos..];
@@ -411,7 +416,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_ddg_token() {
+    fn test_extract_ddg_token_jwt() {
+        // Current format: raw JWT token
+        let response = "eyJhbGciOiJFUzI1NiIsImtpZCI6IjdONVczMlVUQzIiLCJ0eXAiOiJKV1QifQ.eyJpYXQiOjE3NjU5MDg0MzQsIm9yaWdpbiI6Imh0dHBzOi8vZHVja2R1Y2tnby5jb20iLCJpc3MiOiJIS0U5NzNWTFVXIiwiZXhwIjoxNzY1OTMwMDM0fQ.signature";
+        let token = extract_ddg_token(response).unwrap();
+        assert!(token.starts_with("eyJ"));
+    }
+
+    #[test]
+    fn test_extract_ddg_token_legacy() {
+        // Legacy format: JavaScript with mapsAPIKey
         let response = r#"DDG.Data.mapsAPIKey = "test_token_12345";"#;
         let token = extract_ddg_token(response).unwrap();
         assert_eq!(token, "test_token_12345");
