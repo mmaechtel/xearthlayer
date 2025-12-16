@@ -22,6 +22,18 @@ pub trait HttpClient: Send + Sync {
     /// The response body as bytes or an error.
     fn get(&self, url: &str) -> Result<Vec<u8>, ProviderError>;
 
+    /// Performs an HTTP GET request with Bearer token authentication.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL to request
+    /// * `bearer_token` - The bearer token for Authorization header
+    ///
+    /// # Returns
+    ///
+    /// The response body as bytes or an error.
+    fn get_with_bearer(&self, url: &str, bearer_token: &str) -> Result<Vec<u8>, ProviderError>;
+
     /// Performs an HTTP POST request with JSON body.
     ///
     /// # Arguments
@@ -51,6 +63,22 @@ pub trait AsyncHttpClient: Send + Sync {
     /// The response body as bytes or an error.
     fn get(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ProviderError>> + Send;
 
+    /// Performs an async HTTP GET request with Bearer token authentication.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL to request
+    /// * `bearer_token` - The bearer token for Authorization header
+    ///
+    /// # Returns
+    ///
+    /// The response body as bytes or an error.
+    fn get_with_bearer(
+        &self,
+        url: &str,
+        bearer_token: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, ProviderError>> + Send;
+
     /// Performs an async HTTP POST request with JSON body.
     ///
     /// # Arguments
@@ -69,6 +97,7 @@ pub trait AsyncHttpClient: Send + Sync {
 }
 
 /// Real HTTP client implementation using reqwest.
+#[derive(Clone)]
 pub struct ReqwestClient {
     client: reqwest::blocking::Client,
 }
@@ -136,6 +165,30 @@ impl HttpClient for ReqwestClient {
             .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
     }
 
+    fn get_with_bearer(&self, url: &str, bearer_token: &str) -> Result<Vec<u8>, ProviderError> {
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", bearer_token))
+            .send()
+            .map_err(|e| ProviderError::HttpError(format!("Request failed: {}", e)))?;
+
+        // Check HTTP status
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpError(format!(
+                "HTTP {} from {}",
+                response.status(),
+                url
+            )));
+        }
+
+        // Read response body
+        response
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
+    }
+
     fn post_json(&self, url: &str, json_body: &str) -> Result<Vec<u8>, ProviderError> {
         let response = self
             .client
@@ -167,6 +220,7 @@ impl HttpClient for ReqwestClient {
 /// This client uses non-blocking I/O and is the preferred choice for
 /// high-throughput scenarios. Unlike the blocking `ReqwestClient`, this
 /// does not consume threads from Tokio's blocking pool.
+#[derive(Clone)]
 pub struct AsyncReqwestClient {
     client: reqwest::Client,
 }
@@ -248,6 +302,36 @@ impl AsyncHttpClient for AsyncReqwestClient {
             .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
     }
 
+    async fn get_with_bearer(
+        &self,
+        url: &str,
+        bearer_token: &str,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", bearer_token))
+            .send()
+            .await
+            .map_err(|e| ProviderError::HttpError(format!("Request failed: {}", e)))?;
+
+        // Check HTTP status
+        if !response.status().is_success() {
+            return Err(ProviderError::HttpError(format!(
+                "HTTP {} from {}",
+                response.status(),
+                url
+            )));
+        }
+
+        // Read response body
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| ProviderError::HttpError(format!("Failed to read response: {}", e)))
+    }
+
     async fn post_json(&self, url: &str, json_body: &str) -> Result<Vec<u8>, ProviderError> {
         let response = self
             .client
@@ -281,6 +365,7 @@ pub mod tests {
     use super::*;
 
     /// Mock HTTP client for testing (synchronous)
+    #[derive(Clone)]
     pub struct MockHttpClient {
         pub response: Result<Vec<u8>, ProviderError>,
     }
@@ -290,18 +375,35 @@ pub mod tests {
             self.response.clone()
         }
 
+        fn get_with_bearer(
+            &self,
+            _url: &str,
+            _bearer_token: &str,
+        ) -> Result<Vec<u8>, ProviderError> {
+            self.response.clone()
+        }
+
         fn post_json(&self, _url: &str, _json_body: &str) -> Result<Vec<u8>, ProviderError> {
             self.response.clone()
         }
     }
 
     /// Mock async HTTP client for testing
+    #[derive(Clone)]
     pub struct MockAsyncHttpClient {
         pub response: Result<Vec<u8>, ProviderError>,
     }
 
     impl AsyncHttpClient for MockAsyncHttpClient {
         async fn get(&self, _url: &str) -> Result<Vec<u8>, ProviderError> {
+            self.response.clone()
+        }
+
+        async fn get_with_bearer(
+            &self,
+            _url: &str,
+            _bearer_token: &str,
+        ) -> Result<Vec<u8>, ProviderError> {
             self.response.clone()
         }
 

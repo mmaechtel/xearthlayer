@@ -8,11 +8,15 @@
 //! - [`ProviderFactory`] - Creates sync `Provider` instances (legacy)
 //! - [`AsyncProviderFactory`] - Creates `AsyncProvider` instances (preferred)
 
+use super::apple::{AppleMapsProvider, AsyncAppleMapsProvider};
+use super::arcgis::{ArcGisProvider, AsyncArcGisProvider};
 use super::bing::{AsyncBingMapsProvider, BingMapsProvider};
 use super::go2::{AsyncGo2Provider, Go2Provider};
 use super::google::{AsyncGoogleMapsProvider, GoogleMapsProvider};
 use super::http::{AsyncReqwestClient, ReqwestClient};
+use super::mapbox::{AsyncMapBoxProvider, MapBoxProvider};
 use super::types::{AsyncProvider, Provider, ProviderError};
+use super::usgs::{AsyncUsgsProvider, UsgsProvider};
 use std::sync::Arc;
 
 /// Configuration for creating a provider.
@@ -36,6 +40,18 @@ use std::sync::Arc;
 /// ```
 #[derive(Debug, Clone)]
 pub enum ProviderConfig {
+    /// Apple Maps satellite imagery provider.
+    ///
+    /// No API key required - uses DuckDuckGo's MapKit integration.
+    /// Tokens are automatically acquired and refreshed.
+    Apple,
+
+    /// ArcGIS World Imagery satellite provider.
+    ///
+    /// No API key required - uses Esri's public World Imagery basemap.
+    /// Global coverage with high resolution in populated areas.
+    ArcGis,
+
     /// Bing Maps satellite imagery provider.
     ///
     /// No API key required - uses public Bing Maps tile servers.
@@ -55,9 +71,34 @@ pub enum ProviderConfig {
         /// Google Maps Platform API key
         api_key: String,
     },
+
+    /// MapBox satellite imagery provider.
+    ///
+    /// Requires a MapBox access token (free tier available).
+    /// High-quality global satellite imagery.
+    MapBox {
+        /// MapBox access token
+        access_token: String,
+    },
+
+    /// USGS (United States Geological Survey) imagery provider.
+    ///
+    /// No API key required - free access to USGS orthoimagery.
+    /// Coverage is limited to the United States.
+    Usgs,
 }
 
 impl ProviderConfig {
+    /// Create an Apple Maps provider configuration.
+    pub fn apple() -> Self {
+        Self::Apple
+    }
+
+    /// Create an ArcGIS World Imagery provider configuration.
+    pub fn arcgis() -> Self {
+        Self::ArcGis
+    }
+
     /// Create a Bing Maps provider configuration.
     pub fn bing() -> Self {
         Self::Bing
@@ -75,18 +116,34 @@ impl ProviderConfig {
         }
     }
 
-    /// Returns the provider name for this configuration.
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Bing => "Bing Maps",
-            Self::Go2 => "Google GO2",
-            Self::Google { .. } => "Google Maps",
+    /// Create a MapBox provider configuration with the given access token.
+    pub fn mapbox(access_token: impl Into<String>) -> Self {
+        Self::MapBox {
+            access_token: access_token.into(),
         }
     }
 
-    /// Returns whether this provider requires an API key.
+    /// Create a USGS imagery provider configuration.
+    pub fn usgs() -> Self {
+        Self::Usgs
+    }
+
+    /// Returns the provider name for this configuration.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Apple => "Apple Maps",
+            Self::ArcGis => "ArcGIS",
+            Self::Bing => "Bing Maps",
+            Self::Go2 => "Google GO2",
+            Self::Google { .. } => "Google Maps",
+            Self::MapBox { .. } => "MapBox",
+            Self::Usgs => "USGS",
+        }
+    }
+
+    /// Returns whether this provider requires an API key or access token.
     pub fn requires_api_key(&self) -> bool {
-        matches!(self, Self::Google { .. })
+        matches!(self, Self::Google { .. } | Self::MapBox { .. })
     }
 }
 
@@ -136,6 +193,18 @@ impl ProviderFactory {
         config: &ProviderConfig,
     ) -> Result<(Arc<dyn Provider>, String, u8), ProviderError> {
         match config {
+            ProviderConfig::Apple => {
+                let provider = AppleMapsProvider::new(self.http_client)?;
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
+            ProviderConfig::ArcGis => {
+                let provider = ArcGisProvider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
             ProviderConfig::Bing => {
                 let provider = BingMapsProvider::new(self.http_client);
                 let name = provider.name().to_string();
@@ -150,6 +219,18 @@ impl ProviderFactory {
             }
             ProviderConfig::Google { api_key } => {
                 let provider = GoogleMapsProvider::new(self.http_client, api_key.clone())?;
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
+            ProviderConfig::MapBox { access_token } => {
+                let provider = MapBoxProvider::new(self.http_client, access_token.clone());
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((Arc::new(provider), name, max_zoom))
+            }
+            ProviderConfig::Usgs => {
+                let provider = UsgsProvider::new(self.http_client);
                 let name = provider.name().to_string();
                 let max_zoom = provider.max_zoom();
                 Ok((Arc::new(provider), name, max_zoom))
@@ -188,41 +269,61 @@ pub struct AsyncProviderFactory {
 /// This allows the factory to return different concrete provider types
 /// while maintaining a common interface.
 pub enum AsyncProviderType {
+    Apple(AsyncAppleMapsProvider<AsyncReqwestClient>),
+    ArcGis(AsyncArcGisProvider<AsyncReqwestClient>),
     Bing(AsyncBingMapsProvider<AsyncReqwestClient>),
     Go2(AsyncGo2Provider<AsyncReqwestClient>),
     Google(AsyncGoogleMapsProvider<AsyncReqwestClient>),
+    MapBox(AsyncMapBoxProvider<AsyncReqwestClient>),
+    Usgs(AsyncUsgsProvider<AsyncReqwestClient>),
 }
 
 impl AsyncProvider for AsyncProviderType {
     async fn download_chunk(&self, row: u32, col: u32, zoom: u8) -> Result<Vec<u8>, ProviderError> {
         match self {
+            Self::Apple(p) => p.download_chunk(row, col, zoom).await,
+            Self::ArcGis(p) => p.download_chunk(row, col, zoom).await,
             Self::Bing(p) => p.download_chunk(row, col, zoom).await,
             Self::Go2(p) => p.download_chunk(row, col, zoom).await,
             Self::Google(p) => p.download_chunk(row, col, zoom).await,
+            Self::MapBox(p) => p.download_chunk(row, col, zoom).await,
+            Self::Usgs(p) => p.download_chunk(row, col, zoom).await,
         }
     }
 
     fn name(&self) -> &str {
         match self {
+            Self::Apple(p) => p.name(),
+            Self::ArcGis(p) => p.name(),
             Self::Bing(p) => p.name(),
             Self::Go2(p) => p.name(),
             Self::Google(p) => p.name(),
+            Self::MapBox(p) => p.name(),
+            Self::Usgs(p) => p.name(),
         }
     }
 
     fn min_zoom(&self) -> u8 {
         match self {
+            Self::Apple(p) => p.min_zoom(),
+            Self::ArcGis(p) => p.min_zoom(),
             Self::Bing(p) => p.min_zoom(),
             Self::Go2(p) => p.min_zoom(),
             Self::Google(p) => p.min_zoom(),
+            Self::MapBox(p) => p.min_zoom(),
+            Self::Usgs(p) => p.min_zoom(),
         }
     }
 
     fn max_zoom(&self) -> u8 {
         match self {
+            Self::Apple(p) => p.max_zoom(),
+            Self::ArcGis(p) => p.max_zoom(),
             Self::Bing(p) => p.max_zoom(),
             Self::Go2(p) => p.max_zoom(),
             Self::Google(p) => p.max_zoom(),
+            Self::MapBox(p) => p.max_zoom(),
+            Self::Usgs(p) => p.max_zoom(),
         }
     }
 }
@@ -251,6 +352,18 @@ impl AsyncProviderFactory {
         config: &ProviderConfig,
     ) -> Result<(AsyncProviderType, String, u8), ProviderError> {
         match config {
+            ProviderConfig::Apple => {
+                let provider = AsyncAppleMapsProvider::new(self.http_client).await?;
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((AsyncProviderType::Apple(provider), name, max_zoom))
+            }
+            ProviderConfig::ArcGis => {
+                let provider = AsyncArcGisProvider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((AsyncProviderType::ArcGis(provider), name, max_zoom))
+            }
             ProviderConfig::Bing => {
                 let provider = AsyncBingMapsProvider::new(self.http_client);
                 let name = provider.name().to_string();
@@ -270,6 +383,18 @@ impl AsyncProviderFactory {
                 let max_zoom = provider.max_zoom();
                 Ok((AsyncProviderType::Google(provider), name, max_zoom))
             }
+            ProviderConfig::MapBox { access_token } => {
+                let provider = AsyncMapBoxProvider::new(self.http_client, access_token.clone());
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((AsyncProviderType::MapBox(provider), name, max_zoom))
+            }
+            ProviderConfig::Usgs => {
+                let provider = AsyncUsgsProvider::new(self.http_client);
+                let name = provider.name().to_string();
+                let max_zoom = provider.max_zoom();
+                Ok((AsyncProviderType::Usgs(provider), name, max_zoom))
+            }
         }
     }
 }
@@ -277,6 +402,20 @@ impl AsyncProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_provider_config_apple() {
+        let config = ProviderConfig::apple();
+        assert_eq!(config.name(), "Apple Maps");
+        assert!(!config.requires_api_key());
+    }
+
+    #[test]
+    fn test_provider_config_arcgis() {
+        let config = ProviderConfig::arcgis();
+        assert_eq!(config.name(), "ArcGIS");
+        assert!(!config.requires_api_key());
+    }
 
     #[test]
     fn test_provider_config_bing() {
@@ -306,6 +445,26 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_config_mapbox() {
+        let config = ProviderConfig::mapbox("pk.test_token");
+        assert_eq!(config.name(), "MapBox");
+        assert!(config.requires_api_key());
+
+        if let ProviderConfig::MapBox { access_token } = config {
+            assert_eq!(access_token, "pk.test_token");
+        } else {
+            panic!("Expected MapBox config");
+        }
+    }
+
+    #[test]
+    fn test_provider_config_usgs() {
+        let config = ProviderConfig::usgs();
+        assert_eq!(config.name(), "USGS");
+        assert!(!config.requires_api_key());
+    }
+
+    #[test]
     fn test_provider_config_clone() {
         let config = ProviderConfig::google("api_key");
         let cloned = config.clone();
@@ -324,6 +483,34 @@ mod tests {
         let config = ProviderConfig::Go2;
         let debug_str = format!("{:?}", config);
         assert!(debug_str.contains("Go2"));
+    }
+
+    #[test]
+    fn test_provider_config_arcgis_debug() {
+        let config = ProviderConfig::ArcGis;
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("ArcGis"));
+    }
+
+    #[test]
+    fn test_provider_config_usgs_debug() {
+        let config = ProviderConfig::Usgs;
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("Usgs"));
+    }
+
+    #[test]
+    fn test_provider_config_apple_debug() {
+        let config = ProviderConfig::Apple;
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("Apple"));
+    }
+
+    #[test]
+    fn test_provider_config_mapbox_debug() {
+        let config = ProviderConfig::mapbox("test");
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("MapBox"));
     }
 
     // Note: Factory tests that create real HTTP clients are integration tests
