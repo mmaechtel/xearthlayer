@@ -1,0 +1,375 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.2.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # First: Run make verify to gate all builds
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.tag.outputs.RELEASE_TAG }}
+      version: ${{ steps.tag.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            RELEASE_TAG="${{ inputs.tag }}"
+          else
+            RELEASE_TAG="${{ github.ref_name }}"
+          fi
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "VERSION=${RELEASE_TAG#v}" >> $GITHUB_OUTPUT
+          echo "Release tag: ${RELEASE_TAG}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev
+
+      - name: Run make verify
+        run: make verify
+
+  # Build Linux binary tarball
+  build-linux:
+    name: Build Linux Binary
+    runs-on: ubuntu-latest
+    needs: [verify]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package binary
+        env:
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          mkdir -p dist
+          cp target/release/xearthlayer dist/
+          cp README.md LICENSE dist/
+          cd dist
+          tar czvf xearthlayer-${RELEASE_TAG}-x86_64-linux.tar.gz xearthlayer README.md LICENSE
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: dist/*.tar.gz
+
+  # Build .deb package for Debian/Ubuntu
+  build-deb:
+    name: Build Debian Package
+    runs-on: ubuntu-latest
+    needs: [verify]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build .deb package
+        run: |
+          cd xearthlayer-cli
+          cargo deb --no-build
+          mkdir -p ../dist
+          cp ../target/debian/*.deb ../dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: dist/*.deb
+
+  # Build .rpm package for Fedora/RHEL/openSUSE
+  build-rpm:
+    name: Build RPM Package
+    runs-on: ubuntu-latest
+    needs: [verify]
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y rust cargo fuse3-devel rpm-build
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build RPM package
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          # Create source tarball
+          mkdir -p xearthlayer-${VERSION}
+          cp -r * xearthlayer-${VERSION}/ 2>/dev/null || true
+          tar czvf ~/rpmbuild/SOURCES/xearthlayer-${VERSION}.tar.gz xearthlayer-${VERSION}
+
+          # Copy spec file
+          cp pkg/rpm/xearthlayer.spec ~/rpmbuild/SPECS/
+
+          # Build RPM (binary only, skip source RPM)
+          rpmbuild -bb ~/rpmbuild/SPECS/xearthlayer.spec
+
+          mkdir -p dist
+          cp ~/rpmbuild/RPMS/*/*.rpm dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: dist/*.rpm
+
+  # Prepare AUR package files
+  prepare-aur:
+    name: Prepare AUR Package
+    runs-on: ubuntu-latest
+    needs: [verify]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate PKGBUILD and .SRCINFO
+        env:
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p pkg/aur
+
+          # Download source tarball to calculate checksum
+          curl -sL "https://github.com/${{ github.repository }}/archive/${RELEASE_TAG}.tar.gz" \
+            -o "pkg/aur/xearthlayer-${VERSION}.tar.gz"
+          SHA256=$(sha256sum "pkg/aur/xearthlayer-${VERSION}.tar.gz" | cut -d' ' -f1)
+
+          # Generate PKGBUILD
+          cat > pkg/aur/PKGBUILD << EOF
+          # Maintainer: XEarthLayer Contributors
+          pkgname=xearthlayer
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc='Virtual Earth imagery layer filesystem for X-Plane using FUSE'
+          arch=('x86_64')
+          url='https://github.com/${{ github.repository }}'
+          license=('MIT')
+          depends=('fuse3')
+          makedepends=('rust' 'cargo')
+          optdepends=('xplane12: X-Plane 12 flight simulator')
+          source=("\${pkgname}-\${pkgver}.tar.gz::https://github.com/${{ github.repository }}/archive/v\${pkgver}.tar.gz")
+          sha256sums=('${SHA256}')
+
+          build() {
+            cd "\${pkgname}-\${pkgver}"
+            cargo build --release --locked
+          }
+
+          package() {
+            cd "\${pkgname}-\${pkgver}"
+            install -Dm755 "target/release/xearthlayer" "\${pkgdir}/usr/bin/xearthlayer"
+            install -Dm644 "LICENSE" "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
+            install -Dm644 "README.md" "\${pkgdir}/usr/share/doc/\${pkgname}/README.md"
+          }
+          EOF
+
+          # Generate .SRCINFO
+          cat > pkg/aur/.SRCINFO << EOF
+          pkgbase = xearthlayer
+          	pkgdesc = Virtual Earth imagery layer filesystem for X-Plane using FUSE
+          	pkgver = ${VERSION}
+          	pkgrel = 1
+          	url = https://github.com/${{ github.repository }}
+          	arch = x86_64
+          	license = MIT
+          	makedepends = rust
+          	makedepends = cargo
+          	depends = fuse3
+          	optdepends = xplane12: X-Plane 12 flight simulator
+          	source = xearthlayer-\${pkgver}.tar.gz::https://github.com/${{ github.repository }}/archive/v\${pkgver}.tar.gz
+          	sha256sums = ${SHA256}
+
+          pkgname = xearthlayer
+          EOF
+
+          # Clean up tarball
+          rm "pkg/aur/xearthlayer-${VERSION}.tar.gz"
+
+      - name: Upload AUR package files
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-package
+          path: |
+            pkg/aur/PKGBUILD
+            pkg/aur/.SRCINFO
+
+  # Final job: Create release and upload all assets atomically
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [verify, build-linux, build-deb, build-rpm, prepare-aur]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find artifacts -type f -ls
+
+      - name: Generate release notes
+        id: notes
+        env:
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          # Extract release notes from CHANGELOG.md if available
+          if [ -f CHANGELOG.md ]; then
+            # Try to extract notes for this version
+            NOTES=$(sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | head -n -1)
+            if [ -z "$NOTES" ]; then
+              NOTES=$(sed -n "/^## ${VERSION}/,/^## /p" CHANGELOG.md | head -n -1)
+            fi
+          fi
+
+          if [ -z "$NOTES" ]; then
+            NOTES="Release ${RELEASE_TAG}"
+          fi
+
+          # Write to file for use in release body
+          echo "$NOTES" > release_notes.md
+
+          echo "Release notes:"
+          cat release_notes.md
+
+      - name: Create draft release
+        id: create_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          # Create draft release (not published yet)
+          gh release create "${RELEASE_TAG}" \
+            --draft \
+            --title "XEarthLayer ${RELEASE_TAG}" \
+            --notes-file release_notes.md
+
+          echo "Draft release created for ${RELEASE_TAG}"
+
+      - name: Upload Linux binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          gh release upload "${RELEASE_TAG}" artifacts/linux-binary/*.tar.gz
+
+      - name: Upload Debian package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          gh release upload "${RELEASE_TAG}" artifacts/debian-package/*.deb
+
+      - name: Upload RPM package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          gh release upload "${RELEASE_TAG}" artifacts/rpm-package/*.rpm
+
+      - name: Upload AUR package files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          # Create a zip of AUR files for easy download
+          cd artifacts/aur-package
+          zip -r ../../aur-package.zip .
+          cd ../..
+          gh release upload "${RELEASE_TAG}" aur-package.zip
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          # Now publish the release (make it non-draft)
+          gh release edit "${RELEASE_TAG}" --draft=false
+
+          echo "=============================================="
+          echo "Release ${RELEASE_TAG} published successfully!"
+          echo "=============================================="
+          echo ""
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+
+      - name: Output AUR submission instructions
+        env:
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          echo ""
+          echo "=============================================="
+          echo "AUR Package Ready for Submission"
+          echo "=============================================="
+          echo ""
+          echo "The PKGBUILD and .SRCINFO files have been generated and"
+          echo "uploaded as release artifacts (aur-package.zip)."
+          echo ""
+          echo "To publish to AUR manually:"
+          echo "  1. Download 'aur-package.zip' from the release"
+          echo "  2. Clone the AUR repo:"
+          echo "     git clone ssh://aur@aur.archlinux.org/xearthlayer.git"
+          echo "  3. Extract and copy PKGBUILD and .SRCINFO into the repo"
+          echo "  4. Commit and push:"
+          echo "     git add PKGBUILD .SRCINFO"
+          echo "     git commit -m 'Update to ${VERSION}'"
+          echo "     git push"
