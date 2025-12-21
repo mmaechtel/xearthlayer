@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::fuse::SpawnedMountHandle;
 use crate::package::PackageType;
+use crate::pipeline::{ConcurrencyLimiter, DiskIoProfile};
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
 use crate::telemetry::TelemetrySnapshot;
 
@@ -454,33 +455,97 @@ impl Drop for MountManager {
 /// Builder for creating services for each package.
 ///
 /// This helper creates properly configured service instances for mounting.
+/// When multiple packages are mounted, all services share a single disk I/O
+/// concurrency limiter to prevent the combined I/O from overwhelming the system.
 pub struct ServiceBuilder {
     service_config: ServiceConfig,
     provider_config: crate::provider::ProviderConfig,
     logger: Arc<dyn crate::log::Logger>,
+    /// Shared disk I/O limiter across all service instances.
+    /// Created lazily on first build to avoid allocation when unused.
+    disk_io_limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl ServiceBuilder {
     /// Create a new service builder.
+    ///
+    /// Creates a shared disk I/O concurrency limiter that will be used by
+    /// all services built by this builder. This prevents disk I/O exhaustion
+    /// when multiple packages are mounted simultaneously.
+    ///
+    /// The disk I/O limiter is tuned based on the configured or detected storage profile:
+    /// - HDD: Conservative concurrency (1-4 ops)
+    /// - SSD: Moderate concurrency (~32-64 ops)
+    /// - NVMe: Aggressive concurrency (~128-256 ops)
+    /// - Auto: Detects storage type from cache directory
     pub fn new(
         service_config: ServiceConfig,
         provider_config: crate::provider::ProviderConfig,
         logger: Arc<dyn crate::log::Logger>,
     ) -> Self {
+        Self::with_disk_io_profile(
+            service_config,
+            provider_config,
+            logger,
+            DiskIoProfile::default(),
+        )
+    }
+
+    /// Create a new service builder with a specific disk I/O profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `disk_io_profile` - The disk I/O profile to use for concurrency limiting
+    pub fn with_disk_io_profile(
+        service_config: ServiceConfig,
+        provider_config: crate::provider::ProviderConfig,
+        logger: Arc<dyn crate::log::Logger>,
+        disk_io_profile: DiskIoProfile,
+    ) -> Self {
+        // Resolve Auto profile based on cache directory (or current dir if not set)
+        let resolved_profile = if let Some(cache_dir) = service_config.cache_directory() {
+            disk_io_profile.resolve_for_path(cache_dir)
+        } else {
+            // If no cache directory is set, just use the profile as-is
+            // (Auto will fall back to SSD in resolve_for_path)
+            disk_io_profile.resolve_for_path(std::path::Path::new("."))
+        };
+
+        // Create limiter based on resolved profile
+        let disk_io_limiter = Arc::new(ConcurrencyLimiter::for_disk_io_profile(
+            resolved_profile,
+            "global_disk_io",
+        ));
+
+        tracing::info!(
+            profile = %resolved_profile,
+            max_concurrent = disk_io_limiter.max_concurrent(),
+            "Created shared disk I/O limiter for multi-package mounting"
+        );
+
         Self {
             service_config,
             provider_config,
             logger,
+            disk_io_limiter,
         }
     }
 
     /// Build a service for the given package.
+    ///
+    /// The service will share the disk I/O concurrency limiter with all other
+    /// services built by this builder.
     pub fn build(&self, _package: &InstalledPackage) -> Result<XEarthLayerService, ServiceError> {
-        XEarthLayerService::new(
+        let mut service = XEarthLayerService::new(
             self.service_config.clone(),
             self.provider_config.clone(),
             self.logger.clone(),
-        )
+        )?;
+
+        // Set shared disk I/O limiter to prevent I/O exhaustion across packages
+        service.set_disk_io_limiter(Arc::clone(&self.disk_io_limiter));
+
+        Ok(service)
     }
 }
 

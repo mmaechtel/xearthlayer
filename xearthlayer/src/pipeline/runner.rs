@@ -15,7 +15,8 @@ use crate::pipeline::coalesce::{CoalesceResult, RequestCoalescer};
 use crate::pipeline::http_limiter::HttpConcurrencyLimiter;
 use crate::pipeline::processor::{process_tile, process_tile_cancellable};
 use crate::pipeline::{
-    BlockingExecutor, ChunkProvider, DiskCache, MemoryCache, PipelineConfig, TextureEncoderAsync,
+    BlockingExecutor, ChunkProvider, ConcurrencyLimiter, DiskCache, MemoryCache, PipelineConfig,
+    TextureEncoderAsync,
 };
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
@@ -125,10 +126,17 @@ where
     // Create global HTTP concurrency limiter based on config
     let http_limiter = Arc::new(HttpConcurrencyLimiter::new(config.max_global_http_requests));
 
+    // Create shared CPU limiter for both assemble and encode stages
+    // Both are CPU-bound and compete for blocking thread pool, so sharing a limiter
+    // with modest over-subscription (~1.25x cores) keeps cores busy during brief
+    // I/O waits while preventing deadlock from thread pool exhaustion
+    let cpu_limiter = Arc::new(ConcurrencyLimiter::with_cpu_oversubscribe("cpu_bound"));
+
     info!(
         metrics_enabled = metrics.is_some(),
         max_http_concurrent = config.max_global_http_requests,
-        "Created DDS handler with request coalescing and HTTP concurrency limiting"
+        max_cpu_concurrent = cpu_limiter.max_concurrent(),
+        "Created DDS handler with request coalescing and concurrency limiting"
     );
 
     Arc::new(move |request: DdsRequest| {
@@ -139,6 +147,7 @@ where
         let executor = Arc::clone(&executor);
         let coalescer = Arc::clone(&coalescer);
         let http_limiter = Arc::clone(&http_limiter);
+        let cpu_limiter = Arc::clone(&cpu_limiter);
         let metrics = metrics.clone();
         let config = config.clone();
         let job_id = request.job_id;
@@ -161,6 +170,8 @@ where
                 executor,
                 coalescer,
                 http_limiter,
+                Arc::clone(&cpu_limiter), // Shared for assemble
+                cpu_limiter,              // Shared for encode
                 metrics,
                 config,
             )
@@ -215,6 +226,8 @@ async fn process_dds_request<P, E, M, D, X>(
         &config,
         None, // No metrics for legacy non-coalescing path
         None, // No HTTP limiter for legacy non-coalescing path
+        None, // No assemble limiter for legacy non-coalescing path
+        None, // No encode limiter for legacy non-coalescing path
     )
     .await;
 
@@ -266,6 +279,8 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
     executor: Arc<X>,
     coalescer: Arc<RequestCoalescer>,
     http_limiter: Arc<HttpConcurrencyLimiter>,
+    assemble_limiter: Arc<ConcurrencyLimiter>,
+    encode_limiter: Arc<ConcurrencyLimiter>,
     metrics: Option<Arc<PipelineMetrics>>,
     config: PipelineConfig,
 ) where
@@ -397,6 +412,8 @@ async fn process_dds_request_coalesced<P, E, M, D, X>(
                 &config,
                 metrics.clone(),
                 Some(http_limiter),
+                Some(assemble_limiter),
+                Some(encode_limiter),
                 cancellation_token.clone(),
             )
             .await;

@@ -16,8 +16,8 @@ use crate::pipeline::stages::{
     download_stage_with_limiter, encode_stage,
 };
 use crate::pipeline::{
-    BlockingExecutor, ChunkProvider, DiskCache, Job, JobError, JobId, JobResult, MemoryCache,
-    PipelineConfig, PipelineContext, TextureEncoderAsync,
+    BlockingExecutor, ChunkProvider, ConcurrencyLimiter, DiskCache, Job, JobError, JobId,
+    JobResult, MemoryCache, PipelineConfig, PipelineContext, TextureEncoderAsync,
 };
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
@@ -43,12 +43,14 @@ use tracing::{debug, instrument, warn};
 /// - Individual chunk failures result in magenta placeholders, not job failure
 /// - Only catastrophic failures (e.g., all chunks fail, encoding crashes) fail the job
 /// - A job always produces _some_ result (possibly all magenta)
-#[instrument(skip(ctx, metrics, http_limiter), fields(job_id = %job.id, tile = ?job.tile_coords))]
+#[instrument(skip(ctx, metrics, http_limiter, assemble_limiter, encode_limiter), fields(job_id = %job.id, tile = ?job.tile_coords))]
 pub async fn process_job<P, E, M, D, X>(
     job: Job,
     ctx: &PipelineContext<P, E, M, D, X>,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<ConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<ConcurrencyLimiter>>,
 ) -> Result<JobResult, JobError>
 where
     P: ChunkProvider,
@@ -83,7 +85,7 @@ where
     let failed_chunks = chunks.failure_count() as u16;
 
     // Stage 2: Assemble image
-    let image = assembly_stage(job_id, chunks, ctx.executor.as_ref()).await?;
+    let image = assembly_stage(job_id, chunks, ctx.executor.as_ref(), assemble_limiter).await?;
 
     // Stage 3: Encode to DDS
     let dds_data = encode_stage(
@@ -92,6 +94,7 @@ where
         Arc::clone(&ctx.encoder),
         ctx.executor.as_ref(),
         metrics,
+        encode_limiter,
     )
     .await?;
 
@@ -157,6 +160,10 @@ where
 ///
 /// * `http_limiter` - Optional global HTTP concurrency limiter. When provided,
 ///   limits the total concurrent HTTP requests across all tiles being processed.
+/// * `assemble_limiter` - Optional concurrency limiter for CPU-bound assembly.
+///   Limits concurrent assemble operations to prevent blocking thread pool exhaustion.
+/// * `encode_limiter` - Optional concurrency limiter for CPU-bound encoding.
+///   Limits concurrent encode operations to prevent blocking thread pool exhaustion.
 #[allow(clippy::too_many_arguments)]
 pub async fn process_tile<P, E, M, D, X>(
     job_id: JobId,
@@ -169,6 +176,8 @@ pub async fn process_tile<P, E, M, D, X>(
     config: &PipelineConfig,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<ConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<ConcurrencyLimiter>>,
 ) -> Result<JobResult, JobError>
 where
     P: ChunkProvider,
@@ -200,10 +209,10 @@ where
     let failed_chunks = chunks.failure_count() as u16;
 
     // Stage 2: Assemble image
-    let image = assembly_stage(job_id, chunks, executor).await?;
+    let image = assembly_stage(job_id, chunks, executor, assemble_limiter).await?;
 
     // Stage 3: Encode to DDS
-    let dds_data = encode_stage(job_id, image, encoder, executor, metrics).await?;
+    let dds_data = encode_stage(job_id, image, encoder, executor, metrics, encode_limiter).await?;
 
     // Validate encoded DDS size - log warning if unexpected
     if dds_data.len() != EXPECTED_DDS_SIZE {
@@ -259,6 +268,8 @@ where
 /// # Arguments
 ///
 /// * `http_limiter` - Optional global HTTP concurrency limiter
+/// * `assemble_limiter` - Optional concurrency limiter for CPU-bound assembly
+/// * `encode_limiter` - Optional concurrency limiter for CPU-bound encoding
 /// * `cancellation_token` - Token to signal cancellation (e.g., from FUSE timeout)
 #[allow(clippy::too_many_arguments)]
 pub async fn process_tile_cancellable<P, E, M, D, X>(
@@ -272,6 +283,8 @@ pub async fn process_tile_cancellable<P, E, M, D, X>(
     config: &PipelineConfig,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<ConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<ConcurrencyLimiter>>,
     cancellation_token: CancellationToken,
 ) -> Result<JobResult, JobError>
 where
@@ -316,7 +329,7 @@ where
     let failed_chunks = chunks.failure_count() as u16;
 
     // Stage 2: Assemble image
-    let image = assembly_stage(job_id, chunks, executor).await?;
+    let image = assembly_stage(job_id, chunks, executor, assemble_limiter).await?;
 
     // Check cancellation after assembly
     if cancellation_token.is_cancelled() {
@@ -325,7 +338,7 @@ where
     }
 
     // Stage 3: Encode to DDS
-    let dds_data = encode_stage(job_id, image, encoder, executor, metrics).await?;
+    let dds_data = encode_stage(job_id, image, encoder, executor, metrics, encode_limiter).await?;
 
     // Validate encoded DDS size - log warning if unexpected
     if dds_data.len() != EXPECTED_DDS_SIZE {
@@ -529,6 +542,8 @@ mod tests {
             &config,
             None,
             None, // No HTTP limiter for test
+            None, // No assemble limiter for test
+            None, // No encode limiter for test
         )
         .await;
 
@@ -566,6 +581,8 @@ mod tests {
             &config,
             None,
             None, // No HTTP limiter for test
+            None, // No assemble limiter for test
+            None, // No encode limiter for test
         )
         .await;
 
@@ -604,6 +621,8 @@ mod tests {
             &config,
             None,
             None, // No HTTP limiter for test
+            None, // No assemble limiter for test
+            None, // No encode limiter for test
         )
         .await;
 
@@ -643,6 +662,8 @@ mod tests {
             &config,
             None,
             None, // No HTTP limiter for test
+            None, // No assemble limiter for test
+            None, // No encode limiter for test
         )
         .await;
 
@@ -682,6 +703,8 @@ mod tests {
             &config,
             None,
             None, // No HTTP limiter for test
+            None, // No assemble limiter for test
+            None, // No encode limiter for test
         )
         .await;
 

@@ -10,6 +10,7 @@ use crate::cache::{Cache, MemoryCache};
 use crate::coord::to_tile_coords;
 use crate::fuse::{DdsHandler, MountHandle, SpawnedMountHandle};
 use crate::log::Logger;
+use crate::pipeline::ConcurrencyLimiter;
 use crate::provider::{AsyncProviderType, Provider, ProviderConfig};
 use crate::telemetry::{PipelineMetrics, TelemetrySnapshot};
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
@@ -86,6 +87,8 @@ pub struct XEarthLayerService {
     cache_dir: Option<PathBuf>,
     /// Pipeline telemetry metrics
     metrics: Arc<PipelineMetrics>,
+    /// Shared disk I/O concurrency limiter (for global limiting across packages)
+    disk_io_limiter: Option<Arc<ConcurrencyLimiter>>,
 }
 
 impl XEarthLayerService {
@@ -216,6 +219,7 @@ impl XEarthLayerService {
             memory_cache,
             cache_dir,
             metrics,
+            disk_io_limiter: None,
         })
     }
 
@@ -299,6 +303,19 @@ impl XEarthLayerService {
         &self.metrics
     }
 
+    /// Set the shared disk I/O concurrency limiter.
+    ///
+    /// When multiple packages are mounted, sharing a single limiter across
+    /// all disk cache instances prevents the combined I/O from overwhelming
+    /// the system. This should be called before mounting the filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `limiter` - The shared concurrency limiter for disk I/O operations
+    pub fn set_disk_io_limiter(&mut self, limiter: Arc<ConcurrencyLimiter>) {
+        self.disk_io_limiter = Some(limiter);
+    }
+
     /// Download a single tile for the given coordinates.
     ///
     /// Converts lat/lon coordinates to tile coordinates and generates
@@ -379,6 +396,11 @@ impl XEarthLayerService {
         // Configure disk cache if enabled
         if let Some(ref dir) = self.cache_dir {
             builder = builder.with_disk_cache(dir.clone());
+        }
+
+        // Configure shared disk I/O limiter if set (for global limiting across packages)
+        if let Some(ref limiter) = self.disk_io_limiter {
+            builder = builder.with_disk_io_limiter(Arc::clone(limiter));
         }
 
         // Configure memory cache if enabled (use the shared instance)
