@@ -3,7 +3,7 @@
 //! This stage takes an assembled RGBA image and compresses it to DDS format
 //! with BC1 or BC3 compression and mipmaps.
 
-use crate::pipeline::{BlockingExecutor, JobError, JobId, TextureEncoderAsync};
+use crate::pipeline::{BlockingExecutor, ConcurrencyLimiter, JobError, JobId, TextureEncoderAsync};
 use crate::telemetry::PipelineMetrics;
 use image::RgbaImage;
 use std::sync::Arc;
@@ -24,17 +24,19 @@ use tracing::{debug, instrument};
 /// * `encoder` - The texture encoder to use
 /// * `executor` - Executor for running blocking work
 /// * `metrics` - Optional telemetry metrics
+/// * `encode_limiter` - Optional concurrency limiter for CPU-bound encoding
 ///
 /// # Returns
 ///
 /// The encoded DDS data as bytes.
-#[instrument(skip(image, encoder, executor, metrics), fields(job_id = %job_id))]
+#[instrument(skip(image, encoder, executor, metrics, encode_limiter), fields(job_id = %job_id))]
 pub async fn encode_stage<E, X>(
     job_id: JobId,
     image: RgbaImage,
     encoder: Arc<E>,
     executor: &X,
     metrics: Option<Arc<PipelineMetrics>>,
+    encode_limiter: Option<Arc<ConcurrencyLimiter>>,
 ) -> Result<Vec<u8>, JobError>
 where
     E: TextureEncoderAsync,
@@ -48,6 +50,15 @@ where
         m.encode_started();
     }
     let start = Instant::now();
+
+    // Acquire encode permit if limiter is provided
+    // This prevents too many concurrent encode operations from exhausting
+    // the blocking thread pool and starving disk I/O
+    let _encode_permit = if let Some(ref limiter) = encode_limiter {
+        Some(limiter.acquire().await)
+    } else {
+        None
+    };
 
     // Move the CPU-intensive encoding to a blocking task via the executor
     let dds_data = executor
@@ -116,7 +127,7 @@ mod tests {
         let encoder = Arc::new(MockEncoder::new());
         let executor = TokioExecutor::new();
 
-        let result = encode_stage(JobId::new(), image, encoder, &executor, None).await;
+        let result = encode_stage(JobId::new(), image, encoder, &executor, None, None).await;
 
         assert!(result.is_ok());
         let dds_data = result.unwrap();
@@ -132,7 +143,7 @@ mod tests {
         let encoder = Arc::new(MockEncoder::failing());
         let executor = TokioExecutor::new();
 
-        let result = encode_stage(JobId::new(), image, encoder, &executor, None).await;
+        let result = encode_stage(JobId::new(), image, encoder, &executor, None, None).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -152,10 +163,25 @@ mod tests {
         let encoder = Arc::new(MockEncoder::new());
         let executor = SyncExecutor;
 
-        let future = encode_stage(JobId::new(), image, encoder, &executor, None);
+        let future = encode_stage(JobId::new(), image, encoder, &executor, None, None);
 
         // Can run without Tokio runtime
         let result = futures::executor::block_on(future).unwrap();
         assert_eq!(result[0], 0xDD);
+    }
+
+    #[tokio::test]
+    async fn test_encode_stage_with_limiter() {
+        use crate::pipeline::TokioExecutor;
+
+        let image = RgbaImage::new(256, 256);
+        let encoder = Arc::new(MockEncoder::new());
+        let executor = TokioExecutor::new();
+        let limiter = Arc::new(ConcurrencyLimiter::new(2, "test_encode"));
+
+        let result =
+            encode_stage(JobId::new(), image, encoder, &executor, None, Some(limiter)).await;
+
+        assert!(result.is_ok());
     }
 }

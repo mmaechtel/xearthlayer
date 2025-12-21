@@ -46,6 +46,20 @@ pub const DEFAULT_SCALING_FACTOR: usize = 16;
 /// The calculated concurrency will not exceed this value.
 pub const DEFAULT_CEILING: usize = 256;
 
+/// Scaling factor for disk I/O operations.
+/// Disk I/O has much lower optimal concurrency than HTTP due to:
+/// - HDD seek times (optimal: 1-4 concurrent)
+/// - SSD queue depth limits (optimal: 32-64 concurrent)
+/// - NVMe queue depths (optimal: 64-128 concurrent)
+///
+/// Formula: `num_cpus * DISK_IO_SCALING_FACTOR`
+pub const DISK_IO_SCALING_FACTOR: usize = 4;
+
+/// Ceiling for disk I/O concurrency.
+/// Conservative ceiling that works well for most storage devices.
+/// SSDs and NVMe can handle this easily, HDDs may still benefit from lower values.
+pub const DISK_IO_CEILING: usize = 64;
+
 /// Generic concurrency limiter for I/O operations.
 ///
 /// Wraps a Tokio semaphore to limit the total number of concurrent operations.
@@ -124,6 +138,43 @@ impl ConcurrencyLimiter {
 
         let max_concurrent = (cpus * scaling_factor).min(ceiling).max(1);
         Self::new(max_concurrent, label)
+    }
+
+    /// Creates a limiter optimized for disk I/O operations.
+    ///
+    /// Uses more conservative defaults than `with_defaults()` because disk I/O
+    /// has much lower optimal concurrency than network I/O:
+    /// - HDDs: optimal at 1-4 concurrent operations (seek-bound)
+    /// - SSDs: optimal at 32-64 concurrent operations (queue depth)
+    /// - NVMe: optimal at 64-128 concurrent operations (multiple queues)
+    ///
+    /// Formula: `min(num_cpus * 4, 64)`
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Human-readable label for logging/debugging
+    pub fn with_disk_io_defaults(label: impl Into<String>) -> Self {
+        Self::with_scaling(DISK_IO_SCALING_FACTOR, DISK_IO_CEILING, label)
+    }
+
+    /// Creates a limiter optimized for CPU-bound operations (like DDS encoding).
+    ///
+    /// Limits concurrency to the number of CPU cores since running more
+    /// CPU-bound tasks than cores provides no throughput benefit and can
+    /// exhaust the blocking thread pool, starving disk I/O operations.
+    ///
+    /// Formula: `num_cpus` (no ceiling needed since we scale 1:1)
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Human-readable label for logging/debugging
+    pub fn with_cpu_defaults(label: impl Into<String>) -> Self {
+        let cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+
+        // For CPU-bound work, limit to exactly num_cpus
+        Self::new(cpus, label)
     }
 
     /// Acquires a permit for an operation.

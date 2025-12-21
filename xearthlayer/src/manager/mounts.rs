@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::fuse::SpawnedMountHandle;
 use crate::package::PackageType;
+use crate::pipeline::ConcurrencyLimiter;
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
 use crate::telemetry::TelemetrySnapshot;
 
@@ -454,33 +455,60 @@ impl Drop for MountManager {
 /// Builder for creating services for each package.
 ///
 /// This helper creates properly configured service instances for mounting.
+/// When multiple packages are mounted, all services share a single disk I/O
+/// concurrency limiter to prevent the combined I/O from overwhelming the system.
 pub struct ServiceBuilder {
     service_config: ServiceConfig,
     provider_config: crate::provider::ProviderConfig,
     logger: Arc<dyn crate::log::Logger>,
+    /// Shared disk I/O limiter across all service instances.
+    /// Created lazily on first build to avoid allocation when unused.
+    disk_io_limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl ServiceBuilder {
     /// Create a new service builder.
+    ///
+    /// Creates a shared disk I/O concurrency limiter that will be used by
+    /// all services built by this builder. This prevents disk I/O exhaustion
+    /// when multiple packages are mounted simultaneously.
     pub fn new(
         service_config: ServiceConfig,
         provider_config: crate::provider::ProviderConfig,
         logger: Arc<dyn crate::log::Logger>,
     ) -> Self {
+        // Create shared disk I/O limiter for all services
+        // Uses conservative disk I/O defaults: min(num_cpus * 4, 64)
+        // This is much lower than HTTP concurrency because disk I/O is queue-depth limited
+        let disk_io_limiter = Arc::new(ConcurrencyLimiter::with_disk_io_defaults("global_disk_io"));
+        tracing::info!(
+            max_concurrent = disk_io_limiter.max_concurrent(),
+            "Created shared disk I/O limiter for multi-package mounting"
+        );
+
         Self {
             service_config,
             provider_config,
             logger,
+            disk_io_limiter,
         }
     }
 
     /// Build a service for the given package.
+    ///
+    /// The service will share the disk I/O concurrency limiter with all other
+    /// services built by this builder.
     pub fn build(&self, _package: &InstalledPackage) -> Result<XEarthLayerService, ServiceError> {
-        XEarthLayerService::new(
+        let mut service = XEarthLayerService::new(
             self.service_config.clone(),
             self.provider_config.clone(),
             self.logger.clone(),
-        )
+        )?;
+
+        // Set shared disk I/O limiter to prevent I/O exhaustion across packages
+        service.set_disk_io_limiter(Arc::clone(&self.disk_io_limiter));
+
+        Ok(service)
     }
 }
 

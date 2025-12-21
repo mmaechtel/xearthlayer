@@ -3,8 +3,9 @@
 //! This stage takes downloaded chunks and assembles them into a 4096x4096
 //! RGBA image. Failed chunks are replaced with magenta placeholders.
 
-use crate::pipeline::{BlockingExecutor, ChunkResults, JobError, JobId};
+use crate::pipeline::{BlockingExecutor, ChunkResults, ConcurrencyLimiter, JobError, JobId};
 use image::{Rgba, RgbaImage};
+use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 /// Tile dimensions
@@ -27,21 +28,32 @@ const MAGENTA: Rgba<u8> = Rgba([255, 0, 255, 255]);
 /// * `job_id` - For logging correlation
 /// * `chunks` - Results from the download stage
 /// * `executor` - Executor for running blocking work
+/// * `assemble_limiter` - Optional concurrency limiter for CPU-bound assembly
 ///
 /// # Returns
 ///
 /// The assembled RGBA image, or an error if assembly fails catastrophically.
-#[instrument(skip(chunks, executor), fields(job_id = %job_id))]
+#[instrument(skip(chunks, executor, assemble_limiter), fields(job_id = %job_id))]
 pub async fn assembly_stage<E>(
     job_id: JobId,
     chunks: ChunkResults,
     executor: &E,
+    assemble_limiter: Option<Arc<ConcurrencyLimiter>>,
 ) -> Result<RgbaImage, JobError>
 where
     E: BlockingExecutor,
 {
     let success_count = chunks.success_count();
     let failure_count = chunks.failure_count();
+
+    // Acquire assemble permit if limiter is provided
+    // This prevents too many concurrent assemble operations from exhausting
+    // the blocking thread pool and starving disk I/O and encode operations
+    let _assemble_permit = if let Some(ref limiter) = assemble_limiter {
+        Some(limiter.acquire().await)
+    } else {
+        None
+    };
 
     // Move the CPU-intensive work to a blocking task via the executor
     let image = executor
@@ -201,7 +213,7 @@ mod tests {
         }
 
         let executor = TokioExecutor::new();
-        let result = assembly_stage(JobId::new(), chunks, &executor)
+        let result = assembly_stage(JobId::new(), chunks, &executor, None)
             .await
             .unwrap();
 
@@ -218,10 +230,28 @@ mod tests {
         chunks.add_success(0, 0, create_test_jpeg(255, 0, 0));
 
         let executor = SyncExecutor;
-        let future = assembly_stage(JobId::new(), chunks, &executor);
+        let future = assembly_stage(JobId::new(), chunks, &executor, None);
 
         // Can run without Tokio runtime
         let result = futures::executor::block_on(future).unwrap();
+
+        assert_eq!(result.width(), TILE_SIZE);
+        assert_eq!(result.height(), TILE_SIZE);
+    }
+
+    #[tokio::test]
+    async fn test_assembly_stage_with_limiter() {
+        use crate::pipeline::TokioExecutor;
+
+        let mut chunks = ChunkResults::new();
+        chunks.add_success(0, 0, create_test_jpeg(255, 0, 0));
+
+        let executor = TokioExecutor::new();
+        let limiter = Arc::new(ConcurrencyLimiter::new(2, "test_assemble"));
+
+        let result = assembly_stage(JobId::new(), chunks, &executor, Some(limiter))
+            .await
+            .unwrap();
 
         assert_eq!(result.width(), TILE_SIZE);
         assert_eq!(result.height(), TILE_SIZE);

@@ -3,31 +3,65 @@
 //! This adapter uses a dedicated thread pool for disk I/O operations to avoid
 //! contention with tokio's blocking thread pool. It's optimized for reading
 //! many small files (chunks) in parallel.
+//!
+//! # Global Disk I/O Limiting
+//!
+//! When multiple packages are mounted, each with its own `ParallelDiskCache`,
+//! uncontrolled concurrent disk reads can overwhelm the system. The cache
+//! supports an optional shared `ConcurrencyLimiter` to coordinate disk I/O
+//! across all cache instances.
+//!
+//! ```ignore
+//! use std::sync::Arc;
+//! use xearthlayer::pipeline::{ConcurrencyLimiter, adapters::ParallelDiskCache};
+//!
+//! // Create a shared limiter
+//! let limiter = Arc::new(ConcurrencyLimiter::with_defaults("disk_io"));
+//!
+//! // Share it across multiple cache instances
+//! let cache1 = ParallelDiskCache::with_shared_limiter(path1, "bing", Arc::clone(&limiter));
+//! let cache2 = ParallelDiskCache::with_shared_limiter(path2, "bing", Arc::clone(&limiter));
+//! ```
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+
+use crate::pipeline::ConcurrencyLimiter;
 
 /// Parallel disk cache adapter with dedicated I/O threads.
 ///
-/// Uses a semaphore to limit concurrent I/O operations and avoid overwhelming
-/// the filesystem. Reads are performed using `spawn_blocking` to avoid blocking
-/// the async runtime.
+/// Uses a concurrency limiter to prevent overwhelming the filesystem with
+/// too many concurrent reads. Reads are performed using `spawn_blocking`
+/// to avoid blocking the async runtime.
+///
+/// # Global vs Local Limiting
+///
+/// The cache can use either:
+/// - A **shared limiter** passed via `with_shared_limiter()` for global
+///   coordination across multiple cache instances
+/// - A **local limiter** created internally (legacy behavior)
+///
+/// When multiple packages are mounted simultaneously, using a shared limiter
+/// prevents the combined disk I/O from overwhelming the system.
 ///
 /// # Performance Tuning
 ///
-/// - `max_concurrent_io`: Controls max parallel disk operations (default: 64)
-/// - For SSDs, higher values (128-256) may improve throughput
-/// - For HDDs, lower values (16-32) prevent seek thrashing
+/// - For SSDs/NVMe: Higher concurrency (128-256) improves throughput
+/// - For HDDs: Lower concurrency (16-32) prevents seek thrashing
+/// - Default scaling: `min(num_cpus * 16, 256)`
 pub struct ParallelDiskCache {
     cache_dir: PathBuf,
     provider: String,
-    /// Semaphore to limit concurrent I/O
-    io_semaphore: Arc<Semaphore>,
+    /// Concurrency limiter for disk I/O operations
+    io_limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl ParallelDiskCache {
-    /// Creates a new parallel disk cache adapter.
+    /// Creates a new parallel disk cache adapter with a local limiter.
+    ///
+    /// This creates an internal `ConcurrencyLimiter` that is not shared
+    /// with other cache instances. For multi-package scenarios, prefer
+    /// `with_shared_limiter()` to coordinate disk I/O globally.
     ///
     /// # Arguments
     ///
@@ -35,20 +69,63 @@ impl ParallelDiskCache {
     /// * `provider` - Provider name for directory hierarchy
     /// * `max_concurrent_io` - Maximum concurrent disk operations
     pub fn new(cache_dir: PathBuf, provider: impl Into<String>, max_concurrent_io: usize) -> Self {
+        let provider_str = provider.into();
+        let label = format!("disk_cache_{}", provider_str);
         Self {
             cache_dir,
-            provider: provider.into(),
-            io_semaphore: Arc::new(Semaphore::new(max_concurrent_io)),
+            provider: provider_str,
+            io_limiter: Arc::new(ConcurrencyLimiter::new(max_concurrent_io, label)),
         }
     }
 
-    /// Creates a new parallel disk cache with default concurrency (256).
+    /// Creates a new parallel disk cache with a shared concurrency limiter.
     ///
-    /// This higher default is optimized for SSDs and NVMe drives where
-    /// concurrent I/O improves throughput. For HDDs, consider using
-    /// `new()` with a lower value (16-32) to prevent seek thrashing.
+    /// This is the **recommended** constructor when multiple packages are
+    /// mounted simultaneously. The shared limiter coordinates disk I/O
+    /// across all cache instances to prevent system overload.
+    ///
+    /// # Arguments
+    ///
+    /// * `cache_dir` - Root directory for the cache
+    /// * `provider` - Provider name for directory hierarchy
+    /// * `limiter` - Shared concurrency limiter for disk I/O
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let limiter = Arc::new(ConcurrencyLimiter::with_defaults("global_disk_io"));
+    /// let cache = ParallelDiskCache::with_shared_limiter(path, "bing", limiter);
+    /// ```
+    pub fn with_shared_limiter(
+        cache_dir: PathBuf,
+        provider: impl Into<String>,
+        limiter: Arc<ConcurrencyLimiter>,
+    ) -> Self {
+        Self {
+            cache_dir,
+            provider: provider.into(),
+            io_limiter: limiter,
+        }
+    }
+
+    /// Creates a new parallel disk cache with default concurrency.
+    ///
+    /// Uses the disk I/O optimized scaling formula: `min(num_cpus * 4, 64)`.
+    /// This is more conservative than HTTP concurrency because disk I/O
+    /// is queue-depth limited (especially on HDDs and SATA SSDs).
+    ///
+    /// **Note**: This creates a local limiter. For multi-package scenarios,
+    /// use `with_shared_limiter()` instead.
     pub fn with_defaults(cache_dir: PathBuf, provider: impl Into<String>) -> Self {
-        Self::new(cache_dir, provider, 256)
+        let provider_str = provider.into();
+        Self {
+            cache_dir,
+            provider: provider_str.clone(),
+            io_limiter: Arc::new(ConcurrencyLimiter::with_disk_io_defaults(format!(
+                "disk_cache_{}",
+                provider_str
+            ))),
+        }
     }
 
     /// Returns the cache directory.
@@ -91,8 +168,8 @@ impl crate::pipeline::DiskCache for ParallelDiskCache {
     ) -> Option<Vec<u8>> {
         let path = self.chunk_path(tile_row, tile_col, zoom, chunk_row, chunk_col);
 
-        // Acquire semaphore permit to limit concurrent I/O
-        let _permit = self.io_semaphore.acquire().await.ok()?;
+        // Acquire permit from the concurrency limiter to prevent overwhelming disk I/O
+        let _permit = self.io_limiter.acquire().await;
 
         // Use spawn_blocking for the actual disk read
         // This moves the blocking I/O to tokio's blocking thread pool
@@ -113,12 +190,8 @@ impl crate::pipeline::DiskCache for ParallelDiskCache {
     ) -> Result<(), std::io::Error> {
         let path = self.chunk_path(tile_row, tile_col, zoom, chunk_row, chunk_col);
 
-        // Acquire semaphore permit
-        let _permit = self
-            .io_semaphore
-            .acquire()
-            .await
-            .map_err(|_| std::io::Error::other("semaphore closed"))?;
+        // Acquire permit from the concurrency limiter
+        let _permit = self.io_limiter.acquire().await;
 
         // Use spawn_blocking for the actual disk write
         tokio::task::spawn_blocking(move || {
@@ -143,10 +216,21 @@ pub struct BatchedDiskCache {
 }
 
 impl BatchedDiskCache {
-    /// Creates a new batched disk cache.
+    /// Creates a new batched disk cache with a local limiter.
     pub fn new(cache_dir: PathBuf, provider: impl Into<String>, max_concurrent_io: usize) -> Self {
         Self {
             inner: ParallelDiskCache::new(cache_dir, provider, max_concurrent_io),
+        }
+    }
+
+    /// Creates a new batched disk cache with a shared concurrency limiter.
+    pub fn with_shared_limiter(
+        cache_dir: PathBuf,
+        provider: impl Into<String>,
+        limiter: Arc<ConcurrencyLimiter>,
+    ) -> Self {
+        Self {
+            inner: ParallelDiskCache::with_shared_limiter(cache_dir, provider, limiter),
         }
     }
 
@@ -332,5 +416,52 @@ mod tests {
             assert!(result.is_ok());
             assert!(result.unwrap().is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_shared_limiter_across_caches() {
+        let temp_dir1 = tempfile::tempdir().unwrap();
+        let temp_dir2 = tempfile::tempdir().unwrap();
+
+        // Create a shared limiter with low concurrency for testing
+        let shared_limiter = Arc::new(ConcurrencyLimiter::new(4, "shared_test"));
+
+        // Create two caches sharing the same limiter
+        let cache1 = Arc::new(ParallelDiskCache::with_shared_limiter(
+            temp_dir1.path().to_path_buf(),
+            "provider1",
+            Arc::clone(&shared_limiter),
+        ));
+        let cache2 = Arc::new(ParallelDiskCache::with_shared_limiter(
+            temp_dir2.path().to_path_buf(),
+            "provider2",
+            Arc::clone(&shared_limiter),
+        ));
+
+        // Write some data to both caches
+        cache1.put(100, 200, 16, 0, 0, vec![1, 2, 3]).await.unwrap();
+        cache2.put(100, 200, 16, 0, 0, vec![4, 5, 6]).await.unwrap();
+
+        // Both caches can read their data
+        let result1 = cache1.get(100, 200, 16, 0, 0).await;
+        let result2 = cache2.get(100, 200, 16, 0, 0).await;
+
+        assert_eq!(result1, Some(vec![1, 2, 3]));
+        assert_eq!(result2, Some(vec![4, 5, 6]));
+
+        // Verify the shared limiter is being used by checking peak usage
+        // (The peak should be recorded across both cache operations)
+        assert!(shared_limiter.peak_in_flight() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_with_defaults_creates_local_limiter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache = ParallelDiskCache::with_defaults(temp_dir.path().to_path_buf(), "test");
+
+        // Should work normally with local limiter
+        cache.put(100, 200, 16, 0, 0, vec![1, 2, 3]).await.unwrap();
+        let result = cache.get(100, 200, 16, 0, 0).await;
+        assert_eq!(result, Some(vec![1, 2, 3]));
     }
 }

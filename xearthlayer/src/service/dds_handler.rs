@@ -33,7 +33,9 @@ use crate::pipeline::adapters::{
     AsyncProviderAdapter, MemoryCacheAdapter, NullDiskCache, ParallelDiskCache, ProviderAdapter,
     TextureEncoderAdapter,
 };
-use crate::pipeline::{create_dds_handler_with_metrics, PipelineConfig, TokioExecutor};
+use crate::pipeline::{
+    create_dds_handler_with_metrics, ConcurrencyLimiter, PipelineConfig, TokioExecutor,
+};
 use crate::provider::{AsyncProviderType, Provider};
 use crate::telemetry::PipelineMetrics;
 use crate::texture::DdsTextureEncoder;
@@ -68,6 +70,8 @@ pub struct DdsHandlerBuilder {
     cache_dir: Option<PathBuf>,
     /// Shared memory cache (None = minimal/disabled)
     memory_cache: Option<Arc<MemoryCache>>,
+    /// Shared disk I/O limiter (None = local limiter per cache)
+    disk_io_limiter: Option<Arc<ConcurrencyLimiter>>,
     /// DDS compression format
     dds_format: DdsFormat,
     /// Number of mipmap levels
@@ -91,6 +95,7 @@ impl DdsHandlerBuilder {
             provider_name: provider_name.to_string(),
             cache_dir: None,
             memory_cache: None,
+            disk_io_limiter: None,
             dds_format: DdsFormat::BC1,
             mipmap_count: 5,
             timeout: Duration::from_secs(30),
@@ -120,10 +125,38 @@ impl DdsHandlerBuilder {
 
     /// Enable disk caching at the specified directory.
     ///
-    /// Uses `ParallelDiskCache` with semaphore-limited concurrency (default 64
-    /// concurrent reads) to avoid overwhelming the filesystem.
+    /// When a shared disk I/O limiter is set via `with_disk_io_limiter()`,
+    /// the cache will use it for coordinated concurrency limiting across
+    /// all cache instances. Otherwise, a local limiter is created.
     pub fn with_disk_cache(mut self, cache_dir: PathBuf) -> Self {
         self.cache_dir = Some(cache_dir);
+        self
+    }
+
+    /// Set a shared disk I/O concurrency limiter.
+    ///
+    /// When multiple packages are mounted, sharing a single limiter across
+    /// all disk cache instances prevents the combined I/O from overwhelming
+    /// the system. This is the recommended configuration for production use.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let disk_io_limiter = Arc::new(ConcurrencyLimiter::with_defaults("global_disk_io"));
+    ///
+    /// // Share the limiter across multiple handlers
+    /// let handler1 = DdsHandlerBuilder::new("bing")
+    ///     .with_disk_cache(cache_dir.clone())
+    ///     .with_disk_io_limiter(Arc::clone(&disk_io_limiter))
+    ///     .build(handle.clone());
+    ///
+    /// let handler2 = DdsHandlerBuilder::new("google")
+    ///     .with_disk_cache(cache_dir)
+    ///     .with_disk_io_limiter(disk_io_limiter)
+    ///     .build(handle);
+    /// ```
+    pub fn with_disk_io_limiter(mut self, limiter: Arc<ConcurrencyLimiter>) -> Self {
+        self.disk_io_limiter = Some(limiter);
         self
     }
 
@@ -220,8 +253,14 @@ impl DdsHandlerBuilder {
             // Async provider with disk cache (PREFERRED)
             (Some(async_prov), _, Some(dir)) => {
                 let provider_adapter = Arc::new(AsyncProviderAdapter::from_arc(async_prov));
-                let disk_cache =
-                    Arc::new(ParallelDiskCache::with_defaults(dir, &self.provider_name));
+                let disk_cache = match &self.disk_io_limiter {
+                    Some(limiter) => Arc::new(ParallelDiskCache::with_shared_limiter(
+                        dir,
+                        &self.provider_name,
+                        Arc::clone(limiter),
+                    )),
+                    None => Arc::new(ParallelDiskCache::with_defaults(dir, &self.provider_name)),
+                };
                 tracing::info!("DDS handler: async provider + parallel disk cache");
                 create_dds_handler_with_metrics(
                     provider_adapter,
@@ -253,8 +292,14 @@ impl DdsHandlerBuilder {
             // Sync provider with disk cache (FALLBACK)
             (None, Some(sync_prov), Some(dir)) => {
                 let provider_adapter = Arc::new(ProviderAdapter::new(sync_prov));
-                let disk_cache =
-                    Arc::new(ParallelDiskCache::with_defaults(dir, &self.provider_name));
+                let disk_cache = match &self.disk_io_limiter {
+                    Some(limiter) => Arc::new(ParallelDiskCache::with_shared_limiter(
+                        dir,
+                        &self.provider_name,
+                        Arc::clone(limiter),
+                    )),
+                    None => Arc::new(ParallelDiskCache::with_defaults(dir, &self.provider_name)),
+                };
                 tracing::warn!("DDS handler: sync provider + disk cache (may exhaust thread pool)");
                 create_dds_handler_with_metrics(
                     provider_adapter,
