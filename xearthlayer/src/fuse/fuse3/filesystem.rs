@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Time-to-live for attribute caching.
 const TTL: Duration = Duration::from_secs(1);
@@ -279,6 +279,15 @@ impl Fuse3PassthroughFS {
         // Await response with timeout (fully async - no blocking!)
         let data = match tokio::time::timeout(self.generation_timeout, rx).await {
             Ok(Ok(response)) => {
+                // Log on-demand tile request for instrumentation
+                info!(
+                    tile_row = tile.row,
+                    tile_col = tile.col,
+                    tile_zoom = tile.zoom,
+                    cache_hit = response.cache_hit,
+                    duration_ms = response.duration.as_millis(),
+                    "On-demand tile request"
+                );
                 debug!(
                     job_id = %job_id,
                     cache_hit = response.cache_hit,
