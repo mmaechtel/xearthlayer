@@ -13,13 +13,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use crate::cache::{Cache, CacheKey};
 use crate::dds::DdsFormat;
 use crate::fuse::{DdsHandler, DdsRequest};
 use crate::pipeline::JobId;
 
+use super::condition::PrefetchCondition;
 use super::predictor::TilePredictor;
 use super::state::{AircraftState, SharedPrefetchStatus};
+use super::strategy::Prefetcher;
 
 /// Minimum time between prediction runs (rate limiting).
 const MIN_PREDICTION_INTERVAL: Duration = Duration::from_secs(2);
@@ -56,8 +57,6 @@ impl Default for SchedulerConfig {
 pub struct PrefetchStats {
     /// Total tiles predicted.
     pub tiles_predicted: AtomicU64,
-    /// Tiles skipped because already in cache.
-    pub tiles_cached: AtomicU64,
     /// Tiles submitted for prefetch.
     pub tiles_submitted: AtomicU64,
     /// Tiles skipped because already in-flight.
@@ -71,7 +70,6 @@ impl PrefetchStats {
     pub fn snapshot(&self) -> PrefetchStatsSnapshot {
         PrefetchStatsSnapshot {
             tiles_predicted: self.tiles_predicted.load(Ordering::Relaxed),
-            tiles_cached: self.tiles_cached.load(Ordering::Relaxed),
             tiles_submitted: self.tiles_submitted.load(Ordering::Relaxed),
             tiles_in_flight_skipped: self.tiles_in_flight_skipped.load(Ordering::Relaxed),
             prediction_cycles: self.prediction_cycles.load(Ordering::Relaxed),
@@ -83,7 +81,6 @@ impl PrefetchStats {
 #[derive(Debug, Clone, Default)]
 pub struct PrefetchStatsSnapshot {
     pub tiles_predicted: u64,
-    pub tiles_cached: u64,
     pub tiles_submitted: u64,
     pub tiles_in_flight_skipped: u64,
     pub prediction_cycles: u64,
@@ -93,18 +90,18 @@ pub struct PrefetchStatsSnapshot {
 ///
 /// The scheduler:
 /// 1. Receives aircraft state updates from the telemetry listener
-/// 2. Predicts which tiles should be pre-fetched using the TilePredictor
-/// 3. Filters out tiles that are already in cache
-/// 4. Submits prefetch requests to the DDS pipeline
+/// 2. Checks if prefetching should be active (via injected condition)
+/// 3. Predicts which tiles should be pre-fetched using the TilePredictor
+/// 4. Submits prefetch requests to the DDS pipeline (which handles caching)
 pub struct PrefetchScheduler {
     /// Tile predictor engine.
     predictor: TilePredictor,
     /// DDS handler for submitting prefetch requests.
     dds_handler: DdsHandler,
-    /// Cache for checking if tiles are already cached.
-    cache: Arc<dyn Cache>,
     /// Scheduler configuration.
     config: SchedulerConfig,
+    /// Condition for determining if prefetching should be active.
+    condition: Box<dyn PrefetchCondition>,
     /// Tracks tiles currently being prefetched to avoid duplicates.
     in_flight: HashSet<(u32, u32, u8)>,
     /// Last state used for prediction (for significant change detection).
@@ -122,20 +119,20 @@ impl PrefetchScheduler {
     ///
     /// * `predictor` - Tile predictor for calculating tiles to prefetch
     /// * `dds_handler` - Handler for submitting DDS requests to the pipeline
-    /// * `cache` - Cache for checking if tiles are already cached
     /// * `config` - Scheduler configuration
+    /// * `condition` - Condition for determining when prefetching is active
     pub fn new(
         predictor: TilePredictor,
         dds_handler: DdsHandler,
-        cache: Arc<dyn Cache>,
         config: SchedulerConfig,
+        condition: Box<dyn PrefetchCondition>,
     ) -> Self {
         let stats = Arc::new(PrefetchStats::default());
         Self {
             predictor,
             dds_handler,
-            cache,
             config,
+            condition,
             in_flight: HashSet::new(),
             last_state: None,
             stats,
@@ -218,9 +215,19 @@ impl PrefetchScheduler {
     fn process_state(&mut self, state: &AircraftState) {
         self.stats.prediction_cycles.fetch_add(1, Ordering::Relaxed);
 
-        // Update shared status with aircraft state
+        // Update shared status with aircraft state (always, for dashboard display)
         if let Some(ref status) = self.shared_status {
             status.update_aircraft(state);
+        }
+
+        // Check if prefetch condition is met
+        if !self.condition.should_prefetch(state) {
+            trace!(
+                condition = self.condition.description(),
+                speed = state.ground_speed,
+                "Prefetch: condition not met, skipping prediction"
+            );
+            return;
         }
 
         // Check if we're at max in-flight capacity
@@ -266,7 +273,6 @@ impl PrefetchScheduler {
         }
 
         let mut submitted = 0;
-        let mut cached = 0;
         let mut in_flight_skipped = 0;
 
         for predicted in predictions {
@@ -281,26 +287,14 @@ impl PrefetchScheduler {
             let tile = predicted.tile;
             let tile_key = (tile.row, tile.col, tile.zoom);
 
-            // Skip if already in flight
+            // Skip if already in flight (coalescer handles cache checks)
             if self.in_flight.contains(&tile_key) {
                 in_flight_skipped += 1;
                 continue;
             }
 
-            // Check if already in cache
-            let cache_key = CacheKey::new(&self.config.provider, self.config.dds_format, tile);
-
-            if self.cache.contains(&cache_key) {
-                cached += 1;
-                trace!(
-                    row = tile.row,
-                    col = tile.col,
-                    "Tile already cached, skipping"
-                );
-                continue;
-            }
-
-            // Submit prefetch request
+            // Submit prefetch request - the DDS handler/coalescer will check
+            // memory cache and disk chunk cache, only downloading if needed
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let request = DdsRequest {
                 job_id: JobId::new(),
@@ -324,9 +318,6 @@ impl PrefetchScheduler {
 
         // Update statistics
         self.stats
-            .tiles_cached
-            .fetch_add(cached as u64, Ordering::Relaxed);
-        self.stats
             .tiles_submitted
             .fetch_add(submitted as u64, Ordering::Relaxed);
         self.stats
@@ -334,15 +325,13 @@ impl PrefetchScheduler {
             .fetch_add(in_flight_skipped as u64, Ordering::Relaxed);
 
         // Log summary
-        if submitted > 0 || cached > 0 {
+        if submitted > 0 {
             info!(
                 submitted,
-                cached,
                 in_flight_skipped,
                 total_in_flight = self.in_flight.len(),
-                "Prefetch: submitted {} new tiles ({} already cached, {} in-flight)",
+                "Prefetch: submitted {} tiles ({} skipped, already in-flight)",
                 submitted,
-                cached,
                 in_flight_skipped
             );
         }
@@ -354,88 +343,34 @@ impl PrefetchScheduler {
     }
 }
 
+// Implement the Prefetcher trait for PrefetchScheduler
+impl Prefetcher for PrefetchScheduler {
+    fn run(
+        self: Box<Self>,
+        state_rx: mpsc::Receiver<AircraftState>,
+        cancellation_token: CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            // Unbox and run the actual implementation
+            (*self).run(state_rx, cancellation_token).await
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "flight-path"
+    }
+
+    fn description(&self) -> &'static str {
+        "Complex flight-path prediction with cone and radial calculations"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{CacheStatistics, CacheStats, NoOpCache};
+    use crate::prefetch::{AlwaysActiveCondition, MinimumSpeedCondition, NeverActiveCondition};
+    use proptest::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Mock cache that tracks contains calls and always returns false.
-    struct MockCache {
-        contains_count: AtomicUsize,
-    }
-
-    impl MockCache {
-        fn new() -> Self {
-            Self {
-                contains_count: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl Cache for MockCache {
-        fn get(&self, _key: &CacheKey) -> Option<Vec<u8>> {
-            None
-        }
-
-        fn put(&self, _key: CacheKey, _data: Vec<u8>) -> Result<(), crate::cache::CacheError> {
-            Ok(())
-        }
-
-        fn contains(&self, _key: &CacheKey) -> bool {
-            self.contains_count.fetch_add(1, Ordering::SeqCst);
-            false // Always return false to allow prefetch
-        }
-
-        fn clear(&self) -> Result<(), crate::cache::CacheError> {
-            Ok(())
-        }
-
-        fn stats(&self) -> CacheStatistics {
-            CacheStatistics::from_stats(&CacheStats::default())
-        }
-
-        fn provider(&self) -> &str {
-            "mock"
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
-
-    /// Mock cache that returns true for contains (already cached).
-    struct AlwaysCachedMock;
-
-    impl Cache for AlwaysCachedMock {
-        fn get(&self, _key: &CacheKey) -> Option<Vec<u8>> {
-            Some(vec![1, 2, 3])
-        }
-
-        fn put(&self, _key: CacheKey, _data: Vec<u8>) -> Result<(), crate::cache::CacheError> {
-            Ok(())
-        }
-
-        fn contains(&self, _key: &CacheKey) -> bool {
-            true // Everything is cached
-        }
-
-        fn clear(&self) -> Result<(), crate::cache::CacheError> {
-            Ok(())
-        }
-
-        fn stats(&self) -> CacheStatistics {
-            CacheStatistics::from_stats(&CacheStats::default())
-        }
-
-        fn provider(&self) -> &str {
-            "cached"
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
 
     fn create_test_handler() -> (DdsHandler, Arc<AtomicUsize>) {
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -452,79 +387,13 @@ mod tests {
     fn test_scheduler_creation() {
         let predictor = TilePredictor::new(45.0, 100.0, 60.0);
         let (handler, _) = create_test_handler();
-        let cache = Arc::new(NoOpCache::new("test"));
         let config = SchedulerConfig::default();
+        let condition = Box::new(AlwaysActiveCondition);
 
-        let scheduler = PrefetchScheduler::new(predictor, handler, cache, config);
+        let scheduler = PrefetchScheduler::new(predictor, handler, config, condition);
 
         assert!(scheduler.in_flight.is_empty());
         assert!(scheduler.last_state.is_none());
-    }
-
-    #[test]
-    fn test_process_state_submits_requests() {
-        let predictor = TilePredictor::new(45.0, 100.0, 60.0);
-        let (handler, call_count) = create_test_handler();
-        let cache = Arc::new(MockCache::new());
-        let config = SchedulerConfig::default();
-
-        let mut scheduler = PrefetchScheduler::new(predictor, handler, cache, config);
-
-        // Create a moving aircraft state
-        let state = AircraftState::new(45.0, -122.0, 90.0, 300.0, 10000.0);
-        scheduler.process_state(&state);
-
-        // Should have submitted some requests
-        assert!(call_count.load(Ordering::SeqCst) > 0);
-    }
-
-    #[test]
-    fn test_process_state_skips_cached_tiles() {
-        let predictor = TilePredictor::new(45.0, 100.0, 60.0);
-        let (handler, call_count) = create_test_handler();
-        let cache = Arc::new(AlwaysCachedMock);
-        let config = SchedulerConfig::default();
-
-        let mut scheduler = PrefetchScheduler::new(predictor, handler, cache, config);
-
-        let state = AircraftState::new(45.0, -122.0, 90.0, 300.0, 10000.0);
-        scheduler.process_state(&state);
-
-        // Should not submit any requests since all tiles are "cached"
-        assert_eq!(call_count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn test_process_state_respects_max_batch() {
-        let predictor = TilePredictor::new(45.0, 100.0, 60.0);
-        let (handler, call_count) = create_test_handler();
-        let cache = Arc::new(MockCache::new());
-        let config = SchedulerConfig::default();
-
-        let mut scheduler = PrefetchScheduler::new(predictor, handler, cache, config);
-
-        // Create a fast-moving aircraft that will predict many tiles
-        let state = AircraftState::new(45.0, -122.0, 90.0, 500.0, 35000.0);
-        scheduler.process_state(&state);
-
-        // Should respect batch_size from config (default 500)
-        assert!(call_count.load(Ordering::SeqCst) <= SchedulerConfig::default().batch_size);
-    }
-
-    #[test]
-    fn test_in_flight_tracking() {
-        let predictor = TilePredictor::new(45.0, 100.0, 60.0);
-        let (handler, _) = create_test_handler();
-        let cache = Arc::new(MockCache::new());
-        let config = SchedulerConfig::default();
-
-        let mut scheduler = PrefetchScheduler::new(predictor, handler, cache, config);
-
-        let state = AircraftState::new(45.0, -122.0, 90.0, 300.0, 10000.0);
-        scheduler.process_state(&state);
-
-        // Should have some tiles in flight
-        assert!(!scheduler.in_flight.is_empty());
     }
 
     #[test]
@@ -534,5 +403,119 @@ mod tests {
         assert_eq!(config.zoom, 14);
         assert_eq!(config.provider, "bing");
         assert_eq!(config.dds_format, DdsFormat::BC1);
+    }
+
+    // Property-based tests for condition behavior
+    proptest! {
+        /// Property: NeverActiveCondition always blocks prefetch regardless of aircraft state.
+        #[test]
+        fn prop_never_active_blocks_all_states(
+            lat in -85.0f64..85.0f64,
+            lon in -180.0f64..180.0f64,
+            heading in 0.0f32..360.0f32,
+            speed in 0.0f32..600.0f32,
+            altitude in 0.0f32..50000.0f32,
+        ) {
+            let predictor = TilePredictor::new(45.0, 100.0, 60.0);
+            let (handler, call_count) = create_test_handler();
+            let config = SchedulerConfig::default();
+            let condition = Box::new(NeverActiveCondition);
+
+            let mut scheduler = PrefetchScheduler::new(predictor, handler, config, condition);
+            let state = AircraftState::new(lat, lon, heading, speed, altitude);
+            scheduler.process_state(&state);
+
+            // NeverActiveCondition should always block prefetch
+            prop_assert_eq!(call_count.load(Ordering::SeqCst), 0);
+        }
+
+        /// Property: AlwaysActiveCondition allows prefetch for any moving aircraft.
+        #[test]
+        fn prop_always_active_allows_moving_aircraft(
+            lat in -85.0f64..85.0f64,
+            lon in -180.0f64..180.0f64,
+            heading in 0.0f32..360.0f32,
+            speed in 50.0f32..600.0f32,  // Fast enough to generate predictions
+            altitude in 1000.0f32..50000.0f32,
+        ) {
+            let predictor = TilePredictor::new(45.0, 100.0, 60.0);
+            let (handler, call_count) = create_test_handler();
+            let config = SchedulerConfig::default();
+            let condition = Box::new(AlwaysActiveCondition);
+
+            let mut scheduler = PrefetchScheduler::new(predictor, handler, config, condition);
+            let state = AircraftState::new(lat, lon, heading, speed, altitude);
+            scheduler.process_state(&state);
+
+            // AlwaysActiveCondition should allow prefetch
+            prop_assert!(call_count.load(Ordering::SeqCst) > 0);
+        }
+
+        /// Property: MinimumSpeedCondition blocks aircraft below threshold.
+        #[test]
+        fn prop_min_speed_blocks_slow_aircraft(
+            lat in -85.0f64..85.0f64,
+            lon in -180.0f64..180.0f64,
+            heading in 0.0f32..360.0f32,
+            speed in 0.0f32..29.9f32,  // Below 30kt threshold
+            altitude in 0.0f32..50000.0f32,
+        ) {
+            let predictor = TilePredictor::new(45.0, 100.0, 60.0);
+            let (handler, call_count) = create_test_handler();
+            let config = SchedulerConfig::default();
+            let condition = Box::new(MinimumSpeedCondition::new(30.0));
+
+            let mut scheduler = PrefetchScheduler::new(predictor, handler, config, condition);
+            let state = AircraftState::new(lat, lon, heading, speed, altitude);
+            scheduler.process_state(&state);
+
+            // Below threshold should be blocked
+            prop_assert_eq!(call_count.load(Ordering::SeqCst), 0);
+        }
+
+        /// Property: MinimumSpeedCondition allows aircraft at or above threshold.
+        #[test]
+        fn prop_min_speed_allows_fast_aircraft(
+            lat in -85.0f64..85.0f64,
+            lon in -180.0f64..180.0f64,
+            heading in 0.0f32..360.0f32,
+            speed in 50.0f32..600.0f32,  // Above 30kt threshold, fast enough to predict
+            altitude in 1000.0f32..50000.0f32,
+        ) {
+            let predictor = TilePredictor::new(45.0, 100.0, 60.0);
+            let (handler, call_count) = create_test_handler();
+            let config = SchedulerConfig::default();
+            let condition = Box::new(MinimumSpeedCondition::new(30.0));
+
+            let mut scheduler = PrefetchScheduler::new(predictor, handler, config, condition);
+            let state = AircraftState::new(lat, lon, heading, speed, altitude);
+            scheduler.process_state(&state);
+
+            // Above threshold should allow prefetch
+            prop_assert!(call_count.load(Ordering::SeqCst) > 0);
+        }
+
+        /// Property: Scheduler respects batch_size limit regardless of predictions.
+        #[test]
+        fn prop_respects_batch_size_limit(
+            lat in -85.0f64..85.0f64,
+            lon in -180.0f64..180.0f64,
+            heading in 0.0f32..360.0f32,
+            speed in 100.0f32..600.0f32,
+            altitude in 1000.0f32..50000.0f32,
+        ) {
+            let predictor = TilePredictor::new(45.0, 100.0, 60.0);
+            let (handler, call_count) = create_test_handler();
+            let config = SchedulerConfig::default();
+            let batch_size = config.batch_size;
+            let condition = Box::new(AlwaysActiveCondition);
+
+            let mut scheduler = PrefetchScheduler::new(predictor, handler, config, condition);
+            let state = AircraftState::new(lat, lon, heading, speed, altitude);
+            scheduler.process_state(&state);
+
+            // Should never exceed batch_size
+            prop_assert!(call_count.load(Ordering::SeqCst) <= batch_size);
+        }
     }
 }

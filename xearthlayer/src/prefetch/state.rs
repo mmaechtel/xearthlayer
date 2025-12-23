@@ -84,9 +84,9 @@ impl PrefetchStatusSnapshot {
     pub fn stats_line(&self) -> String {
         if self.stats.prediction_cycles > 0 {
             format!(
-                "Prefetch: {} submitted, {} cached, {} predicted (cycle #{})",
+                "Prefetch: {} submitted, {} in-flight skipped, {} predicted (cycle #{})",
                 self.stats.tiles_submitted,
-                self.stats.tiles_cached,
+                self.stats.tiles_in_flight_skipped,
                 self.stats.tiles_predicted,
                 self.stats.prediction_cycles
             )

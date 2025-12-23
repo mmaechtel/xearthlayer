@@ -33,7 +33,7 @@ Even with fast internet and NVMe storage, the latency is perceptible. The soluti
 │                     X-Plane (UDP Broadcast)                      │
 │                  Position, Heading, Speed, Alt                   │
 └──────────────────────────┬──────────────────────────────────────┘
-                           │ UDP Port (configurable, default 49003)
+                           │ UDP Port (configurable, default 49002)
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                   Telemetry Listener                             │
@@ -42,23 +42,20 @@ Even with fast internet and NVMe storage, the latency is perceptible. The soluti
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Tile Prediction Engine                         │
-│  ┌─────────────────┐    ┌─────────────────┐                     │
-│  │  Flight Cone    │    │  Radial Buffer  │                     │
-│  │  (heading+speed)│    │  (current pos)  │                     │
-│  └────────┬────────┘    └────────┬────────┘                     │
-│           └──────────┬───────────┘                              │
-│                      ▼                                          │
-│           Prioritized Tile List                                 │
-│     (cone tiles first, then radial, by distance)                │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   Pre-fetch Scheduler                            │
-│  - Filters already-cached tiles                                 │
-│  - Yields to on-demand requests (lower priority)                │
-│  - Submits to existing pipeline                                 │
+│                   Prefetcher (Strategy Pattern)                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  RadialPrefetcher (Recommended)                         │    │
+│  │  - 7×7 tile grid around current position (49 tiles)     │    │
+│  │  - Check memory cache before submitting                 │    │
+│  │  - TTL tracking to avoid re-requesting failed tiles     │    │
+│  │  - 10-second timeout per request                        │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  PrefetchScheduler (Legacy)                             │    │
+│  │  - Complex cone + radial prediction                     │    │
+│  │  - Can generate 21,000+ tile requests per cycle         │    │
+│  │  - Not recommended for production use                   │    │
+│  └─────────────────────────────────────────────────────────┘    │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
@@ -68,16 +65,47 @@ Even with fast internet and NVMe storage, the latency is perceptible. The soluti
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### New Components
+### Prefetcher Trait (Strategy Pattern)
+
+The prefetch system uses a strategy pattern via the `Prefetcher` trait, enabling runtime selection of different prefetching algorithms:
+
+```rust
+pub trait Prefetcher: Send {
+    /// Run the prefetcher, processing state updates until cancelled.
+    fn run(
+        self: Box<Self>,
+        state_rx: mpsc::Receiver<AircraftState>,
+        cancellation_token: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    /// Get a human-readable name for this prefetcher strategy.
+    fn name(&self) -> &'static str;
+
+    /// Get a description of this prefetcher strategy.
+    fn description(&self) -> &'static str;
+}
+```
+
+**Available Strategies**:
+- `RadialPrefetcher` (name: "radial") - Simple, cache-aware, recommended
+- `PrefetchScheduler` (name: "flight-path") - Complex prediction, legacy
+
+### Components
 
 #### 1. Telemetry Listener (`xearthlayer/src/prefetch/listener.rs`)
 
-Listens for X-Plane UDP broadcast packets and extracts aircraft state.
+Listens for UDP broadcast packets and extracts aircraft state. Supports multiple protocols:
 
-**X-Plane UDP Format**: X-Plane broadcasts flight data over UDP. The relevant data output indices are:
+**X-Plane DATA Protocol** (port 49003):
 - Index 3: Speeds (kias, keas, ktas, ktgs) - ground speed in knots
 - Index 17: Pitch, roll, magnetic heading, true heading
 - Index 20: Latitude, longitude, altitude MSL
+
+**ForeFlight Protocol** (port 49002):
+- XGPS2: Position, altitude, heading, ground speed
+- XATT2: Attitude data (heading updates)
+
+The listener auto-detects packet format based on prefix bytes.
 
 **Output**: `AircraftState` struct updated at ~1-2 Hz
 
@@ -85,89 +113,112 @@ Listens for X-Plane UDP broadcast packets and extracts aircraft state.
 pub struct AircraftState {
     pub latitude: f64,      // degrees
     pub longitude: f64,     // degrees
-    pub altitude_msl: f32,  // feet
-    pub heading_true: f32,  // degrees (0-360)
+    pub altitude: f32,      // feet MSL
+    pub heading: f32,       // degrees (0-360, normalized)
     pub ground_speed: f32,  // knots
-    pub timestamp: Instant,
+    pub updated_at: Instant,
 }
 ```
 
-#### 2. Tile Prediction Engine (`xearthlayer/src/prediction/`)
+#### 2. Radial Prefetcher (`xearthlayer/src/prefetch/radial.rs`) - Recommended
 
-Calculates which tiles should be pre-fetched based on aircraft state.
+Simple, cache-aware prefetching that maintains a buffer of tiles around the current position.
 
-**Prediction Strategies**:
+**Algorithm**:
+1. Convert aircraft position to tile coordinates
+2. Calculate all tiles within configured radius (default: 3 tiles = 7×7 grid = 49 tiles)
+3. Check memory cache for each tile (shared with pipeline)
+4. Skip tiles that were recently attempted (TTL tracking, default: 60 seconds)
+5. Submit prefetch requests for missing tiles with 10-second timeout
 
-1. **Flight Cone**: Tiles ahead of the aircraft
-   - Projects aircraft position forward based on heading and ground speed
-   - Cone angle: ±45° from heading (configurable)
-   - Cone distance: 180 seconds of flight time (configurable)
-   - Tiles ordered by time-to-reach (closest first)
+**Key Features**:
+- **Shared Memory Cache**: Uses the same `MemoryCacheAdapter` instance as the pipeline, ensuring accurate cache hit detection
+- **TTL Tracking**: Tiles that fail are not re-requested for 60 seconds, preventing provider hammering
+- **Request Timeout**: Each prefetch request has a 10-second timeout via `CancellationToken`
+- **Rate Limiting**: Minimum 2 seconds between prefetch cycles
+- **Movement Detection**: Only runs when aircraft moves to a new tile
 
-2. **Radial Buffer**: Tiles around current position
-   - Catches lateral movement, orbits, unexpected turns
-   - Radius: 3 tile widths (configurable)
-   - Tiles ordered by distance from current position
-
-**Priority Assignment**:
+**Configuration** (`RadialPrefetchConfig`):
+```rust
+pub struct RadialPrefetchConfig {
+    pub radius: u8,           // Tile radius (default: 3 = 49 tiles)
+    pub zoom: u8,             // Zoom level (default: 14)
+    pub attempt_ttl: Duration, // Don't retry failed tiles for this long (default: 60s)
+}
 ```
-Priority 0 (highest): On-demand FUSE requests
-Priority 1: Cone tiles (ordered by time-to-reach)
-Priority 2: Radial tiles (ordered by distance)
+
+**Performance**:
+- 49 tiles per cycle (vs 21,000+ with legacy scheduler)
+- Typically 7-13 new requests per cycle (rest are cache hits or TTL-skipped)
+- ~40-80% cache hit rate during continuous flight
+
+#### 3. Legacy Scheduler (`xearthlayer/src/prefetch/scheduler.rs`)
+
+Complex flight-path prediction with cone and radial calculations. Not recommended due to:
+- Generates 21,000+ tile predictions per cycle
+- Can overwhelm tile providers (causes throttling)
+- Complex coordinate math with edge cases
+
+Kept for reference and potential future optimization.
+
+#### 4. Pre-fetch Condition (`xearthlayer/src/prefetch/condition.rs`)
+
+Determines when prefetching should be active using dependency-injected condition logic.
+
+**Implementations**:
+- `MinimumSpeedCondition` - Activates prefetch above a threshold speed (default 30kt)
+- `AlwaysActiveCondition` - Always allows prefetch (testing)
+- `NeverActiveCondition` - Never allows prefetch (testing)
+
+### Timeout Mechanism
+
+Prefetch requests include a 10-second timeout to prevent stuck jobs:
+
+```rust
+// Spawn timeout task to cancel the request if it takes too long
+let cancellation_token = CancellationToken::new();
+let timeout_token = cancellation_token.clone();
+
+tokio::spawn(async move {
+    tokio::time::sleep(PREFETCH_REQUEST_TIMEOUT).await;
+    timeout_token.cancel();
+});
 ```
 
-#### 3. Pre-fetch Scheduler (`xearthlayer/src/prefetch/`)
+This ensures that hung HTTP connections or slow provider responses don't block the prefetch queue indefinitely.
 
-Manages the flow of predicted tiles into the pipeline.
+### Shared Memory Cache
 
-**Responsibilities**:
-- Receive predicted tile list from prediction engine
-- Filter out tiles already in memory or disk cache
-- Submit tiles to pipeline with appropriate priority
-- Respect pipeline concurrency limits
-- Cancel stale predictions when aircraft state changes significantly
+The prefetcher shares the same `MemoryCacheAdapter` instance with the pipeline:
 
-**Key Design Decision**: Pre-fetch requests use the **same pipeline** as on-demand requests. This ensures:
-- Request coalescing works automatically (no duplicate work)
-- Concurrency limits are respected
-- Cache behavior is consistent
-- No code duplication
+```rust
+// In XEarthLayerService
+if let Some(memory_cache) = service.memory_cache_adapter() {
+    let prefetcher: Box<dyn Prefetcher> = Box::new(
+        RadialPrefetcher::new(memory_cache, dds_handler, config)
+    );
+}
+```
 
-### Modified Components
-
-#### Pipeline Priority System
-
-The existing pipeline needs priority support to ensure on-demand requests are never starved.
-
-**Approach**: Add priority to request submission. On-demand requests get priority 0, pre-fetch requests get priority 1-2. The pipeline processes higher-priority requests first.
-
-**Implementation Options**:
-1. Priority queue for pending requests
-2. Separate channels with priority polling
-3. Semaphore reservation for on-demand requests
-
-Decision: TBD during implementation
+This ensures prefetch cache checks are accurate - if a tile is in the pipeline's memory cache, the prefetcher will see it.
 
 ## Configuration
 
-New configuration keys in `[prefetch]` section:
+Configuration keys in `[prefetch]` section:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `prefetch.enabled` | bool | `true` | Enable/disable predictive caching |
-| `prefetch.udp_port` | u16 | `49003` | X-Plane UDP broadcast port |
-| `prefetch.cone_angle` | f32 | `45.0` | Half-angle of prediction cone (degrees) |
-| `prefetch.cone_distance` | u32 | `180` | Look-ahead time (seconds) |
-| `prefetch.radial_radius` | u32 | `3` | Radial buffer in tile widths |
+| `prefetch.udp_port` | u16 | `49002` | X-Plane UDP broadcast port |
+| `prefetch.cone_angle` | f32 | `45.0` | Half-angle of prediction cone (degrees) - legacy |
+| `prefetch.cone_distance_nm` | f32 | `10.0` | Look-ahead distance in nautical miles - legacy |
+| `prefetch.radial_radius_nm` | f32 | `5.0` | Radial buffer in nautical miles - legacy |
 
 Example `config.ini`:
 ```ini
 [prefetch]
 enabled = true
-udp_port = 49003
-cone_angle = 45
-cone_distance = 180
-radial_radius = 3
+udp_port = 49002
 ```
 
 ## X-Plane Setup
@@ -177,161 +228,110 @@ Users must enable UDP data output in X-Plane:
 1. Settings → Data Output
 2. Enable "Network via UDP"
 3. Set destination IP to localhost (127.0.0.1) or machine running XEarthLayer
-4. Set port (default 49003)
+4. Set port (default 49002 for ForeFlight protocol)
 5. Enable data indices: 3 (speeds), 17 (orientation), 20 (position)
+
+Alternatively, enable ForeFlight broadcast which sends XGPS/XATT packets.
+
+## CLI Usage
+
+The prefetcher is automatically started with `xearthlayer run`:
+
+```
+Prefetch system started (radial, 3-tile radius, UDP port 49002)
+```
+
+Dashboard shows real-time prefetch status:
+```
+Prefetch: 7 submitted, 26 in-flight skipped, 49 predicted (cycle #701)
+```
+
+Disable with `--no-prefetch` flag:
+```bash
+xearthlayer run --no-prefetch
+```
 
 ## Design Decisions
 
-### DD-001: Reuse Existing Pipeline
+### DD-001: Radial vs Flight-Path Prediction
 
-**Decision**: Pre-fetch requests go through the same pipeline as on-demand requests.
-
-**Rationale**:
-- Request coalescing works automatically between pre-fetch and on-demand
-- Consistent caching behavior (memory + disk)
-- No code duplication
-- Existing concurrency limits apply
-
-**Trade-off**: Need to implement pipeline prioritization.
-
-### DD-002: LRU Cache Eviction
-
-**Decision**: Use standard LRU eviction, no reserved pre-fetch budget.
+**Decision**: Use simple radial prefetching instead of complex flight-path prediction.
 
 **Rationale**:
-- Pre-fetched tiles are typically the freshest in cache
-- Simplifies initial implementation
-- LRU naturally keeps recently-predicted tiles
+- Flight-path prediction generated 21,000+ tiles per cycle, overwhelming providers
+- Radial approach generates only 49 tiles with high cache hit rate
+- Works for all flight profiles (cruise, pattern work, orbits)
+- Simpler code with fewer edge cases
 
-**Future Enhancement**: Consider reserved budget if eviction becomes problematic.
+### DD-002: Shared Memory Cache
 
-### DD-003: Same Zoom Level as On-Demand
-
-**Decision**: Pre-fetch at same zoom level as on-demand requests (determined by scenery package).
-
-**Rationale**:
-- Simplifies implementation
-- Avoids zoom-level mismatch issues
-- Altitude-based zoom can be added later if needed
-
-### DD-004: Disk Cache for Pre-fetched Tiles
-
-**Decision**: Pre-fetched tiles are written to disk cache, same as on-demand.
+**Decision**: Prefetcher uses the same memory cache adapter instance as the pipeline.
 
 **Rationale**:
-- Consistent behavior
-- Tiles persist across sessions
-- User may fly same route again
+- Accurate cache hit detection
+- No duplicate cache instances consuming memory
+- Consistent behavior between prefetch and on-demand requests
 
-## Future Enhancements
+### DD-003: Per-Request Timeout
 
-### FE-001: In-Memory Cache Index
+**Decision**: Each prefetch request has a 10-second timeout via CancellationToken.
 
-Maintain a `HashSet<TileKey>` of all cached tiles (memory + disk) for O(1) lookup.
+**Rationale**:
+- Prevents stuck jobs from blocking the queue
+- Matches FUSE on-demand request timeout
+- Failed requests are TTL-tracked to prevent immediate retry
 
-**Benefits**:
-- Instant filtering of already-cached tiles from pre-fetch queue
-- Avoid disk I/O for cache existence checks
-- Updated on cache insert/evict
+### DD-004: TTL Tracking
 
-### FE-002: Flight Plan Awareness
+**Decision**: Recently-attempted tiles are skipped for 60 seconds.
 
-Parse X-Plane flight plan data to pre-fetch along planned route.
+**Rationale**:
+- Prevents hammering provider with failed requests
+- Reduces wasted bandwidth
+- Allows transient failures to recover
 
-**Benefits**:
-- Long-range prediction for IFR flights
-- Pre-fetch entire route before takeoff
+### DD-005: Strategy Pattern
 
-### FE-003: Altitude-Based Zoom
+**Decision**: Use `Prefetcher` trait for strategy abstraction.
 
-Adjust pre-fetch zoom level based on altitude.
-
-**Benefits**:
-- Higher altitude = wider view = lower zoom levels
-- Better resource utilization at cruise altitude
-
-### FE-004: Adaptive Prediction
-
-Learn from actual tile requests to improve prediction accuracy.
-
-**Benefits**:
-- Self-tuning cone angle and distance
-- Account for user's flying style
-
-## Implementation Phases
-
-### Phase 1: Telemetry Listener
-- UDP socket listener
-- X-Plane packet parsing
-- AircraftState struct and updates
-
-### Phase 2: Tile Prediction Engine
-- Coordinate conversion (lat/lon → tile coordinates)
-- Flight cone calculation
-- Radial buffer calculation
-- Priority assignment
-
-### Phase 3: Pipeline Priority Support
-- Priority-aware request handling
-- Ensure on-demand requests are never starved
-
-### Phase 4: Pre-fetch Scheduler
-- Cache existence filtering
-- Request submission to pipeline
-- Stale prediction cancellation
-
-### Phase 5: Configuration and Integration
-- Config keys and parsing
-- CLI integration
-- TUI metrics for pre-fetch activity
-
-### Phase 6: Testing and Tuning
-- Unit tests for prediction math
-- Integration tests with mock telemetry
-- Real-world testing and parameter tuning
-
-## Testing Strategy
-
-### Unit Tests
-- Coordinate conversion accuracy
-- Cone/radial tile calculation
-- Priority ordering
-- UDP packet parsing
-
-### Integration Tests
-- Mock telemetry → predicted tiles
-- Pre-fetch → pipeline → cache flow
-- Coalescing between pre-fetch and on-demand
-
-### Manual Testing
-- FPS monitoring with/without pre-fetch
-- Various flight profiles (cruise, approach, pattern work)
-- Different network/storage configurations
+**Rationale**:
+- Enables runtime strategy selection
+- Allows A/B testing of different algorithms
+- Clean separation of concerns
+- Easy to add new strategies
 
 ## Metrics
 
-New TUI metrics to add:
-- Pre-fetch queue depth
-- Pre-fetch hits (tiles requested by sim that were pre-fetched)
-- Pre-fetch waste (tiles pre-fetched but never used)
-- Telemetry status (connected/disconnected)
+TUI dashboard displays:
+- Tiles predicted (total in radius)
+- Tiles submitted (new requests this cycle)
+- In-flight skipped (TTL or already processing)
+- Cycle number
+- Aircraft position
 
-## Risks and Mitigations
+Log entries show detailed cycle information:
+```
+INFO Prefetch cycle complete lat="55.6292" lon="12.6734" tile_row=5131 tile_col=8768
+     total=49 cache_hits=38 submitted=7 ttl_skipped=4
+```
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| UDP packet loss | Missing telemetry updates | Interpolate from last known state |
-| Prediction misses | Wasted bandwidth | Tune cone angle, rely on radial buffer |
-| Pipeline starvation | On-demand latency | Strict priority enforcement |
-| Memory pressure | Cache thrashing | Monitor and tune, consider reserved budget |
-| X-Plane config burden | User friction | Document setup, consider auto-detection |
+## Future Enhancements
 
-## Open Questions
+### FE-001: Heading-Aware Prioritization
 
-1. **Telemetry interpolation**: How to handle gaps in UDP data?
-2. **Prediction update rate**: 1 Hz vs 2 Hz vs on-change?
-3. **Stale prediction handling**: When to cancel in-flight pre-fetch requests?
-4. **TUI integration**: How to display pre-fetch activity?
+Prioritize tiles in the direction of flight within the radial grid.
+
+### FE-002: Adaptive Radius
+
+Adjust radius based on ground speed - larger radius at higher speeds.
+
+### FE-003: Cache Visualization
+
+Map view showing cached tiles, prefetch requests, and aircraft position.
+
+### FE-004: Flight Plan Integration
+
+Parse X-Plane flight plan to pre-fetch entire route before takeoff.
 
 ---
 
@@ -340,3 +340,5 @@ New TUI metrics to add:
 | Date | Author | Changes |
 |------|--------|---------|
 | 2025-12-21 | Claude | Initial design document |
+| 2025-12-22 | Claude | Implementation updates: ForeFlight protocol support, PrefetchCondition trait, MinimumSpeedCondition (30kt default), removed redundant cache checking (DdsHandler handles it), heading normalization (0-360) |
+| 2025-12-23 | Claude | Major refactor: RadialPrefetcher as recommended strategy (49 tiles vs 21,000+), Prefetcher trait for strategy pattern, shared memory cache adapter, 10-second request timeout, TTL tracking for failed tiles |

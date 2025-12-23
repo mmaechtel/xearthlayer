@@ -12,7 +12,7 @@ use xearthlayer::log::TracingLogger;
 use xearthlayer::manager::{LocalPackageStore, MountManager, ServiceBuilder};
 use xearthlayer::package::PackageType;
 use xearthlayer::prefetch::{
-    PrefetchScheduler, SchedulerConfig, SharedPrefetchStatus, TelemetryListener, TilePredictor,
+    Prefetcher, RadialPrefetchConfig, RadialPrefetcher, SharedPrefetchStatus, TelemetryListener,
 };
 use xearthlayer::service::ServiceConfig;
 
@@ -239,59 +239,68 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     // Start prefetch system if enabled
     let prefetch_cancellation = CancellationToken::new();
     let shared_prefetch_status = SharedPrefetchStatus::new();
+    let mut prefetch_started = false;
+
     if prefetch_enabled {
         if let Some(service) = mount_manager.get_service() {
-            let dds_handler = service.create_prefetch_handler();
-            let cache = Arc::clone(service.cache());
-            let dds_format = service.dds_format();
-            let runtime_handle = service.runtime_handle().clone();
-            let provider_name = service.provider_name().to_string();
+            // Get shared memory cache adapter for cache-aware prefetching
+            // This is the same adapter instance used by the pipeline
+            if let Some(memory_cache) = service.memory_cache_adapter() {
+                let dds_handler = service.create_prefetch_handler();
+                let runtime_handle = service.runtime_handle().clone();
 
-            let predictor = TilePredictor::new(
-                config.prefetch.cone_angle,
-                config.prefetch.cone_distance_nm,
-                config.prefetch.radial_radius_nm,
-            );
+                // Configure radial prefetcher
+                // Uses a simple 3-tile radius (7×7 = 49 tiles) around current position
+                let prefetch_config = RadialPrefetchConfig {
+                    radius: 3,                                       // 3-tile radius = 49 tiles max per cycle
+                    zoom: 14,                                        // Standard ortho zoom level
+                    attempt_ttl: std::time::Duration::from_secs(60), // Don't retry for 60s
+                };
 
-            let scheduler_config = SchedulerConfig {
-                zoom: 14, // Standard ortho zoom level (tile zoom, not chunk zoom)
-                provider: provider_name,
-                dds_format,
-                batch_size: config.prefetch.batch_size,
-                max_in_flight: config.prefetch.max_in_flight,
-            };
+                // Create channels for telemetry data
+                let (state_tx, state_rx) = mpsc::channel(32);
 
-            // Create channels for telemetry data
-            let (state_tx, state_rx) = mpsc::channel(32);
-
-            // Start the telemetry listener
-            let listener = TelemetryListener::new(config.prefetch.udp_port);
-            let listener_cancel = prefetch_cancellation.clone();
-            runtime_handle.spawn(async move {
-                tokio::select! {
-                    result = listener.run(state_tx) => {
-                        if let Err(e) = result {
-                            tracing::warn!("Telemetry listener error: {}", e);
+                // Start the telemetry listener
+                let listener = TelemetryListener::new(config.prefetch.udp_port);
+                let listener_cancel = prefetch_cancellation.clone();
+                runtime_handle.spawn(async move {
+                    tokio::select! {
+                        result = listener.run(state_tx) => {
+                            if let Err(e) = result {
+                                tracing::warn!("Telemetry listener error: {}", e);
+                            }
+                        }
+                        _ = listener_cancel.cancelled() => {
+                            tracing::debug!("Telemetry listener cancelled");
                         }
                     }
-                    _ = listener_cancel.cancelled() => {
-                        tracing::debug!("Telemetry listener cancelled");
-                    }
-                }
-            });
+                });
 
-            // Start the prefetch scheduler with shared status for TUI display
-            let scheduler = PrefetchScheduler::new(predictor, dds_handler, cache, scheduler_config)
-                .with_shared_status(Arc::clone(&shared_prefetch_status));
-            let scheduler_cancel = prefetch_cancellation.clone();
-            runtime_handle.spawn(async move {
-                scheduler.run(state_rx, scheduler_cancel).await;
-            });
+                // Create prefetcher strategy (currently using RadialPrefetcher)
+                // The prefetcher checks memory cache before submitting requests,
+                // only fetching tiles that aren't already cached
+                let prefetcher: Box<dyn Prefetcher> = Box::new(
+                    RadialPrefetcher::new(memory_cache, dds_handler, prefetch_config)
+                        .with_shared_status(Arc::clone(&shared_prefetch_status)),
+                );
 
-            println!(
-                "Prefetch system started (listening on UDP port {})",
-                config.prefetch.udp_port
-            );
+                // Log the strategy being used
+                let strategy_name = prefetcher.name();
+
+                // Start the prefetcher
+                let prefetcher_cancel = prefetch_cancellation.clone();
+                runtime_handle.spawn(async move {
+                    prefetcher.run(state_rx, prefetcher_cancel).await;
+                });
+
+                println!(
+                    "Prefetch system started ({}, 3-tile radius, UDP port {})",
+                    strategy_name, config.prefetch.udp_port
+                );
+                prefetch_started = true;
+            } else {
+                println!("Warning: Memory cache not available, prefetch disabled");
+            }
         } else {
             println!("Warning: No services available for prefetch");
         }
@@ -321,7 +330,7 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     }
 
     // Cancel prefetch system
-    if prefetch_enabled {
+    if prefetch_started {
         prefetch_cancellation.cancel();
     }
 
