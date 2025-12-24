@@ -355,6 +355,7 @@ impl MountManager {
             jobs_submitted: 0,
             jobs_completed: 0,
             jobs_failed: 0,
+            jobs_timed_out: 0,
             jobs_active: 0,
             jobs_coalesced: 0,
             chunks_downloaded: 0,
@@ -396,6 +397,7 @@ impl MountManager {
             total.jobs_submitted += snapshot.jobs_submitted;
             total.jobs_completed += snapshot.jobs_completed;
             total.jobs_failed += snapshot.jobs_failed;
+            total.jobs_timed_out += snapshot.jobs_timed_out;
             total.jobs_active += snapshot.jobs_active;
             total.jobs_coalesced += snapshot.jobs_coalesced;
             total.chunks_downloaded += snapshot.chunks_downloaded;

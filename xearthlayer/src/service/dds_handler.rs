@@ -40,8 +40,7 @@ use crate::pipeline::adapters::{
 };
 use crate::pipeline::control_plane::PipelineControlPlane;
 use crate::pipeline::{
-    create_dds_handler_with_control_plane, create_dds_handler_with_metrics, ConcurrencyLimiter,
-    PipelineConfig, TokioExecutor,
+    create_dds_handler_with_control_plane, ConcurrencyLimiter, PipelineConfig, TokioExecutor,
 };
 use crate::provider::{AsyncProviderType, Provider};
 use crate::telemetry::PipelineMetrics;
@@ -435,7 +434,11 @@ impl DdsHandlerBuilder {
         }
     }
 
-    /// Internal helper to build the handler with or without control plane.
+    /// Internal helper to build the handler with control plane.
+    ///
+    /// # Panics
+    ///
+    /// Panics if control plane is not set. Use `with_control_plane()` before calling `build()`.
     #[allow(clippy::too_many_arguments)]
     fn build_handler<P, E, M, D, X>(
         &self,
@@ -455,42 +458,28 @@ impl DdsHandlerBuilder {
         D: crate::pipeline::DiskCache + 'static,
         X: crate::pipeline::BlockingExecutor + 'static,
     {
-        match &self.control_plane {
-            Some(control_plane) => {
-                tracing::info!(
-                    description = description,
-                    max_concurrent_jobs = control_plane.max_concurrent_jobs(),
-                    "DDS handler with control plane"
-                );
-                create_dds_handler_with_control_plane(
-                    Arc::clone(control_plane),
-                    provider,
-                    encoder,
-                    memory_cache,
-                    disk_cache,
-                    executor,
-                    config,
-                    runtime_handle,
-                    self.metrics.clone(),
-                )
-            }
-            None => {
-                tracing::info!(
-                    description = description,
-                    "DDS handler without control plane"
-                );
-                create_dds_handler_with_metrics(
-                    provider,
-                    encoder,
-                    memory_cache,
-                    disk_cache,
-                    executor,
-                    config,
-                    runtime_handle,
-                    self.metrics.clone(),
-                )
-            }
-        }
+        let control_plane = self
+            .control_plane
+            .as_ref()
+            .expect("DdsHandlerBuilder requires control_plane to be set via with_control_plane()");
+
+        tracing::info!(
+            description = description,
+            max_concurrent_jobs = control_plane.max_concurrent_jobs(),
+            "DDS handler with control plane"
+        );
+
+        create_dds_handler_with_control_plane(
+            Arc::clone(control_plane),
+            provider,
+            encoder,
+            memory_cache,
+            disk_cache,
+            executor,
+            config,
+            runtime_handle,
+            self.metrics.clone(),
+        )
     }
 }
 

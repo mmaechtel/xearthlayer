@@ -338,6 +338,15 @@ impl PipelineControlPlane {
         &self.registry
     }
 
+    /// Returns a reference to the request coalescer.
+    ///
+    /// The coalescer is used for:
+    /// - Preventing duplicate work for the same tile
+    /// - Notifying waiters when a tile completes or is cancelled
+    pub fn coalescer(&self) -> &Arc<RequestCoalescer> {
+        &self.coalescer
+    }
+
     /// Returns the configuration.
     pub fn config(&self) -> &ControlPlaneConfig {
         &self.config
@@ -517,6 +526,13 @@ impl PipelineControlPlane {
         F: FnOnce(Arc<dyn StageObserver>) -> Fut,
         Fut: Future<Output = Result<T, JobError>>,
     {
+        debug!(
+            job_id = %job_id,
+            tile = ?tile,
+            is_prefetch = is_prefetch,
+            "Control plane submit() called"
+        );
+
         // Step 1: Acquire job slot
         let permit = match self.acquire_job_slot(is_prefetch).await {
             Ok(permit) => permit,
@@ -536,6 +552,11 @@ impl PipelineControlPlane {
 
         // Step 2: Register job for tracking
         let _entry = self.register_job(job_id, tile, cancellation_token.clone(), is_prefetch);
+        debug!(
+            job_id = %job_id,
+            jobs_in_progress = self.health.jobs_in_progress(),
+            "Job registered with control plane"
+        );
 
         // Step 3: Create observer for stage updates
         let observer: Arc<dyn StageObserver> = self.create_observer();

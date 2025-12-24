@@ -72,9 +72,7 @@ pub use job::{Job, JobId, JobResult, Priority};
 pub use processor::{
     process_job, process_tile, process_tile_cancellable, process_tile_with_observer,
 };
-pub use runner::{
-    create_dds_handler, create_dds_handler_with_control_plane, create_dds_handler_with_metrics,
-};
+pub use runner::create_dds_handler_with_control_plane;
 pub use stages::{
     assembly_stage, cache_stage, download_stage, download_stage_cancellable,
     download_stage_with_limiter, encode_stage,
