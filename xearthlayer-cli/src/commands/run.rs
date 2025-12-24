@@ -362,6 +362,13 @@ fn run_with_dashboard(
         .map_err(|e| CliError::Config(format!("Failed to create dashboard: {}", e)))?
         .with_prefetch_status(prefetch_status);
 
+    // Wire in control plane health if available
+    if let Some(service) = mount_manager.get_service() {
+        let control_plane_health = service.control_plane_health();
+        let max_concurrent_jobs = service.max_concurrent_jobs();
+        dashboard = dashboard.with_control_plane(control_plane_health, max_concurrent_jobs);
+    }
+
     // Main event loop
     let tick_rate = std::time::Duration::from_millis(100);
     let mut last_tick = std::time::Instant::now();

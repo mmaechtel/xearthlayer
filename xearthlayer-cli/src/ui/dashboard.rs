@@ -21,11 +21,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
+use xearthlayer::pipeline::control_plane::{ControlPlaneHealth, HealthSnapshot};
 use xearthlayer::prefetch::{PrefetchStatusSnapshot, SharedPrefetchStatus};
 use xearthlayer::telemetry::TelemetrySnapshot;
 
 use super::widgets::{
-    CacheConfig, CacheWidget, ErrorsWidget, NetworkHistory, NetworkWidget, PipelineWidget,
+    CacheConfig, CacheWidget, ControlPlaneWidget, ErrorsWidget, NetworkHistory, NetworkWidget,
+    PipelineWidget,
 };
 
 /// Events that can occur in the dashboard.
@@ -62,6 +64,10 @@ pub struct Dashboard {
     last_draw: Instant,
     /// Optional prefetch status for display.
     prefetch_status: Option<Arc<SharedPrefetchStatus>>,
+    /// Optional control plane health for display.
+    control_plane_health: Option<Arc<ControlPlaneHealth>>,
+    /// Maximum concurrent jobs for the control plane display.
+    max_concurrent_jobs: usize,
 }
 
 impl Dashboard {
@@ -82,12 +88,25 @@ impl Dashboard {
             start_time: now,
             last_draw: now,
             prefetch_status: None,
+            control_plane_health: None,
+            max_concurrent_jobs: 0,
         })
     }
 
     /// Set the prefetch status source for display.
     pub fn with_prefetch_status(mut self, status: Arc<SharedPrefetchStatus>) -> Self {
         self.prefetch_status = Some(status);
+        self
+    }
+
+    /// Set the control plane health source for display.
+    pub fn with_control_plane(
+        mut self,
+        health: Arc<ControlPlaneHealth>,
+        max_concurrent_jobs: usize,
+    ) -> Self {
+        self.control_plane_health = Some(health);
+        self.max_concurrent_jobs = max_concurrent_jobs;
         self
     }
 
@@ -126,6 +145,10 @@ impl Dashboard {
             .map(|s| s.snapshot())
             .unwrap_or_default();
 
+        // Get control plane health if available
+        let control_plane_snapshot = self.control_plane_health.as_ref().map(|h| h.snapshot());
+        let max_concurrent_jobs = self.max_concurrent_jobs;
+
         self.terminal.draw(|frame| {
             Self::render_ui(
                 frame,
@@ -134,6 +157,8 @@ impl Dashboard {
                 uptime,
                 &cache_config,
                 &prefetch_snapshot,
+                control_plane_snapshot.as_ref(),
+                max_concurrent_jobs,
             );
         })?;
 
@@ -168,6 +193,7 @@ impl Dashboard {
     }
 
     /// Render the UI to the frame.
+    #[allow(clippy::too_many_arguments)]
     fn render_ui(
         frame: &mut Frame,
         snapshot: &TelemetrySnapshot,
@@ -175,16 +201,19 @@ impl Dashboard {
         uptime: Duration,
         cache_config: &CacheConfig,
         prefetch_snapshot: &PrefetchStatusSnapshot,
+        control_plane_snapshot: Option<&HealthSnapshot>,
+        max_concurrent_jobs: usize,
     ) {
         let size = frame.area();
 
-        // Main layout: header, prefetch, pipeline, network, cache, errors
+        // Main layout: header, prefetch, control plane, pipeline, network, cache, errors
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
             .constraints([
                 Constraint::Length(3), // Header
                 Constraint::Length(4), // Prefetch / Aircraft
+                Constraint::Length(4), // Control Plane
                 Constraint::Length(6), // Pipeline
                 Constraint::Length(3), // Network
                 Constraint::Length(6), // Cache
@@ -199,28 +228,36 @@ impl Dashboard {
         // Prefetch/Aircraft widget
         Self::render_prefetch(frame, chunks[1], prefetch_snapshot);
 
+        // Control plane widget
+        Self::render_control_plane(
+            frame,
+            chunks[2],
+            control_plane_snapshot,
+            max_concurrent_jobs,
+        );
+
         // Pipeline widget
         let pipeline_block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
             .border_style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(pipeline_block, chunks[2]);
-        let pipeline_inner = Self::inner_rect(chunks[2], 1, 1);
+        frame.render_widget(pipeline_block, chunks[3]);
+        let pipeline_inner = Self::inner_rect(chunks[3], 1, 1);
         frame.render_widget(PipelineWidget::new(snapshot), pipeline_inner);
 
         // Network widget
         let network_block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
             .border_style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(network_block, chunks[3]);
-        let network_inner = Self::inner_rect(chunks[3], 1, 1);
+        frame.render_widget(network_block, chunks[4]);
+        let network_inner = Self::inner_rect(chunks[4], 1, 1);
         frame.render_widget(NetworkWidget::new(snapshot, network_history), network_inner);
 
         // Cache widget
         let cache_block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
             .border_style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(cache_block, chunks[4]);
-        let cache_inner = Self::inner_rect(chunks[4], 1, 1);
+        frame.render_widget(cache_block, chunks[5]);
+        let cache_inner = Self::inner_rect(chunks[5], 1, 1);
         frame.render_widget(
             CacheWidget::new(snapshot).with_config(cache_config.clone()),
             cache_inner,
@@ -230,9 +267,43 @@ impl Dashboard {
         let errors_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(errors_block, chunks[5]);
-        let errors_inner = Self::inner_rect(chunks[5], 1, 1);
+        frame.render_widget(errors_block, chunks[6]);
+        let errors_inner = Self::inner_rect(chunks[6], 1, 1);
         frame.render_widget(ErrorsWidget::new(snapshot), errors_inner);
+    }
+
+    /// Render the control plane status section.
+    fn render_control_plane(
+        frame: &mut Frame,
+        area: Rect,
+        snapshot: Option<&HealthSnapshot>,
+        max_concurrent_jobs: usize,
+    ) {
+        let control_plane_block = Block::default()
+            .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                " Control Plane ",
+                Style::default().fg(Color::Blue),
+            ));
+
+        frame.render_widget(control_plane_block, area);
+        let inner = Self::inner_rect(area, 1, 1);
+
+        if let Some(health_snapshot) = snapshot {
+            frame.render_widget(
+                ControlPlaneWidget::new(health_snapshot, max_concurrent_jobs),
+                inner,
+            );
+        } else {
+            // No control plane configured - show placeholder
+            let text = vec![Line::from(vec![Span::styled(
+                "Control plane not configured",
+                Style::default().fg(Color::DarkGray),
+            )])];
+            let paragraph = Paragraph::new(text);
+            frame.render_widget(paragraph, inner);
+        }
     }
 
     /// Render the prefetch/aircraft status section.
