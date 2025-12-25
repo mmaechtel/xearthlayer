@@ -196,7 +196,7 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
                     }
 
                     // Run a prefetch cycle
-                    self.prefetch_cycle(&state);
+                    self.prefetch_cycle(&state).await;
                     last_cycle = Instant::now();
                 }
             }
@@ -204,7 +204,7 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
     }
 
     /// Run a single prefetch cycle for the given aircraft state.
-    fn prefetch_cycle(&mut self, state: &AircraftState) {
+    async fn prefetch_cycle(&mut self, state: &AircraftState) {
         self.stats.cycles.fetch_add(1, Ordering::Relaxed);
 
         // Convert position to tile coordinates
@@ -247,6 +247,7 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
             if self
                 .memory_cache
                 .get(tile.row, tile.col, tile.zoom)
+                .await
                 .is_some()
             {
                 cache_hits += 1;
@@ -395,7 +396,7 @@ impl<M: MemoryCache + 'static> Prefetcher for RadialPrefetcher<M> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
     /// Mock memory cache for testing.
     struct MockMemoryCache {
@@ -410,29 +411,32 @@ mod tests {
         }
 
         fn with_cached(self, row: u32, col: u32, zoom: u8) -> Self {
-            self.data
-                .lock()
-                .unwrap()
-                .insert((row, col, zoom), vec![0xDD, 0x53]);
+            // Use blocking lock since this is called from sync context in tests
+            futures::executor::block_on(async {
+                self.data
+                    .lock()
+                    .await
+                    .insert((row, col, zoom), vec![0xDD, 0x53]);
+            });
             self
         }
     }
 
     impl MemoryCache for MockMemoryCache {
-        fn get(&self, row: u32, col: u32, zoom: u8) -> Option<Vec<u8>> {
-            self.data.lock().unwrap().get(&(row, col, zoom)).cloned()
+        async fn get(&self, row: u32, col: u32, zoom: u8) -> Option<Vec<u8>> {
+            self.data.lock().await.get(&(row, col, zoom)).cloned()
         }
 
-        fn put(&self, row: u32, col: u32, zoom: u8, data: Vec<u8>) {
-            self.data.lock().unwrap().insert((row, col, zoom), data);
+        async fn put(&self, row: u32, col: u32, zoom: u8, data: Vec<u8>) {
+            self.data.lock().await.insert((row, col, zoom), data);
         }
 
         fn size_bytes(&self) -> usize {
-            self.data.lock().unwrap().values().map(|v| v.len()).sum()
+            0
         }
 
         fn entry_count(&self) -> usize {
-            self.data.lock().unwrap().len()
+            0
         }
     }
 
@@ -529,7 +533,7 @@ mod tests {
             zoom: 14,
         });
 
-        prefetcher.prefetch_cycle(&state);
+        prefetcher.prefetch_cycle(&state).await;
 
         // Should have submitted less than 9 requests (center tile was cached)
         let submitted = call_count.load(std::sync::atomic::Ordering::SeqCst);
@@ -558,12 +562,12 @@ mod tests {
             col: 0,
             zoom: 14,
         });
-        prefetcher.prefetch_cycle(&state);
+        prefetcher.prefetch_cycle(&state).await;
         let first_count = call_count.load(std::sync::atomic::Ordering::SeqCst);
         assert!(first_count > 0);
 
         // Second cycle at same position - should skip (no tile movement)
-        prefetcher.prefetch_cycle(&state);
+        prefetcher.prefetch_cycle(&state).await;
         let second_count = call_count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             first_count, second_count,
@@ -578,7 +582,7 @@ mod tests {
         });
 
         // Third cycle - tiles should be TTL-skipped (same tiles, recently attempted)
-        prefetcher.prefetch_cycle(&state);
+        prefetcher.prefetch_cycle(&state).await;
         let ttl_skipped = prefetcher.stats.ttl_skipped.load(Ordering::Relaxed);
         assert!(ttl_skipped > 0, "Should have TTL-skipped some tiles");
     }
