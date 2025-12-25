@@ -248,13 +248,36 @@ impl std::error::Error for TextureEncodeError {}
 /// Trait for memory cache (tile-level).
 ///
 /// Memory cache stores complete DDS tiles for fast repeated access.
-/// Operations are synchronous since memory access is fast.
+/// Operations are async to support non-blocking cache implementations
+/// that are safe to use from async contexts.
+///
+/// # Important
+///
+/// Implementations MUST be async-safe and not block the calling thread.
+/// Using `std::sync::Mutex` or other blocking primitives in async code
+/// can cause deadlocks by starving the Tokio runtime.
 pub trait MemoryCache: Send + Sync + 'static {
     /// Gets a tile from the cache.
-    fn get(&self, row: u32, col: u32, zoom: u8) -> Option<Vec<u8>>;
+    ///
+    /// Returns `Some(data)` if the tile is cached, `None` otherwise.
+    fn get(
+        &self,
+        row: u32,
+        col: u32,
+        zoom: u8,
+    ) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send;
 
     /// Stores a tile in the cache.
-    fn put(&self, row: u32, col: u32, zoom: u8, data: Vec<u8>);
+    ///
+    /// Eviction of old entries happens automatically based on the
+    /// cache's eviction policy.
+    fn put(
+        &self,
+        row: u32,
+        col: u32,
+        zoom: u8,
+        data: Vec<u8>,
+    ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Returns current cache size in bytes.
     fn size_bytes(&self) -> usize;

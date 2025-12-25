@@ -65,7 +65,8 @@ where
     let tile = job.tile_coords;
 
     // Stage 0: Check memory cache
-    if let Some(cached_data) = check_memory_cache(tile, ctx.memory_cache.as_ref(), metrics.as_ref())
+    if let Some(cached_data) =
+        check_memory_cache(tile, ctx.memory_cache.as_ref(), metrics.as_ref()).await
     {
         debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
@@ -190,7 +191,9 @@ where
     let start = Instant::now();
 
     // Stage 0: Check memory cache
-    if let Some(cached_data) = check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()) {
+    if let Some(cached_data) =
+        check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()).await
+    {
         debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
     }
@@ -303,7 +306,9 @@ where
     }
 
     // Stage 0: Check memory cache
-    if let Some(cached_data) = check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()) {
+    if let Some(cached_data) =
+        check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()).await
+    {
         debug!(job_id = %job_id, "Memory cache hit");
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
     }
@@ -476,7 +481,9 @@ where
     }
 
     // Stage 0: Check memory cache
-    if let Some(cached_data) = check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()) {
+    if let Some(cached_data) =
+        check_memory_cache(tile, memory_cache.as_ref(), metrics.as_ref()).await
+    {
         debug!(job_id = %job_id, "Memory cache hit");
         emit_stage(JobStage::Completed);
         return Ok(JobResult::cache_hit(job_id, cached_data, start.elapsed()));
@@ -586,7 +593,7 @@ mod tests {
     use super::*;
     use crate::pipeline::{ChunkDownloadError, TextureEncodeError, TokioExecutor};
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
     // Mock implementations for testing
 
@@ -651,18 +658,21 @@ mod tests {
         }
 
         fn with_cached(self, row: u32, col: u32, zoom: u8, data: Vec<u8>) -> Self {
-            self.data.lock().unwrap().insert((row, col, zoom), data);
+            // Use blocking lock since this is called from sync context in tests
+            futures::executor::block_on(async {
+                self.data.lock().await.insert((row, col, zoom), data);
+            });
             self
         }
     }
 
     impl MemoryCache for MockMemoryCache {
-        fn get(&self, row: u32, col: u32, zoom: u8) -> Option<Vec<u8>> {
-            self.data.lock().unwrap().get(&(row, col, zoom)).cloned()
+        async fn get(&self, row: u32, col: u32, zoom: u8) -> Option<Vec<u8>> {
+            self.data.lock().await.get(&(row, col, zoom)).cloned()
         }
 
-        fn put(&self, row: u32, col: u32, zoom: u8, data: Vec<u8>) {
-            self.data.lock().unwrap().insert((row, col, zoom), data);
+        async fn put(&self, row: u32, col: u32, zoom: u8, data: Vec<u8>) {
+            self.data.lock().await.insert((row, col, zoom), data);
         }
 
         fn size_bytes(&self) -> usize {
@@ -670,7 +680,8 @@ mod tests {
         }
 
         fn entry_count(&self) -> usize {
-            self.data.lock().unwrap().len()
+            // Return 0 for simplicity in tests
+            0
         }
     }
 
@@ -866,7 +877,7 @@ mod tests {
         .await;
 
         // Verify it's now in cache
-        let cached = memory_cache.get(100, 200, 16);
+        let cached = memory_cache.get(100, 200, 16).await;
         assert!(cached.is_some());
     }
 
@@ -912,7 +923,7 @@ mod tests {
         assert_eq!(job_result.failed_chunks, 256);
 
         // But tile should NOT be in cache (we don't cache tiles with failures)
-        let cached = memory_cache.get(100, 200, 16);
+        let cached = memory_cache.get(100, 200, 16).await;
         assert!(
             cached.is_none(),
             "Tiles with failed chunks should not be cached"
