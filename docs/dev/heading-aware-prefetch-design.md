@@ -1,7 +1,7 @@
 # Heading-Aware Prefetch Design
 
 ## Status: Draft
-**Author**: Claude Code
+**Author**: Sam de Freyssinet & Claude Code
 **Date**: 2025-12-25
 **Related**: `docs/dev/predictive-caching.md`
 
@@ -136,7 +136,7 @@ The 698 new zoom 14 tiles formed a distinctive pattern:
                   ╱   NEW TILES     ╲
                  ╱    (698 z14)      ╲  ← Elongated forward cone
                 ╱                     ╲
-               ├───────────────────────┤
+              ├─────────────────────────┤
               │                         │
               │   STARTUP TILES         │ ← 90nm base layer
               │   (411 z14 + 2256 z12)  │
@@ -189,6 +189,72 @@ At cruise speeds:
 | Lookahead | ~10-15nm ahead of aircraft | ~4 nm symmetric | **+6-11 nm forward** |
 | Tiles/cycle | ~28 Z14 tiles/nm traveled | 49 tiles (many wasted) | **Efficiency** |
 
+### 2.10 Recently-Cached Tile Exclusion (Inner Radius)
+
+As the aircraft flies, X-Plane continuously requests tiles via FUSE to fill its
+~90nm viewing range (see §2.1-2.3). Tiles immediately around the aircraft have
+typically **already been requested and cached**. Prefetching these tiles is
+redundant - they're already in our cache from recent FUSE requests.
+
+**Tile Request Flow:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  RECENTLY-CACHED ZONE (tiles X-Plane has already requested)                 │
+│  ──────────────────────────────────────────────────────────                 │
+│  • Tiles behind and immediately around the aircraft                         │
+│  • Already fetched via FUSE requests → in our cache                         │
+│  • Prefetching here is REDUNDANT (cache hit anyway)                         │
+│  • Configured via `inner_radius_nm` (default: 3.0nm)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PREFETCH TARGET ZONE (ahead of aircraft, not yet requested)                │
+│  ───────────────────────────────────────────────────────────                │
+│  • Tiles X-Plane will request as aircraft moves forward                     │
+│  • NOT yet in cache → this is where stutter occurs                          │
+│  • Our prefetch should populate cache HERE before X-Plane asks              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Note:** X-Plane maintains a ~90nm radius of loaded ZL14 tiles around the aircraft.
+Our prefetch zone targets the ring *around* this boundary—prefetching tiles just
+before X-Plane needs them and extending beyond where it currently loads.
+
+**Solution: Annular Cone (Ring-Shaped Prefetch Zone)**
+
+Instead of a solid cone from the aircraft, we use an **annular cone** that wraps
+around X-Plane's 90nm loaded zone boundary:
+
+```
+      ┌───────────────────────────────────────────────────────┐
+       ╲                                                     ╱
+        ╲              PREFETCH ZONE                        ╱
+         ╲       (inner_radius_nm → outer_radius_nm)       ╱
+          ╲           85nm ────────── 105nm               ╱
+           ╲─────────────────────────────────────────────╱
+            ╲                                           ╱
+             ╲───────── X-Plane 90nm boundary ─────────╱
+              │                                       │
+              │      X-PLANE'S LOADED ZONE            │
+              │      (0 → 90nm from aircraft)         │
+              │      ← X-Plane handles these          │
+              │                                       │
+              └─────────────────✈─────────────────────┘
+                             aircraft
+```
+
+**Key Parameters:**
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `XPLANE_LOADED_ZONE_NM` | 90.0 nm | X-Plane's loaded tile radius (constant) |
+| `inner_radius_nm` | 85.0 nm | Where prefetch zone STARTS (90nm - 5nm margin) |
+| `outer_radius_nm` | 105.0 nm | Where prefetch zone ENDS (90nm + 15nm buffer) |
+
+**Prefetch Zone:**
+- **Inner boundary (85nm):** Start prefetching 5nm *inside* X-Plane's 90nm edge to ensure tiles are ready before X-Plane reaches them
+- **Outer boundary (105nm):** Extend 15nm *beyond* X-Plane's current loaded zone for sustained flight
+- **Zone width:** 20nm ring around the 90nm boundary
+
 ---
 
 ## 3. Proposed Solution: Heading-Weighted Lookahead Prefetch
@@ -228,6 +294,20 @@ Replace the symmetric radial grid with a **directional cone** that prioritizes t
 
 ```rust
 pub struct HeadingAwarePrefetchConfig {
+    // === Annular Cone (Inner Exclusion Zone) ===
+
+    /// Inner radius in nautical miles - tiles closer than this are masked.
+    /// X-Plane's active loading zone handles tiles within this radius.
+    /// (default: 3.0 nm)
+    pub inner_radius_nm: f32,
+
+    /// Overlap margin in nautical miles - safety buffer at the inner boundary.
+    /// Prefetch starts at (inner_radius_nm - overlap_margin_nm) to handle
+    /// edge cases like cache eviction or network delays. (default: 1.0 nm)
+    pub overlap_margin_nm: f32,
+
+    // === Cone Geometry ===
+
     /// Cone half-angle in degrees (default: 30° = 60° total cone)
     pub cone_half_angle: f32,
 
@@ -240,13 +320,23 @@ pub struct HeadingAwarePrefetchConfig {
     /// Lookahead time in seconds - distance = speed × time (default: 60)
     pub lookahead_time_secs: f32,
 
-    /// Tiles to keep behind aircraft for turn recovery (default: 2)
+    // === Buffers ===
+
+    /// Tiles to keep behind aircraft for turn recovery (default: 3)
     pub rear_buffer_tiles: u8,
+
+    /// Angle for lateral buffers in degrees from cone edge (default: 45.0)
+    pub lateral_buffer_angle: f32,
+
+    /// Depth of lateral buffer in tiles (default: 3)
+    pub lateral_buffer_depth: u8,
+
+    // === General ===
 
     /// Zoom level for prefetch (default: 14, matching DDS tiles)
     pub zoom: u8,
 
-    /// Maximum tiles per prefetch cycle (default: 64)
+    /// Maximum tiles per prefetch cycle (default: 100)
     pub max_tiles_per_cycle: usize,
 
     /// TTL for failed tile attempts (default: 60s)
@@ -256,16 +346,38 @@ pub struct HeadingAwarePrefetchConfig {
 impl Default for HeadingAwarePrefetchConfig {
     fn default() -> Self {
         Self {
+            // Annular cone
+            inner_radius_nm: 3.0,
+            overlap_margin_nm: 1.0,
+            // Cone geometry
             cone_half_angle: 30.0,
             min_lookahead_nm: 5.0,
             max_lookahead_nm: 15.0,
             lookahead_time_secs: 60.0,
-            rear_buffer_tiles: 2,
+            // Buffers
+            rear_buffer_tiles: 3,
+            lateral_buffer_angle: 45.0,
+            lateral_buffer_depth: 3,
+            // General
             zoom: 14,
-            max_tiles_per_cycle: 64,
+            max_tiles_per_cycle: 100,
             attempt_ttl: Duration::from_secs(60),
         }
     }
+}
+```
+
+**Effective Prefetch Zone Calculation:**
+
+```rust
+fn effective_inner_radius(&self) -> f32 {
+    // Start prefetching slightly inside the inner radius for safety margin
+    (self.inner_radius_nm - self.overlap_margin_nm).max(0.0)
+}
+
+fn should_prefetch_tile(&self, distance_nm: f32) -> bool {
+    let effective_inner = self.effective_inner_radius();
+    distance_nm >= effective_inner && distance_nm <= self.max_lookahead_nm
 }
 ```
 
@@ -758,10 +870,10 @@ impl Filesystem for Fuse3PassthroughFS {
                                     │                        │
                     ┌───────────────┼───────────────┐        │
                     ▼               ▼               ▼        │
-              ┌──────────┐   ┌──────────┐   ┌──────────┐    │
-              │  Cache   │   │ Download │   │   Skip   │    │
-              │   Hit    │   │ Request  │   │  (TTL)   │    │
-              └────┬─────┘   └────┬─────┘   └────┬─────┘    │
+              ┌──────────┐    ┌──────────┐    ┌──────────┐   │
+              │  Cache   │    │ Download │    │   Skip   │   │
+              │   Hit    │    │ Request  │    │  (TTL)   │   │
+              └────┬─────┘    └────┬─────┘    └────┬─────┘   │
                    │               │               │         │
                    └───────────────┴───────────────┘         │
                                    │                         │
