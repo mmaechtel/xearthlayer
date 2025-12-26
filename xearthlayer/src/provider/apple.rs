@@ -31,9 +31,13 @@
 use crate::provider::{AsyncHttpClient, AsyncProvider, HttpClient, Provider, ProviderError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{error, info, warn};
+
+/// Timeout for acquiring the refresh lock.
+/// Prevents indefinite blocking if token refresh hangs.
+const REFRESH_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// DuckDuckGo endpoint for obtaining the initial bearer token.
 const DUCKDUCKGO_TOKEN_URL: &str = "https://duckduckgo.com/local.js?get_mk_token=1";
@@ -198,7 +202,14 @@ impl AppleTokenManager {
         }
     }
 
-    /// Clear credentials to force a refresh.
+    /// Clear credentials (test only).
+    ///
+    /// Note: This method is intentionally NOT used in production refresh logic.
+    /// Clearing credentials before fetching new ones creates a race condition
+    /// where concurrent requests fail with "credentials not available".
+    /// The correct pattern is to atomically swap to new credentials using
+    /// `set_credentials()` without clearing first.
+    #[cfg(test)]
     fn clear_credentials(&self) {
         if let Ok(mut creds) = self.credentials.write() {
             *creds = None;
@@ -394,8 +405,14 @@ impl<C: HttpClient + Clone> AppleMapsProvider<C> {
     }
 
     /// Refresh credentials after an authentication failure.
+    ///
+    /// Fetches new credentials and atomically swaps them into the token manager.
+    /// Old credentials remain available during the fetch to avoid race conditions
+    /// with concurrent requests.
     fn refresh_credentials(&self) -> Result<(), ProviderError> {
-        self.token_manager.clear_credentials();
+        // Note: We intentionally do NOT clear credentials before fetching.
+        // Clearing creates a window where concurrent requests would fail.
+        // Instead, set_credentials() atomically swaps to new credentials.
         let credentials = fetch_credentials_sync(&self.http_client)?;
         self.token_manager
             .set_credentials(credentials.access_key, credentials.version);
@@ -495,12 +512,34 @@ impl<C: AsyncHttpClient + Clone> AsyncAppleMapsProvider<C> {
     /// Uses a lock to ensure only one refresh happens at a time.
     /// The `failed_generation` parameter is the generation when the failure occurred;
     /// if the current generation is different, another request already refreshed the token.
+    ///
+    /// Includes a timeout on lock acquisition to prevent indefinite blocking
+    /// if the refresh process hangs.
     async fn refresh_credentials_if_needed(
         &self,
         failed_generation: u64,
     ) -> Result<(), ProviderError> {
-        // Acquire the refresh lock to serialize refresh attempts
-        let _lock = self.refresh_lock.lock().await;
+        // Acquire the refresh lock with timeout to prevent deadlock
+        let lock_result =
+            tokio::time::timeout(REFRESH_LOCK_TIMEOUT, self.refresh_lock.lock()).await;
+
+        let _lock = match lock_result {
+            Ok(guard) => guard,
+            Err(_) => {
+                // Timeout waiting for lock - another refresh is taking too long
+                // Check if credentials were refreshed anyway (generation changed)
+                let current_generation = self.token_manager.get_generation();
+                if current_generation != failed_generation {
+                    // Token was refreshed by another request, we can proceed
+                    return Ok(());
+                }
+                // Still stale - return error to trigger retry with existing credentials
+                warn!("Timeout waiting for Apple Maps token refresh lock");
+                return Err(ProviderError::ProviderSpecific(
+                    "Token refresh lock timeout".to_string(),
+                ));
+            }
+        };
 
         // Check if another request already refreshed the token while we were waiting
         let current_generation = self.token_manager.get_generation();
@@ -510,7 +549,10 @@ impl<C: AsyncHttpClient + Clone> AsyncAppleMapsProvider<C> {
         }
 
         warn!("Apple Maps token expired - attempting refresh");
-        self.token_manager.clear_credentials();
+        // Note: We intentionally do NOT clear credentials before fetching.
+        // Clearing creates a window where concurrent requests would fail with
+        // "credentials not available". Instead, set_credentials() atomically
+        // swaps to new credentials.
 
         match fetch_credentials_async(&self.http_client).await {
             Ok(credentials) => {

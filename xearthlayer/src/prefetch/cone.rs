@@ -262,6 +262,145 @@ impl ConeGenerator {
     pub fn zoom(&self) -> u8 {
         self.config.zoom
     }
+
+    /// Generate tiles for a specific zoom level with custom zone boundaries.
+    ///
+    /// This is used for multi-zoom prefetching where different zoom levels
+    /// have different prefetch zones (e.g., ZL12 tiles at 88-100nm, ZL14 at 85-95nm).
+    ///
+    /// # Arguments
+    ///
+    /// * `position` - Aircraft position as (latitude, longitude)
+    /// * `heading` - Aircraft true heading in degrees
+    /// * `turn_state` - Current turn state (may widen the cone)
+    /// * `zoom` - Zoom level to generate tiles for
+    /// * `inner_radius_nm` - Inner radius of the prefetch zone
+    /// * `outer_radius_nm` - Outer radius of the prefetch zone
+    /// * `priority_offset` - Offset to add to priorities (for prioritizing between zoom levels)
+    ///
+    /// # Returns
+    ///
+    /// Vector of tiles with priority scores (priority_offset added to all priorities).
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_cone_tiles_for_zoom(
+        &self,
+        position: (f64, f64),
+        heading: f32,
+        turn_state: &TurnState,
+        zoom: u8,
+        inner_radius_nm: f32,
+        outer_radius_nm: f32,
+        priority_offset: u32,
+    ) -> Vec<PrefetchTile> {
+        // Determine effective cone half-angle (may be widened during turns)
+        let effective_half_angle = self.effective_half_angle(turn_state);
+
+        // Generate tiles by filling the annular cone area
+        let tiles = self.fill_annular_cone_with_zoom(
+            position,
+            heading,
+            inner_radius_nm,
+            outer_radius_nm,
+            effective_half_angle,
+            zoom,
+        );
+
+        // Convert to PrefetchTiles with priority, filtering by distance
+        let mut prefetch_tiles: Vec<PrefetchTile> = tiles
+            .into_iter()
+            .filter_map(|coord| {
+                let distance = distance_to_tile(position, &coord);
+                // Check distance is within the specified prefetch zone
+                if distance >= inner_radius_nm && distance <= outer_radius_nm {
+                    let (priority, zone) = self.calculate_priority_and_zone(
+                        position,
+                        heading,
+                        effective_half_angle,
+                        &coord,
+                    );
+                    Some(PrefetchTile::new(coord, priority + priority_offset, zone))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by priority (lower = higher priority)
+        prefetch_tiles.sort_by_key(|t| t.priority);
+
+        prefetch_tiles
+    }
+
+    /// Fill the annular cone with tiles at a specific zoom level.
+    ///
+    /// Like `fill_annular_cone` but accepts zoom as a parameter.
+    fn fill_annular_cone_with_zoom(
+        &self,
+        position: (f64, f64),
+        heading: f32,
+        inner_radius_nm: f32,
+        outer_radius_nm: f32,
+        half_angle: f32,
+        zoom: u8,
+    ) -> Vec<TileCoord> {
+        let mut tiles = HashSet::new();
+
+        // Number of rays across the cone (more rays = denser fill)
+        // Use at least 5 rays, more for wider cones
+        let num_rays = (half_angle / 5.0).ceil() as i32 * 2 + 1;
+        let num_rays = num_rays.max(5) as usize;
+
+        // Generate rays from -half_angle to +half_angle
+        for i in 0..num_rays {
+            let t = i as f32 / (num_rays - 1) as f32; // 0.0 to 1.0
+            let ray_angle = heading - half_angle + (2.0 * half_angle * t);
+            let normalized_angle = normalize_heading(ray_angle);
+
+            // Get tiles along this ray, starting from inner radius
+            let ray_tiles = tiles_along_ray_bounded(
+                position,
+                normalized_angle,
+                inner_radius_nm,
+                outer_radius_nm,
+                zoom,
+            );
+            for tile in ray_tiles {
+                tiles.insert((tile.row, tile.col, tile.zoom));
+            }
+        }
+
+        // Also fill intermediate areas by sampling at different distances
+        // This helps fill any gaps between rays
+        let tile_size_nm = super::coordinates::tile_size_nm_at_lat(position.0, zoom) as f32;
+        let effective_depth = outer_radius_nm - inner_radius_nm;
+        let num_distance_samples = (effective_depth / tile_size_nm).ceil() as usize;
+
+        for d in 0..=num_distance_samples {
+            let distance = inner_radius_nm + (d as f32 * tile_size_nm);
+            if distance > outer_radius_nm {
+                break;
+            }
+
+            // Sample across the cone at this distance
+            let arc_samples = ((2.0 * half_angle * distance / tile_size_nm) as usize).max(3);
+            for a in 0..arc_samples {
+                let t = a as f32 / (arc_samples - 1).max(1) as f32;
+                let angle = heading - half_angle + (2.0 * half_angle * t);
+                let normalized_angle = normalize_heading(angle);
+
+                let (lat, lon) = project_position(position, normalized_angle, distance);
+                if let Some(tile) = position_to_tile(lat, lon, zoom) {
+                    tiles.insert((tile.row, tile.col, tile.zoom));
+                }
+            }
+        }
+
+        // Convert back to TileCoords
+        tiles
+            .into_iter()
+            .map(|(row, col, zoom)| TileCoord { row, col, zoom })
+            .collect()
+    }
 }
 
 #[cfg(test)]

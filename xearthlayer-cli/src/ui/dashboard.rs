@@ -570,13 +570,71 @@ impl Dashboard {
             PrefetchMode::Idle => Color::DarkGray,
         };
 
-        let prefetch_line = Line::from(vec![
-            Span::styled("Prefetch:   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{}", prefetch.prefetch_mode),
-                Style::default().fg(mode_color),
-            ),
-        ]);
+        // Build the prefetch line with detailed stats if available
+        let prefetch_line = if let Some(ref stats) = prefetch.detailed_stats {
+            // Format: "Prefetch: Mode | 45/cycle | Cache: 120↑ TTL: 5⊘ | ZL14"
+            let activity_indicator = if stats.is_active { "●" } else { "○" };
+            let activity_color = if stats.is_active {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
+
+            // Format zoom levels
+            let zoom_str = if stats.active_zoom_levels.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "ZL{}",
+                    stats
+                        .active_zoom_levels
+                        .iter()
+                        .map(|z| z.to_string())
+                        .collect::<Vec<_>>()
+                        .join("+")
+                )
+            };
+
+            Line::from(vec![
+                Span::styled("Prefetch:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} ", activity_indicator),
+                    Style::default().fg(activity_color),
+                ),
+                Span::styled(
+                    format!("{}", prefetch.prefetch_mode),
+                    Style::default().fg(mode_color),
+                ),
+                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}/cyc", stats.tiles_submitted_last_cycle),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("↑", Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("{}", stats.cache_hits),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(" ", Style::default()),
+                Span::styled("⊘", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{}", stats.ttl_skipped),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(zoom_str, Style::default().fg(Color::Cyan)),
+            ])
+        } else {
+            // Fallback to simple display when no detailed stats
+            Line::from(vec![
+                Span::styled("Prefetch:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}", prefetch.prefetch_mode),
+                    Style::default().fg(mode_color),
+                ),
+            ])
+        };
 
         let text = vec![gps_line, position_line, prefetch_line];
         let paragraph = Paragraph::new(text);

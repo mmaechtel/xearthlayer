@@ -41,6 +41,28 @@ pub enum PrefetchMode {
     Idle,
 }
 
+/// Detailed prefetch statistics for dashboard display.
+///
+/// Provides real-time visibility into prefetch activity beyond the basic
+/// mode indicator, allowing users to diagnose performance issues.
+#[derive(Debug, Clone, Default)]
+pub struct DetailedPrefetchStats {
+    /// Total prefetch cycles completed.
+    pub cycles: u64,
+    /// Tiles submitted in the most recent cycle.
+    pub tiles_submitted_last_cycle: u64,
+    /// Total tiles submitted across all cycles.
+    pub tiles_submitted_total: u64,
+    /// Tiles skipped because they were already in cache.
+    pub cache_hits: u64,
+    /// Tiles skipped due to TTL (recently attempted).
+    pub ttl_skipped: u64,
+    /// Zoom levels active in the most recent cycle.
+    pub active_zoom_levels: Vec<u8>,
+    /// Whether the prefetcher is actively submitting tiles.
+    pub is_active: bool,
+}
+
 impl std::fmt::Display for PrefetchMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -107,6 +129,16 @@ impl SharedPrefetchStatus {
         }
     }
 
+    /// Update the detailed prefetch statistics.
+    ///
+    /// Called by the prefetcher after each cycle to provide real-time
+    /// visibility into prefetch activity.
+    pub fn update_detailed_stats(&self, stats: DetailedPrefetchStats) {
+        if let Ok(mut inner) = self.inner.write() {
+            inner.detailed_stats = Some(stats);
+        }
+    }
+
     /// Get a snapshot of the current status.
     pub fn snapshot(&self) -> PrefetchStatusSnapshot {
         self.inner.read().map(|r| r.clone()).unwrap_or_default()
@@ -124,6 +156,8 @@ pub struct PrefetchStatusSnapshot {
     pub gps_status: GpsStatus,
     /// Current prefetch operating mode.
     pub prefetch_mode: PrefetchMode,
+    /// Detailed prefetch statistics for dashboard display.
+    pub detailed_stats: Option<DetailedPrefetchStats>,
 }
 
 /// Aircraft state snapshot for display (without Instant which can't be cloned easily).

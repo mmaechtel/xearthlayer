@@ -290,8 +290,14 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                     .strategy(&config.prefetch.strategy)
                     .shared_status(Arc::clone(&shared_prefetch_status))
                     .cone_half_angle(config.prefetch.cone_angle)
-                    .outer_radius_nm(config.prefetch.cone_distance_nm)
-                    .radial_radius(config.prefetch.radial_radius);
+                    .inner_radius_nm(config.prefetch.inner_radius_nm)
+                    .outer_radius_nm(config.prefetch.outer_radius_nm)
+                    .max_tiles_per_cycle(config.prefetch.max_tiles_per_cycle)
+                    .cycle_interval_ms(config.prefetch.cycle_interval_ms)
+                    .radial_radius(config.prefetch.radial_radius)
+                    .enable_zl12(config.prefetch.enable_zl12)
+                    .zl12_inner_radius_nm(config.prefetch.zl12_inner_radius_nm)
+                    .zl12_outer_radius_nm(config.prefetch.zl12_outer_radius_nm);
 
                 // Wire FUSE analyzer for heading-aware/auto strategies
                 // This enables FUSE-based position inference when telemetry is unavailable

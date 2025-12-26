@@ -63,7 +63,9 @@ use super::buffer::BufferGenerator;
 use super::cone::ConeGenerator;
 use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
 use super::inference::FuseRequestAnalyzer;
-use super::state::{AircraftState, GpsStatus, PrefetchMode, SharedPrefetchStatus};
+use super::state::{
+    AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode, SharedPrefetchStatus,
+};
 use super::strategy::Prefetcher;
 use super::types::{PrefetchTile, PrefetchZone, TurnDirection, TurnState};
 
@@ -163,6 +165,17 @@ pub struct HeadingAwarePrefetchStatsSnapshot {
 
 /// Timeout for prefetch requests.
 const PREFETCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Results from a single prefetch cycle.
+#[derive(Debug, Clone, Default)]
+struct CycleResults {
+    /// Tiles submitted to the pipeline.
+    submitted: u64,
+    /// Tiles skipped because they were already in cache.
+    cache_hits: u64,
+    /// Tiles skipped due to TTL (recently attempted).
+    ttl_skipped: u64,
+}
 
 /// Unified heading-aware prefetcher with graceful degradation.
 ///
@@ -355,16 +368,30 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
 
         if tiles.is_empty() {
             trace!(mode = %mode, "No tiles to prefetch this cycle");
+            // Still report stats even when idle
+            if let Some(ref status) = self.shared_status {
+                status.update_detailed_stats(DetailedPrefetchStats {
+                    cycles: self.stats.cycles.load(Ordering::Relaxed),
+                    tiles_submitted_last_cycle: 0,
+                    tiles_submitted_total: self.stats.tiles_submitted.load(Ordering::Relaxed),
+                    cache_hits: self.stats.cache_hits.load(Ordering::Relaxed),
+                    ttl_skipped: self.stats.ttl_skipped.load(Ordering::Relaxed),
+                    active_zoom_levels: self.active_zoom_levels(),
+                    is_active: false,
+                });
+            }
             return;
         }
 
         // Submit tiles
-        let submitted = self.submit_tiles(&tiles).await;
+        let cycle_results = self.submit_tiles(&tiles).await;
 
         debug!(
             mode = %mode,
             generated = tiles.len(),
-            submitted,
+            submitted = cycle_results.submitted,
+            cache_hits = cycle_results.cache_hits,
+            ttl_skipped = cycle_results.ttl_skipped,
             "Prefetch cycle complete"
         );
 
@@ -372,7 +399,7 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         if let Some(ref status) = self.shared_status {
             let stats = super::scheduler::PrefetchStatsSnapshot {
                 tiles_predicted: tiles.len() as u64,
-                tiles_submitted: submitted as u64,
+                tiles_submitted: cycle_results.submitted,
                 tiles_in_flight_skipped: 0,
                 prediction_cycles: self.stats.cycles.load(Ordering::Relaxed),
             };
@@ -394,6 +421,17 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                 InputMode::FuseInference | InputMode::RadialFallback => GpsStatus::Inferred,
             };
             status.update_gps_status(gps_status);
+
+            // Update detailed stats for dashboard visibility
+            status.update_detailed_stats(DetailedPrefetchStats {
+                cycles: self.stats.cycles.load(Ordering::Relaxed),
+                tiles_submitted_last_cycle: cycle_results.submitted,
+                tiles_submitted_total: self.stats.tiles_submitted.load(Ordering::Relaxed),
+                cache_hits: self.stats.cache_hits.load(Ordering::Relaxed),
+                ttl_skipped: self.stats.ttl_skipped.load(Ordering::Relaxed),
+                active_zoom_levels: self.active_zoom_levels(),
+                is_active: cycle_results.submitted > 0,
+            });
         }
 
         // Clean up expired attempts
@@ -401,9 +439,13 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
     }
 
     /// Generate tiles using telemetry-based cone generator.
+    ///
+    /// Generates tiles at the primary zoom level (ZL14) and any configured
+    /// secondary zoom levels (e.g., ZL12) with their own prefetch zones.
     fn generate_telemetry_tiles(&self, state: &AircraftState) -> Vec<PrefetchTile> {
         let position = (state.latitude, state.longitude);
 
+        // Generate primary zoom level tiles
         // Generate cone tiles (turn state affects widening internally)
         let cone_tiles =
             self.cone_generator
@@ -414,14 +456,48 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             self.buffer_generator
                 .generate_buffer_tiles(position, state.heading, &self.turn_state);
 
-        // Merge and sort by priority
-        let mut merged = super::buffer::merge_prefetch_tiles(vec![cone_tiles, buffer_tiles]);
+        // Collect all tile sources
+        let mut all_sources = vec![cone_tiles, buffer_tiles];
+
+        // Generate tiles for secondary zoom levels (e.g., ZL12)
+        for secondary in &self.config.heading.secondary_zoom_levels {
+            let secondary_tiles = self.cone_generator.generate_cone_tiles_for_zoom(
+                position,
+                state.heading,
+                &self.turn_state,
+                secondary.zoom,
+                secondary.inner_radius_nm,
+                secondary.outer_radius_nm,
+                secondary.priority_weight, // Priority offset for this zoom level
+            );
+
+            // Limit secondary tiles per their config
+            let limited: Vec<_> = secondary_tiles
+                .into_iter()
+                .take(secondary.max_tiles_per_cycle)
+                .collect();
+            all_sources.push(limited);
+        }
+
+        // Merge all tiles and sort by priority
+        let mut merged = super::buffer::merge_prefetch_tiles(all_sources);
         merged.sort_by_key(|t| t.priority);
 
-        // Limit to max tiles per cycle
+        // Limit to max tiles per cycle (total across all zoom levels)
         merged.truncate(self.config.heading.max_tiles_per_cycle);
 
         merged
+    }
+
+    /// Get the list of active zoom levels for dashboard display.
+    fn active_zoom_levels(&self) -> Vec<u8> {
+        let mut levels = vec![self.config.heading.zoom];
+        for secondary in &self.config.heading.secondary_zoom_levels {
+            levels.push(secondary.zoom);
+        }
+        levels.sort();
+        levels.dedup();
+        levels
     }
 
     /// Generate tiles using radial fallback.
@@ -479,10 +555,10 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
     }
 
     /// Submit tiles to the pipeline.
-    async fn submit_tiles(&mut self, tiles: &[PrefetchTile]) -> usize {
-        let mut submitted = 0;
-        let mut cache_hits = 0;
-        let mut ttl_skipped = 0;
+    async fn submit_tiles(&mut self, tiles: &[PrefetchTile]) -> CycleResults {
+        let mut submitted = 0u64;
+        let mut cache_hits = 0u64;
+        let mut ttl_skipped = 0u64;
 
         for tile in tiles {
             let tile_key = (tile.coord.row, tile.coord.col, tile.coord.zoom);
@@ -547,7 +623,11 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             .ttl_skipped
             .fetch_add(ttl_skipped, Ordering::Relaxed);
 
-        submitted as usize
+        CycleResults {
+            submitted,
+            cache_hits,
+            ttl_skipped,
+        }
     }
 
     /// Update turn state based on heading change.

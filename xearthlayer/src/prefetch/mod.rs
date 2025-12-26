@@ -69,15 +69,15 @@ pub use radial::{
 };
 pub use scheduler::{PrefetchScheduler, PrefetchStats, PrefetchStatsSnapshot, SchedulerConfig};
 pub use state::{
-    AircraftSnapshot, AircraftState, GpsStatus, PrefetchMode, PrefetchStatusSnapshot,
-    SharedPrefetchStatus,
+    AircraftSnapshot, AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode,
+    PrefetchStatusSnapshot, SharedPrefetchStatus,
 };
 pub use strategy::Prefetcher;
 
 // Heading-aware prefetch exports
 pub use buffer::{merge_prefetch_tiles, BufferGenerator};
 pub use cone::ConeGenerator;
-pub use config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
+pub use config::{FuseInferenceConfig, HeadingAwarePrefetchConfig, ZoomLevelPrefetchConfig};
 pub use heading_aware::{
     HeadingAwarePrefetchStats, HeadingAwarePrefetchStatsSnapshot, HeadingAwarePrefetcher,
     HeadingAwarePrefetcherConfig, InputMode,
