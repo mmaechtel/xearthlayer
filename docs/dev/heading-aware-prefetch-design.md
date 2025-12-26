@@ -1,6 +1,6 @@
 # Heading-Aware Prefetch Design
 
-## Status: Draft
+## Status: Implemented (Phases 1-4 Complete)
 **Author**: Sam de Freyssinet & Claude Code
 **Date**: 2025-12-25
 **Related**: `docs/dev/predictive-caching.md`
@@ -205,7 +205,7 @@ redundant - they're already in our cache from recent FUSE requests.
 │  • Tiles behind and immediately around the aircraft                         │
 │  • Already fetched via FUSE requests → in our cache                         │
 │  • Prefetching here is REDUNDANT (cache hit anyway)                         │
-│  • Configured via `inner_radius_nm` (default: 3.0nm)                        │
+│  • Configured via `inner_radius_nm`                                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  PREFETCH TARGET ZONE (ahead of aircraft, not yet requested)                │
 │  ───────────────────────────────────────────────────────────                │
@@ -921,42 +921,47 @@ At 450 kt heading north:
 
 ## 9. Implementation Plan (Revised)
 
-### Phase 1: Core Heading-Aware Algorithm
-1. [ ] Create `HeadingAwarePrefetcher` struct implementing `Prefetcher` trait
-2. [ ] Implement cone tile generation with configurable angle
-3. [ ] Implement priority ordering (distance + angle scoring)
-4. [ ] Add speed-adaptive lookahead calculation
+### Phase 1: Core Heading-Aware Algorithm ✅ COMPLETE
+1. [x] Create `HeadingAwarePrefetcher` struct implementing `Prefetcher` trait
+2. [x] Implement cone tile generation with configurable angle (`ConeGenerator`)
+3. [x] Implement priority ordering (distance + angle scoring via `PrefetchZone`)
+4. [x] Add speed-adaptive lookahead calculation
 
-### Phase 2: Vector Change Buffering
-5. [ ] Implement `TurnDetector` with exponential smoothing
-6. [ ] Add lateral buffer zones to cone generation
-7. [ ] Implement dynamic cone widening during turns
-8. [ ] Add rear buffer for reversals
+### Phase 2: Vector Change Buffering ✅ COMPLETE
+5. [x] Implement `TurnDetector` with exponential smoothing (`TurnState`)
+6. [x] Add lateral buffer zones to cone generation (`BufferGenerator`)
+7. [x] Implement dynamic cone widening during turns
+8. [x] Add rear buffer for reversals
 
-### Phase 3: Telemetry-Free Fallback
-9. [ ] Create `FuseRequestAnalyzer` for FUSE request tracking
-10. [ ] Implement position/heading inference algorithm
-11. [ ] Create `HybridPrefetcher` with mode selection
-12. [ ] Add FUSE integration hook for request notifications
+### Phase 3: Telemetry-Free Fallback ✅ COMPLETE
+9. [x] Create `FuseRequestAnalyzer` for FUSE request tracking
+10. [x] Implement position/heading inference algorithm (dynamic envelope model)
+11. [x] Create unified `HeadingAwarePrefetcher` with mode selection (replaces `HybridPrefetcher`)
+12. [x] Add FUSE integration hook for request notifications (callback in `filesystem.rs`)
 
-### Phase 4: Integration
-13. [ ] Merge telemetry and FUSE modes into unified prefetcher
-14. [ ] Add configuration options to `PrefetchSettings`
-15. [ ] Update CLI to select prefetch strategy
-16. [ ] Wire into `run.rs` as replacement for `RadialPrefetcher`
+### Phase 4: Integration ✅ COMPLETE
+13. [x] Merge telemetry and FUSE modes into unified prefetcher (`InputMode` enum)
+14. [x] Add configuration options to `PrefetchSettings` (`strategy` field)
+15. [x] Update CLI to select prefetch strategy (`PrefetcherBuilder`)
+16. [x] Wire into `run.rs` as replacement for `RadialPrefetcher`
 
-### Phase 5: Testing
-17. [ ] Unit tests for cone generation and turn detection
-18. [ ] Unit tests for FUSE inference algorithm
+### Phase 5: Testing (Partial)
+17. [x] Unit tests for cone generation and turn detection (config.rs, heading_aware.rs)
+18. [x] Unit tests for FUSE inference algorithm (inference.rs - 16 tests)
 19. [ ] Integration tests with mock telemetry
 20. [ ] Integration tests with simulated FUSE requests
 21. [ ] Flight testing: compare all three modes
 
-### Phase 6: Refinement
+### Phase 6: Refinement (Pending)
 22. [ ] Tune default parameters based on flight testing
 23. [ ] Add metrics: cache hit rate, prefetch efficiency, mode usage
 24. [ ] Document configuration recommendations
 25. [ ] Performance optimization (batch prefetch requests)
+
+### Remaining Work
+- **FUSE Callback Wiring**: Hook exists but not wired through service layer
+- **Integration Tests**: Mock telemetry and FUSE request simulation
+- **Flight Testing**: Real-world validation of all three modes
 
 ---
 
@@ -1199,3 +1204,135 @@ Tile grid (· = not selected, ● = selected, ✈ = aircraft):
 
 Total tiles: ~45
 ```
+
+---
+
+## Appendix C: Implementation Notes (2025-12-25)
+
+This section documents design decisions made during implementation that deviate from
+or extend the original design.
+
+### C.1 PrefetcherBuilder Pattern
+
+**Original Plan**: Strategy selection inline in `run.rs` with match on config string.
+
+**Implementation**: Created `prefetch/builder.rs` with a dedicated `PrefetcherBuilder<M>`:
+
+```rust
+let prefetcher = PrefetcherBuilder::new()
+    .memory_cache(cache)
+    .dds_handler(handler)
+    .strategy(&config.prefetch.strategy)
+    .shared_status(status)
+    .cone_half_angle(config.prefetch.cone_angle)
+    .build();
+```
+
+**Rationale**: The Builder pattern provides:
+- Better separation of concerns (configuration logic isolated from CLI)
+- Reusability (same builder can be used for testing)
+- Fluent API for complex configuration
+- Clear distinction from Factory pattern (which would create based on parameters without configuration chaining)
+
+### C.2 FromStr Trait for Strategy Parsing
+
+**Original Plan**: Custom `from_str()` method on `PrefetchStrategy`.
+
+**Implementation**: Standard `std::str::FromStr` trait implementation:
+
+```rust
+impl std::str::FromStr for PrefetchStrategy {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "radial" => Self::Radial,
+            "heading-aware" => Self::HeadingAware,
+            _ => Self::Auto,
+        })
+    }
+}
+```
+
+**Rationale**: Idiomatic Rust—enables `.parse()` syntax and integrates with the ecosystem.
+
+### C.3 Simplified Mode Selection
+
+**Original Plan**: `TileSource` enum abstraction between mode selection and tile generation.
+
+**Implementation**: Direct tile generation in `run_prefetch_cycle()`:
+
+```rust
+let tiles = match mode {
+    InputMode::Telemetry => self.generate_telemetry_tiles(state),
+    InputMode::FuseInference => self.fuse_analyzer.prefetch_tiles(),
+    InputMode::RadialFallback => self.generate_radial_tiles(position),
+};
+```
+
+**Rationale**: The intermediate `TileSource` abstraction added complexity without benefit—all modes
+produce `Vec<PrefetchTile>` directly.
+
+### C.4 std::sync::RwLock vs parking_lot
+
+**Original Plan**: Implied use of parking_lot (common in async Rust).
+
+**Implementation**: Used `std::sync::RwLock` throughout `inference.rs` and `heading_aware.rs`.
+
+**Rationale**:
+- Broader compatibility (no additional dependency)
+- Acceptable performance for our use case (locks held briefly)
+- parking_lot would require `.unwrap()` removal (different API)
+
+### C.5 FUSE Callback Wiring (Pending)
+
+**Original Plan**: Full integration with FUSE tile request tracking.
+
+**Implementation**: Callback hook exists in `Fuse3PassthroughFS` but not wired through service layer.
+
+```rust
+// In filesystem.rs - hook exists
+if let Some(ref callback) = self.tile_request_callback {
+    callback(tile);
+}
+
+// In run.rs - not yet wired
+// TODO: Pass callback through ServiceBuilder → FuseMountService → Fuse3PassthroughFS
+```
+
+**Status**: FUSE inference will start with empty data until this is wired. The `HeadingAwarePrefetcher`
+will correctly fall back to `RadialFallback` mode when FUSE inference has insufficient data.
+
+**Future Work**:
+1. Add `tile_request_callback` parameter to `ServiceBuilder`
+2. Pass through `FuseMountService` to filesystem
+3. Wire in `run.rs` by getting callback from `FuseRequestAnalyzer`
+
+### C.6 Configuration Strategy
+
+**Implementation**: Added `strategy` field to `PrefetchSettings`:
+
+```ini
+[prefetch]
+strategy = auto  ; auto, heading-aware, or radial
+```
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | HeadingAwarePrefetcher with full degradation chain |
+| `heading-aware` | Same as auto |
+| `radial` | RadialPrefetcher only (legacy behavior) |
+
+**Rationale**: `auto` and `heading-aware` are equivalent because FUSE inference is always active
+as part of graceful degradation—no separate toggle needed.
+
+### C.7 Test Coverage
+
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| `prefetch/config.rs` | 15 | Fuzzy margin helpers |
+| `prefetch/inference.rs` | 16 | Envelope, frontier, movement detection |
+| `prefetch/heading_aware.rs` | 6 | Mode selection, tile generation |
+| `prefetch/builder.rs` | 3 | Strategy parsing, builder chain |
+
+All tests passing with `make verify`.

@@ -174,6 +174,12 @@ pub struct LoggingSettings {
 pub struct PrefetchSettings {
     /// Enable predictive tile prefetching based on X-Plane telemetry
     pub enabled: bool,
+    /// Prefetch strategy: "auto", "heading-aware", or "radial" (default: "auto")
+    ///
+    /// - "auto": Uses heading-aware with graceful degradation to radial
+    /// - "heading-aware": Direction-aware cone prefetching (requires telemetry)
+    /// - "radial": Simple radius-based prefetching (no heading data required)
+    pub strategy: String,
     /// UDP port for X-Plane telemetry (default: 49002 for ForeFlight protocol)
     pub udp_port: u16,
     /// Prediction cone half-angle in degrees (default: 45)
@@ -260,6 +266,7 @@ impl Default for ConfigFile {
             },
             prefetch: PrefetchSettings {
                 enabled: true,
+                strategy: "auto".to_string(),
                 udp_port: DEFAULT_PREFETCH_UDP_PORT,
                 cone_angle: DEFAULT_PREFETCH_CONE_ANGLE,
                 cone_distance_nm: DEFAULT_PREFETCH_CONE_DISTANCE_NM,
@@ -688,6 +695,22 @@ impl ConfigFile {
                 let v = v.trim().to_lowercase();
                 config.prefetch.enabled = v == "true" || v == "1" || v == "yes" || v == "on";
             }
+            if let Some(v) = section.get("strategy") {
+                let v = v.trim().to_lowercase();
+                match v.as_str() {
+                    "auto" | "heading-aware" | "radial" => {
+                        config.prefetch.strategy = v;
+                    }
+                    _ => {
+                        return Err(ConfigFileError::InvalidValue {
+                            section: "prefetch".to_string(),
+                            key: "strategy".to_string(),
+                            value: v.to_string(),
+                            reason: "must be 'auto', 'heading-aware', or 'radial'".to_string(),
+                        });
+                    }
+                }
+            }
             if let Some(v) = section.get("udp_port") {
                 config.prefetch.udp_port =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
@@ -937,6 +960,11 @@ file = {}
 ; Enable predictive tile prefetching based on X-Plane telemetry (default: true)
 ; Requires X-Plane to send ForeFlight data: Settings > Network > Send to ForeFlight
 enabled = {}
+; Prefetch strategy (default: auto)
+;   auto         - Uses heading-aware with graceful degradation to radial
+;   heading-aware - Direction-aware cone prefetching (requires telemetry)
+;   radial       - Simple radius-based prefetching (no heading data required)
+strategy = {}
 ; UDP port for telemetry (default: 49002 for ForeFlight protocol)
 udp_port = {}
 ; Prediction cone half-angle in degrees (default: 45)
@@ -999,6 +1027,7 @@ semaphore_timeout_secs = {}
             temp_dir,
             path_to_string(&self.logging.file),
             self.prefetch.enabled,
+            self.prefetch.strategy,
             self.prefetch.udp_port,
             self.prefetch.cone_angle,
             self.prefetch.cone_distance_nm,

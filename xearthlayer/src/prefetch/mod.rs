@@ -42,11 +42,14 @@
 //! 5. Enable data indices: 3 (speeds), 17 (heading), 20 (position)
 
 mod buffer;
+mod builder;
 mod condition;
 pub mod cone;
 pub mod config;
 pub mod coordinates;
 mod error;
+mod heading_aware;
+pub mod inference;
 mod listener;
 mod predictor;
 mod radial;
@@ -72,4 +75,12 @@ pub use strategy::Prefetcher;
 pub use buffer::{merge_prefetch_tiles, BufferGenerator};
 pub use cone::ConeGenerator;
 pub use config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
+pub use heading_aware::{
+    HeadingAwarePrefetchStats, HeadingAwarePrefetchStatsSnapshot, HeadingAwarePrefetcher,
+    HeadingAwarePrefetcherConfig, InputMode,
+};
+pub use inference::{Direction, FuseRequestAnalyzer, LoadedEnvelope, TileRequestCallback};
 pub use types::{PrefetchTile, PrefetchZone, TurnDirection, TurnState};
+
+// Builder for prefetcher strategy creation
+pub use builder::{PrefetchStrategy, PrefetcherBuilder};

@@ -12,9 +12,7 @@ use xearthlayer::log::TracingLogger;
 use xearthlayer::manager::{LocalPackageStore, MountManager, ServiceBuilder};
 use xearthlayer::package::PackageType;
 use xearthlayer::panic as panic_handler;
-use xearthlayer::prefetch::{
-    Prefetcher, RadialPrefetchConfig, RadialPrefetcher, SharedPrefetchStatus, TelemetryListener,
-};
+use xearthlayer::prefetch::{PrefetcherBuilder, SharedPrefetchStatus, TelemetryListener};
 use xearthlayer::service::ServiceConfig;
 
 use super::common::{resolve_dds_format, resolve_provider, DdsCompression, ProviderType};
@@ -246,14 +244,6 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                 let dds_handler = service.create_prefetch_handler();
                 let runtime_handle = service.runtime_handle().clone();
 
-                // Configure radial prefetcher
-                // Uses configurable tile radius around current position
-                let prefetch_config = RadialPrefetchConfig {
-                    radius: config.prefetch.radial_radius, // Configured tile radius
-                    zoom: 14,                              // Standard ortho zoom level
-                    attempt_ttl: std::time::Duration::from_secs(60), // Don't retry for 60s
-                };
-
                 // Create channels for telemetry data
                 let (state_tx, state_rx) = mpsc::channel(32);
 
@@ -273,13 +263,17 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                     }
                 });
 
-                // Create prefetcher strategy (currently using RadialPrefetcher)
-                // The prefetcher checks memory cache before submitting requests,
-                // only fetching tiles that aren't already cached
-                let prefetcher: Box<dyn Prefetcher> = Box::new(
-                    RadialPrefetcher::new(memory_cache, dds_handler, prefetch_config)
-                        .with_shared_status(Arc::clone(&shared_prefetch_status)),
-                );
+                // Build prefetcher using the builder with configuration
+                // Strategies: radial (simple), heading-aware (directional), auto (graceful degradation)
+                let prefetcher = PrefetcherBuilder::new()
+                    .memory_cache(memory_cache)
+                    .dds_handler(dds_handler)
+                    .strategy(&config.prefetch.strategy)
+                    .shared_status(Arc::clone(&shared_prefetch_status))
+                    .cone_half_angle(config.prefetch.cone_angle)
+                    .outer_radius_nm(config.prefetch.cone_distance_nm)
+                    .radial_radius(config.prefetch.radial_radius)
+                    .build();
 
                 // Get startup info before prefetcher is consumed
                 let startup_info = prefetcher.startup_info();
