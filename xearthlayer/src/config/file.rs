@@ -115,7 +115,11 @@ pub struct GenerationSettings {
 #[derive(Debug, Clone)]
 pub struct PipelineSettings {
     /// Maximum concurrent HTTP requests across all tiles.
-    /// Default: min(num_cpus * 16, 256)
+    /// Default: 128 (conservative value stable with all providers)
+    ///
+    /// Hard limits: 64-256 (values outside this range are clamped).
+    /// The ceiling prevents overwhelming imagery providers, which causes
+    /// rate limiting (HTTP 429) and cascade failures.
     pub max_http_concurrent: usize,
     /// Maximum concurrent CPU-bound operations (assemble + encode stages).
     /// Default: num_cpus * 1.25, minimum num_cpus + 2
@@ -320,9 +324,47 @@ pub fn num_cpus() -> usize {
         .unwrap_or(4)
 }
 
-/// Default HTTP concurrency limit: min(num_cpus * 16, 256)
+/// Minimum HTTP concurrency limit.
+/// Below this, performance suffers significantly.
+pub const MIN_HTTP_CONCURRENT: usize = 64;
+
+/// Maximum HTTP concurrency limit.
+/// Above this, providers get rate-limited causing cascade failures.
+pub const MAX_HTTP_CONCURRENT: usize = 256;
+
+/// Default HTTP concurrency limit.
+/// Conservative default of 128 prevents provider rate limiting while
+/// maintaining good performance. Tested stable with Apple/Bing providers.
+pub const DEFAULT_HTTP_CONCURRENT: usize = 128;
+
+/// Default HTTP concurrency limit.
+/// Returns a conservative value (128) that works reliably with all providers.
 pub fn default_http_concurrent() -> usize {
-    (num_cpus() * 16).min(256)
+    DEFAULT_HTTP_CONCURRENT
+}
+
+/// Clamps HTTP concurrency to valid range and logs a warning if clamped.
+fn clamp_http_concurrent(value: usize) -> usize {
+    if value < MIN_HTTP_CONCURRENT {
+        tracing::warn!(
+            requested = value,
+            min = MIN_HTTP_CONCURRENT,
+            max = MAX_HTTP_CONCURRENT,
+            "max_http_concurrent below minimum, clamping to {}", MIN_HTTP_CONCURRENT
+        );
+        MIN_HTTP_CONCURRENT
+    } else if value > MAX_HTTP_CONCURRENT {
+        tracing::warn!(
+            requested = value,
+            min = MIN_HTTP_CONCURRENT,
+            max = MAX_HTTP_CONCURRENT,
+            "max_http_concurrent above maximum, clamping to {} (prevents provider rate limiting)",
+            MAX_HTTP_CONCURRENT
+        );
+        MAX_HTTP_CONCURRENT
+    } else {
+        value
+    }
 }
 
 /// Default CPU concurrency limit: num_cpus * 1.25, minimum num_cpus + 2
@@ -628,13 +670,15 @@ impl ConfigFile {
         // [pipeline] section
         if let Some(section) = ini.section(Some("pipeline")) {
             if let Some(v) = section.get("max_http_concurrent") {
-                config.pipeline.max_http_concurrent =
+                let parsed: usize =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
                         section: "pipeline".to_string(),
                         key: "max_http_concurrent".to_string(),
                         value: v.to_string(),
                         reason: "must be a positive integer".to_string(),
                     })?;
+                // Enforce hard limits to prevent provider rate limiting
+                config.pipeline.max_http_concurrent = clamp_http_concurrent(parsed);
             }
             if let Some(v) = section.get("max_cpu_concurrent") {
                 config.pipeline.max_cpu_concurrent =
@@ -1024,8 +1068,8 @@ timeout = {}
 ; Advanced concurrency and retry settings. Defaults are tuned for most systems.
 ; Only modify if you understand the implications.
 
-; Maximum concurrent HTTP requests across all tiles (default: min(num_cpus * 16, 256))
-; Higher values increase throughput but may overwhelm network stack
+; Maximum concurrent HTTP requests across all tiles (default: 128, limits: 64-256)
+; Values outside 64-256 are clamped. The ceiling prevents provider rate limiting.
 max_http_concurrent = {}
 ; Maximum concurrent CPU-bound operations for tile assembly and encoding
 ; (default: num_cpus * 1.25, minimum num_cpus + 2)
@@ -1421,5 +1465,62 @@ temp_dir = /tmp/xearthlayer
         let config = ConfigFile::default();
         assert!(config.packages.library_url.is_none());
         assert!(config.packages.temp_dir.is_none());
+    }
+
+    #[test]
+    fn test_http_concurrent_clamped_to_ceiling() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.ini");
+
+        // Test value above maximum gets clamped to 256
+        std::fs::write(
+            &config_path,
+            r#"
+[pipeline]
+max_http_concurrent = 500
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigFile::load_from(&config_path).unwrap();
+        assert_eq!(config.pipeline.max_http_concurrent, MAX_HTTP_CONCURRENT);
+    }
+
+    #[test]
+    fn test_http_concurrent_clamped_to_floor() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.ini");
+
+        // Test value below minimum gets clamped to 64
+        std::fs::write(
+            &config_path,
+            r#"
+[pipeline]
+max_http_concurrent = 10
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigFile::load_from(&config_path).unwrap();
+        assert_eq!(config.pipeline.max_http_concurrent, MIN_HTTP_CONCURRENT);
+    }
+
+    #[test]
+    fn test_http_concurrent_in_range_unchanged() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.ini");
+
+        // Test value within range is unchanged
+        std::fs::write(
+            &config_path,
+            r#"
+[pipeline]
+max_http_concurrent = 128
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigFile::load_from(&config_path).unwrap();
+        assert_eq!(config.pipeline.max_http_concurrent, 128);
     }
 }

@@ -197,7 +197,7 @@ Advanced concurrency and retry settings for the tile processing pipeline. These 
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `max_http_concurrent` | integer | `min(num_cpus * 16, 256)` | Maximum concurrent HTTP requests across all tiles |
+| `max_http_concurrent` | integer | `128` | Maximum concurrent HTTP requests (hard limits: 64-256) |
 | `max_cpu_concurrent` | integer | `num_cpus * 1.25` | Maximum concurrent CPU-bound operations (assembly + encoding) |
 | `max_prefetch_in_flight` | integer | `max(num_cpus / 4, 2)` | Maximum concurrent prefetch jobs |
 | `request_timeout_secs` | integer | `10` | HTTP request timeout for individual chunk downloads (seconds) |
@@ -216,8 +216,8 @@ max_prefetch_in_flight = 8
 request_timeout_secs = 15
 ```
 
-**Concurrency Formula Details:**
-- **HTTP concurrency**: `min(num_cpus * 16, 256)` - scales with CPU count but capped to prevent network stack exhaustion
+**Concurrency Settings:**
+- **HTTP concurrency**: Default 128, hard limits 64-256. Values outside this range are automatically clamped. The ceiling prevents overwhelming imagery providers with too many requests (causes HTTP 429 rate limiting and cascade failures).
 - **CPU concurrency**: `num_cpus * 1.25` - modest oversubscription for blocking thread pool efficiency
 - **Prefetch in-flight**: `max(num_cpus / 4, 2)` - leaves 75% of resources for on-demand requests
 
