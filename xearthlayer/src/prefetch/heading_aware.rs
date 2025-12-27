@@ -63,6 +63,7 @@ use super::buffer::BufferGenerator;
 use super::cone::ConeGenerator;
 use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
 use super::inference::FuseRequestAnalyzer;
+use super::scenery_index::SceneryIndex;
 use super::state::{
     AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode, SharedPrefetchStatus,
 };
@@ -220,6 +221,10 @@ pub struct HeadingAwarePrefetcher<M: MemoryCache> {
     stats: Arc<HeadingAwarePrefetchStats>,
     /// Optional shared status for TUI display.
     shared_status: Option<Arc<SharedPrefetchStatus>>,
+
+    // Scenery-aware prefetch (optional)
+    /// Optional scenery index for exact tile lookup.
+    scenery_index: Option<Arc<SceneryIndex>>,
 }
 
 impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
@@ -255,12 +260,25 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             last_telemetry_state: None,
             stats: Arc::new(HeadingAwarePrefetchStats::default()),
             shared_status: None,
+            scenery_index: None,
         }
     }
 
     /// Set the shared status for TUI display.
     pub fn with_shared_status(mut self, status: Arc<SharedPrefetchStatus>) -> Self {
         self.shared_status = Some(status);
+        self
+    }
+
+    /// Set the scenery index for scenery-aware tile lookup.
+    ///
+    /// When set, the prefetcher queries the index for tiles near the aircraft
+    /// position instead of calculating coordinates. This ensures:
+    /// - Exact zoom levels per tile (read from .ter files)
+    /// - Only tiles that exist in the package are prefetched
+    /// - Sea tiles can be deprioritized
+    pub fn with_scenery_index(mut self, index: Arc<SceneryIndex>) -> Self {
+        self.scenery_index = Some(index);
         self
     }
 
@@ -317,6 +335,16 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         }
     }
 
+    /// Get current position from telemetry or FUSE inference.
+    fn current_position(&self) -> Option<(f64, f64)> {
+        // Prefer telemetry position
+        if let Some(ref state) = self.last_telemetry_state {
+            return Some((state.latitude, state.longitude));
+        }
+        // Fall back to FUSE inference
+        self.fuse_analyzer.position()
+    }
+
     /// Determine the current input mode.
     fn determine_input_mode(&self) -> InputMode {
         // 1. Fresh telemetry?
@@ -343,26 +371,55 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         let mode = self.determine_input_mode();
         self.stats.cycles.fetch_add(1, Ordering::Relaxed);
 
-        let tiles: Vec<PrefetchTile> = match mode {
-            InputMode::Telemetry => {
-                self.stats.telemetry_cycles.fetch_add(1, Ordering::Relaxed);
-                if let Some(ref state) = self.last_telemetry_state {
-                    self.generate_telemetry_tiles(state)
-                } else {
-                    Vec::new()
+        // Get current position (from telemetry or FUSE inference)
+        let position = self.current_position();
+
+        // Prefer scenery-aware prefetch when index is available and we have a position
+        let tiles: Vec<PrefetchTile> = if self.scenery_index.is_some() {
+            if let Some((lat, lon)) = position {
+                // Use scenery index for exact tile lookup
+                match mode {
+                    InputMode::Telemetry => {
+                        self.stats.telemetry_cycles.fetch_add(1, Ordering::Relaxed);
+                    }
+                    InputMode::FuseInference => {
+                        self.stats
+                            .fuse_inference_cycles
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    InputMode::RadialFallback => {
+                        self.stats
+                            .radial_fallback_cycles
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                 }
+                self.generate_scenery_tiles(lat, lon)
+            } else {
+                Vec::new()
             }
-            InputMode::FuseInference => {
-                self.stats
-                    .fuse_inference_cycles
-                    .fetch_add(1, Ordering::Relaxed);
-                self.fuse_analyzer.prefetch_tiles()
-            }
-            InputMode::RadialFallback => {
-                self.stats
-                    .radial_fallback_cycles
-                    .fetch_add(1, Ordering::Relaxed);
-                self.generate_radial_tiles()
+        } else {
+            // Fall back to coordinate-based generation
+            match mode {
+                InputMode::Telemetry => {
+                    self.stats.telemetry_cycles.fetch_add(1, Ordering::Relaxed);
+                    if let Some(ref state) = self.last_telemetry_state {
+                        self.generate_telemetry_tiles(state)
+                    } else {
+                        Vec::new()
+                    }
+                }
+                InputMode::FuseInference => {
+                    self.stats
+                        .fuse_inference_cycles
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.fuse_analyzer.prefetch_tiles()
+                }
+                InputMode::RadialFallback => {
+                    self.stats
+                        .radial_fallback_cycles
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.generate_radial_tiles()
+                }
             }
         };
 
@@ -550,6 +607,74 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                 }
             }
         }
+
+        tiles
+    }
+
+    /// Generate tiles using scenery index lookup.
+    ///
+    /// Queries the SceneryIndex for tiles near the aircraft position.
+    /// This provides exact tile coordinates and zoom levels from .ter files.
+    fn generate_scenery_tiles(&self, lat: f64, lon: f64) -> Vec<PrefetchTile> {
+        let Some(ref index) = self.scenery_index else {
+            return Vec::new();
+        };
+
+        // Query tiles within the prefetch radius (use outer radius)
+        let radius_nm = self.config.heading.outer_radius_nm;
+        let scenery_tiles = index.tiles_near(lat, lon, radius_nm);
+
+        if scenery_tiles.is_empty() {
+            trace!(lat, lon, radius_nm, "No scenery tiles found in index");
+            return Vec::new();
+        }
+
+        trace!(
+            lat,
+            lon,
+            radius_nm,
+            tiles = scenery_tiles.len(),
+            "Found scenery tiles in index"
+        );
+
+        // Convert to PrefetchTile with priority based on distance and type
+        let mut tiles: Vec<PrefetchTile> = scenery_tiles
+            .into_iter()
+            .map(|st| {
+                // Calculate approximate distance for priority
+                let lat_diff = (lat as f32 - st.lat) * 60.0; // 1 degree ≈ 60nm
+                let lon_diff = (lon as f32 - st.lon) * 60.0 * (st.lat.to_radians().cos());
+                let dist_nm = (lat_diff * lat_diff + lon_diff * lon_diff).sqrt();
+
+                // Base priority from distance (0-100 for typical 100nm radius)
+                let distance_priority = (dist_nm * 1.0).min(100.0) as u32;
+
+                // Deprioritize sea tiles (add 200 to priority, making them lower priority)
+                let type_priority = if st.is_sea { 200 } else { 0 };
+
+                // Higher zoom levels are higher priority (ZL14 before ZL12)
+                let zoom_priority = (20u8.saturating_sub(st.tile_zoom())) as u32 * 5;
+
+                let priority = PrefetchZone::ForwardCenter.base_priority()
+                    + distance_priority
+                    + type_priority
+                    + zoom_priority;
+
+                let zone = if dist_nm < self.config.heading.inner_radius_nm {
+                    PrefetchZone::ForwardCenter
+                } else {
+                    PrefetchZone::ForwardEdge
+                };
+
+                PrefetchTile::new(st.to_tile_coord(), priority, zone)
+            })
+            .collect();
+
+        // Sort by priority (lower = higher priority)
+        tiles.sort_by_key(|t| t.priority);
+
+        // Limit to max tiles per cycle
+        tiles.truncate(self.config.heading.max_tiles_per_cycle);
 
         tiles
     }

@@ -30,6 +30,7 @@ use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig, ZoomLevelPr
 use super::heading_aware::{HeadingAwarePrefetcher, HeadingAwarePrefetcherConfig};
 use super::inference::FuseRequestAnalyzer;
 use super::radial::{RadialPrefetchConfig, RadialPrefetcher};
+use super::scenery_index::SceneryIndex;
 use super::state::SharedPrefetchStatus;
 use super::strategy::Prefetcher;
 
@@ -83,6 +84,9 @@ pub struct PrefetcherBuilder<M: MemoryCache> {
 
     // External FUSE analyzer (for wiring callback to services before building)
     fuse_analyzer: Option<Arc<FuseRequestAnalyzer>>,
+
+    // Scenery-aware prefetch (optional)
+    scenery_index: Option<Arc<SceneryIndex>>,
 }
 
 /// Available prefetch strategies.
@@ -131,6 +135,7 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
             zl12_inner_radius_nm: 88.0,
             zl12_outer_radius_nm: 100.0,
             fuse_analyzer: None,
+            scenery_index: None,
         }
     }
 
@@ -262,6 +267,32 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
         self
     }
 
+    /// Set the scenery index for scenery-aware prefetching.
+    ///
+    /// When provided, the prefetcher uses the index to find tiles that exist
+    /// in the scenery package, rather than calculating coordinates. This ensures:
+    ///
+    /// - Exact zoom levels per tile (from .ter files)
+    /// - Only tiles that exist in the package are prefetched
+    /// - Sea tiles can be deprioritized
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let index = Arc::new(SceneryIndex::with_defaults());
+    /// index.build_from_package(Path::new("/path/to/scenery"))?;
+    ///
+    /// let prefetcher = PrefetcherBuilder::new()
+    ///     .memory_cache(cache)
+    ///     .dds_handler(handler)
+    ///     .with_scenery_index(index)
+    ///     .build();
+    /// ```
+    pub fn with_scenery_index(mut self, index: Arc<SceneryIndex>) -> Self {
+        self.scenery_index = Some(index);
+        self
+    }
+
     /// Build the prefetcher instance.
     ///
     /// # Panics
@@ -339,6 +370,10 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
 
                 if let Some(status) = self.shared_status {
                     prefetcher = prefetcher.with_shared_status(status);
+                }
+
+                if let Some(index) = self.scenery_index {
+                    prefetcher = prefetcher.with_scenery_index(index);
                 }
 
                 Box::new(prefetcher)

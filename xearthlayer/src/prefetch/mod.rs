@@ -53,6 +53,7 @@ pub mod inference;
 mod listener;
 mod predictor;
 mod radial;
+mod scenery_index;
 mod scheduler;
 mod state;
 mod strategy;
@@ -87,3 +88,6 @@ pub use types::{PrefetchTile, PrefetchZone, TurnDirection, TurnState};
 
 // Builder for prefetcher strategy creation
 pub use builder::{PrefetchStrategy, PrefetcherBuilder};
+
+// Scenery-aware prefetch
+pub use scenery_index::{SceneryIndex, SceneryIndexConfig, SceneryIndexError, SceneryTile};

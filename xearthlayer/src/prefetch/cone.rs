@@ -696,4 +696,118 @@ mod tests {
             tiles_small.len()
         );
     }
+
+    // ==================== Multi-zoom tile generation tests ====================
+
+    #[test]
+    fn test_generate_cone_tiles_for_zoom_produces_valid_coords() {
+        // Test that ZL12 tiles have valid coordinates for zoom 12
+        let gen = default_generator(); // Has zoom=14 as default
+        let position = (44.5, -114.2); // Near Idaho
+        let heading = 45.0;
+
+        // Generate ZL12 tiles (zoom=12, inner 88nm, outer 100nm)
+        let tiles = gen.generate_cone_tiles_for_zoom(
+            position,
+            heading,
+            &TurnState::Straight,
+            12,    // ZL12
+            88.0,  // inner radius
+            100.0, // outer radius
+            0,     // priority offset
+        );
+
+        assert!(!tiles.is_empty(), "Should generate ZL12 tiles");
+
+        // Verify all tiles have valid zoom 12 coordinates
+        let max_coord_z12 = 2u32.pow(12) - 1; // 4095
+        for tile in &tiles {
+            assert_eq!(
+                tile.coord.zoom, 12,
+                "All tiles should have zoom=12, got zoom={}",
+                tile.coord.zoom
+            );
+            assert!(
+                tile.coord.row <= max_coord_z12,
+                "Row {} exceeds max {} for zoom 12",
+                tile.coord.row,
+                max_coord_z12
+            );
+            assert!(
+                tile.coord.col <= max_coord_z12,
+                "Col {} exceeds max {} for zoom 12",
+                tile.coord.col,
+                max_coord_z12
+            );
+        }
+
+        // Also verify chunk coordinates would be valid
+        let max_chunk_coord = 2u32.pow(16) - 1; // 65535 for chunk_zoom=16
+        for tile in &tiles {
+            let global_row = tile.coord.row * 16;
+            let global_col = tile.coord.col * 16;
+            assert!(
+                global_row <= max_chunk_coord,
+                "Chunk row {} exceeds max {} for chunk_zoom 16",
+                global_row,
+                max_chunk_coord
+            );
+            assert!(
+                global_col <= max_chunk_coord,
+                "Chunk col {} exceeds max {} for chunk_zoom 16",
+                global_col,
+                max_chunk_coord
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_cone_tiles_for_zoom_different_from_default() {
+        // Verify that generate_cone_tiles_for_zoom uses the passed zoom,
+        // not the config's default zoom
+        let gen = default_generator(); // zoom=14 in config
+        let position = (45.0, -122.0);
+        let heading = 0.0;
+
+        // Generate at zoom 12 (not 14)
+        let z12_tiles = gen.generate_cone_tiles_for_zoom(
+            position,
+            heading,
+            &TurnState::Straight,
+            12,
+            85.0,
+            95.0,
+            0,
+        );
+
+        // Generate at default zoom 14
+        let z14_tiles = gen.generate_cone_tiles(position, heading, &TurnState::Straight);
+
+        // All z12 tiles should have zoom=12
+        for tile in &z12_tiles {
+            assert_eq!(tile.coord.zoom, 12);
+        }
+
+        // All z14 tiles should have zoom=14
+        for tile in &z14_tiles {
+            assert_eq!(tile.coord.zoom, 14);
+        }
+
+        // z12 tiles should have lower row/col values than z14 tiles
+        // (approximately 4x lower due to zoom difference)
+        if !z12_tiles.is_empty() && !z14_tiles.is_empty() {
+            let z12_avg_row: f64 =
+                z12_tiles.iter().map(|t| t.coord.row as f64).sum::<f64>() / z12_tiles.len() as f64;
+            let z14_avg_row: f64 =
+                z14_tiles.iter().map(|t| t.coord.row as f64).sum::<f64>() / z14_tiles.len() as f64;
+
+            // ZL14 should have ~4x the row values of ZL12
+            let ratio = z14_avg_row / z12_avg_row;
+            assert!(
+                (ratio - 4.0).abs() < 0.5,
+                "Expected row ratio ~4.0, got {:.2}",
+                ratio
+            );
+        }
+    }
 }

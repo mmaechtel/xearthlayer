@@ -13,8 +13,8 @@ use xearthlayer::manager::{LocalPackageStore, MountManager, ServiceBuilder};
 use xearthlayer::package::PackageType;
 use xearthlayer::panic as panic_handler;
 use xearthlayer::prefetch::{
-    FuseInferenceConfig, FuseRequestAnalyzer, PrefetcherBuilder, SharedPrefetchStatus,
-    TelemetryListener,
+    FuseInferenceConfig, FuseRequestAnalyzer, PrefetcherBuilder, SceneryIndex,
+    SharedPrefetchStatus, TelemetryListener,
 };
 use xearthlayer::service::ServiceConfig;
 
@@ -282,6 +282,46 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                     }
                 });
 
+                // Build scenery index for scenery-aware prefetching
+                // This enables exact tile lookup from .ter files instead of coordinate calculation
+                let scenery_index = {
+                    let index = Arc::new(SceneryIndex::with_defaults());
+                    let mut total_tiles = 0usize;
+                    for pkg in &ortho_packages {
+                        match index.build_from_package(&pkg.path) {
+                            Ok(count) => {
+                                total_tiles += count;
+                                tracing::debug!(
+                                    region = %pkg.region(),
+                                    tiles = count,
+                                    "Indexed scenery package"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    region = %pkg.region(),
+                                    error = %e,
+                                    "Failed to index scenery package"
+                                );
+                            }
+                        }
+                    }
+                    if total_tiles > 0 {
+                        println!(
+                            "Scenery index: {} tiles ({} land, {} sea)",
+                            total_tiles,
+                            index.land_tile_count(),
+                            index.sea_tile_count()
+                        );
+                        Some(index)
+                    } else {
+                        tracing::warn!(
+                            "No scenery tiles indexed, falling back to coordinate-based prefetch"
+                        );
+                        None
+                    }
+                };
+
                 // Build prefetcher using the builder with configuration
                 // Strategies: radial (simple), heading-aware (directional), auto (graceful degradation)
                 let mut builder = PrefetcherBuilder::new()
@@ -303,6 +343,12 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                 // This enables FUSE-based position inference when telemetry is unavailable
                 if let Some(analyzer) = fuse_analyzer {
                     builder = builder.with_fuse_analyzer(analyzer);
+                }
+
+                // Wire scenery index for scenery-aware prefetching
+                // This enables exact tile lookup instead of coordinate calculation
+                if let Some(index) = scenery_index {
+                    builder = builder.with_scenery_index(index);
                 }
 
                 let prefetcher = builder.build();
