@@ -137,7 +137,7 @@ impl RequestCoalescer {
                     in_flight_count = self.in_flight.len(),
                     "New request - starting processing"
                 );
-                CoalesceResult::NewRequest { tile, sender: tx }
+                CoalesceResult::NewRequest { tile, _sender: tx }
             }
         }
     }
@@ -225,8 +225,9 @@ pub(crate) enum CoalesceResult {
     NewRequest {
         tile: TileCoord,
         /// The broadcast sender is kept internally for potential future use
-        /// (e.g., progress updates or cancellation)
-        sender: broadcast::Sender<CoalescedResult>,
+        /// (e.g., progress updates or cancellation). Prefixed with underscore
+        /// to suppress dead_code warning since it's held but not read.
+        _sender: broadcast::Sender<CoalescedResult>,
     },
     /// Request is coalesced - wait on this receiver for the result
     Coalesced(broadcast::Receiver<CoalescedResult>),

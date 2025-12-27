@@ -749,7 +749,7 @@ mod tests {
         let quadkey = tile_to_quadkey(&tile);
         assert_eq!(quadkey.len(), 16);
         // Quadkey should only contain digits 0-3
-        assert!(quadkey.chars().all(|c| c >= '0' && c <= '3'));
+        assert!(quadkey.chars().all(|c| ('0'..='3').contains(&c)));
     }
 
     #[test]
@@ -924,12 +924,12 @@ mod tests {
 
                 // Results should be in valid geographic bounds
                 prop_assert!(
-                    lat >= MIN_LAT && lat <= MAX_LAT,
+                    (MIN_LAT..=MAX_LAT).contains(&lat),
                     "Latitude {} out of bounds [{}, {}]",
                     lat, MIN_LAT, MAX_LAT
                 );
                 prop_assert!(
-                    lon >= -180.0 && lon <= 180.0,
+                    (-180.0..=180.0).contains(&lon),
                     "Longitude {} out of bounds [-180, 180]",
                     lon
                 );
@@ -1127,7 +1127,7 @@ mod tests {
 
                 for c in quadkey.chars() {
                     prop_assert!(
-                        c >= '0' && c <= '3',
+                        ('0'..='3').contains(&c),
                         "Quadkey {} contains invalid character '{}'", quadkey, c
                     );
                 }
@@ -1156,7 +1156,7 @@ mod tests {
                 quadkey_len in 19usize..30
             ) {
                 // Quadkeys longer than MAX_ZOOM should be rejected
-                let quadkey: String = std::iter::repeat('0').take(quadkey_len).collect();
+                let quadkey: String = std::iter::repeat_n('0', quadkey_len).collect();
                 let result = quadkey_to_tile(&quadkey);
 
                 prop_assert!(result.is_err(), "Should reject quadkey length {}", quadkey_len);

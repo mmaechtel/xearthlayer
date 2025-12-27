@@ -562,6 +562,7 @@ impl FuseInferenceConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -715,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_fuse_fuzzy_margin_constants_ordering() {
         // FUSE inference should use wider cone than telemetry mode
         assert!(DEFAULT_FUSE_CONE_HALF_ANGLE > DEFAULT_CONE_HALF_ANGLE);

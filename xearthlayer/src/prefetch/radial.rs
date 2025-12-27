@@ -499,7 +499,7 @@ mod tests {
 
         // Should have fewer tiles (some would be negative)
         assert!(tiles.len() < 49);
-        assert!(tiles.len() > 0);
+        assert!(!tiles.is_empty());
 
         // All tiles should have valid coordinates
         for tile in &tiles {

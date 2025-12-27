@@ -744,7 +744,7 @@ mod tests {
             for &h in &test_values {
                 let normalized = normalize_heading(h);
                 assert!(
-                    normalized >= 0.0 && normalized < 360.0,
+                    (0.0..360.0).contains(&normalized),
                     "normalize_heading({}) = {} is not in [0, 360)",
                     h,
                     normalized

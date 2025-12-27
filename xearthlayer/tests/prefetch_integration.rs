@@ -7,6 +7,8 @@
 //!
 //! Run with: `cargo test --test prefetch_integration`
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -386,7 +388,7 @@ async fn test_fuse_requests_recorded() {
     ];
 
     for tile in &tiles {
-        callback(tile.clone());
+        callback(*tile);
     }
 
     // Wait for async processing
