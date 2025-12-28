@@ -36,6 +36,8 @@ pub enum CliError {
     Packages(String),
     /// No packages installed
     NoPackages { install_location: PathBuf },
+    /// SceneryIndex cache error
+    SceneryIndex(String),
 }
 
 impl CliError {
@@ -90,6 +92,10 @@ impl CliError {
                     install_location.display()
                 );
             }
+            CliError::SceneryIndex(_) => {
+                eprintln!();
+                eprintln!("Run 'xearthlayer scenery-index --help' for usage information.");
+            }
             _ => {}
         }
 
@@ -114,6 +120,7 @@ impl fmt::Display for CliError {
             CliError::Publish(msg) => write!(f, "Publisher error: {}", msg),
             CliError::Packages(msg) => write!(f, "Package manager error: {}", msg),
             CliError::NoPackages { .. } => write!(f, "No ortho packages installed"),
+            CliError::SceneryIndex(msg) => write!(f, "Scenery index error: {}", msg),
         }
     }
 }

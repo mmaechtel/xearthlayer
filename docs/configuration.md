@@ -320,6 +320,55 @@ To enable prefetching, configure X-Plane to send ForeFlight telemetry:
 
 **Note:** Even without telemetry, XEarthLayer can infer aircraft position from FUSE file access patterns (FUSE inference mode) and fall back to radial prefetching if needed
 
+### [prewarm]
+
+Controls cold-start cache pre-warming. Use with `xearthlayer run --airport ICAO` to pre-load tiles around an airport before X-Plane starts, reducing initial scenery load times.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `radius_nm` | float | `100` | Radius in nautical miles around the airport to prewarm |
+
+**Understanding X-Plane's DSF Loading:**
+
+X-Plane loads terrain in DSF (Digital Scenery File) tiles, each covering 1° × 1° of lat/lon. The number of tiles loaded depends on the "Extended DSFs" setting:
+
+| Setting | Tiles Loaded | Approximate Area |
+|---------|--------------|------------------|
+| Standard | 3×2 = 6 tiles | ~180nm × 120nm (equator) |
+| Extended DSFs | 4×3 = 12 tiles | ~240nm × 180nm (equator) |
+
+At mid-latitudes (~47°N, typical for Europe), this translates to roughly:
+- **Standard**: ~90nm radius equivalent
+- **Extended**: ~120nm radius equivalent
+
+The default 100nm prewarm radius is optimized for standard DSF loading—it covers the initial scenery load without wasting bandwidth on tiles X-Plane won't request until you fly further.
+
+**Dynamic Resolution via LOAD_CENTER:**
+
+X-Plane's orthophoto textures use `LOAD_CENTER` directives that enable dynamic resolution loading. As you approach a tile, X-Plane progressively loads higher resolution versions. This means:
+
+1. Distant tiles load at low resolution (fast, small)
+2. Nearby tiles load at full resolution (slower, larger)
+3. XEarthLayer's prewarm prepares the full-resolution versions for immediate use
+
+**Example:**
+```ini
+[prewarm]
+; Pre-warm tiles within 100nm of departure airport
+; This covers X-Plane's standard 3×2 DSF loading region
+radius_nm = 100
+```
+
+**Increasing the Radius:**
+
+If you use Extended DSFs or want more aggressive pre-warming:
+```ini
+[prewarm]
+radius_nm = 150  ; Cover extended DSF region
+```
+
+Note: Larger radii increase pre-warm time and bandwidth usage proportionally (area scales with radius²).
+
 ### [xplane]
 
 Controls X-Plane integration.
@@ -434,6 +483,10 @@ strategy = auto  ; auto, heading-aware, or radial
 
 ; Radial fallback (when telemetry unavailable)
 ; radial_radius = 3            ; 7×7 tile grid
+
+[prewarm]
+; Cold-start cache pre-warming (use with --airport ICAO)
+; radius_nm = 100              ; Pre-warm radius (100nm covers standard DSF loading)
 
 [xplane]
 ; scenery_dir = /path/to/X-Plane 12/Custom Scenery
@@ -553,6 +606,7 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `prefetch.max_tiles_per_cycle` | positive integer | Max tiles per prefetch cycle |
 | `prefetch.cycle_interval_ms` | positive integer | Prefetch cycle interval (ms) |
 | `prefetch.radial_radius` | positive integer | Radial fallback tile radius |
+| `prewarm.radius_nm` | positive number | Pre-warm radius around airport (nm) |
 | `xplane.scenery_dir` | path | X-Plane Custom Scenery directory |
 | `packages.library_url` | URL | Package library index URL |
 | `packages.install_location` | path | Package installation directory |

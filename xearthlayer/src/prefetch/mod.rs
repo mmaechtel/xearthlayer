@@ -53,7 +53,9 @@ pub mod inference;
 pub mod intersection;
 mod listener;
 mod predictor;
+mod prewarm;
 mod radial;
+pub mod scenery_cache;
 mod scenery_index;
 mod scheduler;
 mod state;
@@ -91,4 +93,15 @@ pub use types::{InputMode, PrefetchTile, PrefetchZone, TurnDirection, TurnState}
 pub use builder::{PrefetchStrategy, PrefetcherBuilder};
 
 // Scenery-aware prefetch
-pub use scenery_index::{SceneryIndex, SceneryIndexConfig, SceneryIndexError, SceneryTile};
+pub use scenery_index::{
+    IndexingProgress, SceneryIndex, SceneryIndexConfig, SceneryIndexError, SceneryTile,
+};
+
+// Cold-start prewarm
+pub use prewarm::{PrewarmConfig, PrewarmPrefetcher, PrewarmProgress};
+
+// Scenery index cache
+pub use scenery_cache::{
+    cache_path as scenery_cache_path, cache_status, load_cache, save_cache, CacheLoadResult,
+    CacheStatus,
+};

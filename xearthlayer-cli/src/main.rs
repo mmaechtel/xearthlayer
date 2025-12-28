@@ -23,6 +23,7 @@ mod ui;
 use clap::{Parser, Subcommand};
 use commands::cache::CacheAction;
 use commands::common::{DdsCompression, ProviderType};
+use commands::scenery_index::SceneryIndexAction;
 
 // ============================================================================
 // CLI Argument Definitions
@@ -52,6 +53,13 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+
+    /// Scenery index cache management commands
+    #[command(name = "scenery-index")]
+    SceneryIndex {
+        #[command(subcommand)]
+        action: SceneryIndexAction,
     },
 
     /// Output system diagnostics for bug reports
@@ -149,6 +157,13 @@ enum Commands {
         /// Disable predictive tile prefetching
         #[arg(long)]
         no_prefetch: bool,
+
+        /// ICAO airport code for cold-start pre-warming (e.g., LFBO, KJFK)
+        ///
+        /// When specified, pre-loads tiles around the airport before starting.
+        /// Useful for pre-warming the cache before a flight.
+        #[arg(long)]
+        airport: Option<String>,
     },
 
     /// Download a single tile to a file (for testing)
@@ -198,6 +213,7 @@ fn main() {
         Commands::Init => commands::init::run(),
         Commands::Config { command } => commands::config::run(command),
         Commands::Cache { action } => commands::cache::run(action),
+        Commands::SceneryIndex { action } => commands::scenery_index::run(action),
         Commands::Diagnostics => commands::diagnostics::run(),
         Commands::Publish { command } => commands::publish::run(command),
         Commands::Packages { command } => commands::packages::run(command),
@@ -251,6 +267,7 @@ fn main() {
             no_cache,
             debug,
             no_prefetch,
+            airport,
         } => commands::run::run(commands::run::RunArgs {
             provider,
             google_api_key,
@@ -261,6 +278,7 @@ fn main() {
             no_cache,
             debug,
             no_prefetch,
+            airport,
         }),
     };
 

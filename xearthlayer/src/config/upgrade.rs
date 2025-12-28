@@ -41,7 +41,22 @@ use super::keys::ConfigKey;
 /// ];
 /// ```
 pub const DEPRECATED_KEYS: &[&str] = &[
-    // No deprecated keys yet - add entries here when deprecating settings
+    // Removed in v0.2.9 - ZL12 prefetching simplified to use same radii as ZL14
+    "prefetch.enable_zl12",
+    "prefetch.zl12_inner_radius_nm",
+    "prefetch.zl12_outer_radius_nm",
+    // Removed in v0.2.9 - Legacy prefetch settings from old Predictor/Scheduler
+    // These were never wired to the current PrefetcherBuilder
+    "prefetch.cone_distance_nm",
+    "prefetch.radial_radius_nm",
+    "prefetch.batch_size",
+    "prefetch.max_in_flight",
+    // Removed in v0.2.9 - Separate radial/cone outer radii never used from config
+    // Use outer_radius_nm instead (applies to both)
+    "prefetch.radial_outer_radius_nm",
+    "prefetch.cone_outer_radius_nm",
+    // Removed in v0.2.9 - Duplicate of cone_angle (cone_angle is the one actually used)
+    "prefetch.cone_half_angle",
 ];
 
 /// Result of analyzing a configuration file for upgrade needs.
@@ -89,6 +104,10 @@ impl ConfigUpgradeAnalysis {
                 "{} deprecated setting(s)",
                 self.deprecated_keys.len()
             ));
+        }
+
+        if !self.unknown_keys.is_empty() {
+            parts.push(format!("{} obsolete setting(s)", self.unknown_keys.len()));
         }
 
         if parts.is_empty() {
@@ -206,7 +225,10 @@ pub fn analyze_config(path: &Path) -> Result<ConfigUpgradeAnalysis, ConfigFileEr
         .collect();
     unknown_keys.sort();
 
-    let needs_upgrade = !missing_keys.is_empty() || !deprecated_keys.is_empty();
+    // Upgrade needed if there are missing keys, deprecated keys, OR unknown keys
+    // Unknown keys are stale settings from old versions that should be cleaned up
+    let needs_upgrade =
+        !missing_keys.is_empty() || !deprecated_keys.is_empty() || !unknown_keys.is_empty();
 
     Ok(ConfigUpgradeAnalysis {
         missing_keys,

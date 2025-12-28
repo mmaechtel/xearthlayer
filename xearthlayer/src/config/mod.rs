@@ -36,8 +36,6 @@ mod keys;
 mod size;
 mod texture;
 mod upgrade;
-mod xplane;
-
 pub use download::DownloadConfig;
 pub use file::{
     config_directory,
@@ -81,16 +79,12 @@ pub use file::{
     // DownloadConfig defaults
     DEFAULT_PARALLEL_DOWNLOADS,
     // Prefetch defaults
-    DEFAULT_PREFETCH_BATCH_SIZE,
     DEFAULT_PREFETCH_CONE_ANGLE,
-    DEFAULT_PREFETCH_CONE_DISTANCE_NM,
     DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
     DEFAULT_PREFETCH_INNER_RADIUS_NM,
-    DEFAULT_PREFETCH_MAX_IN_FLIGHT,
     DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
     DEFAULT_PREFETCH_OUTER_RADIUS_NM,
     DEFAULT_PREFETCH_RADIAL_RADIUS,
-    DEFAULT_PREFETCH_RADIAL_RADIUS_NM,
     DEFAULT_PREFETCH_UDP_PORT,
     DEFAULT_REQUEST_TIMEOUT_SECS,
     DEFAULT_RETRY_BASE_DELAY_MS,
@@ -101,7 +95,9 @@ pub use texture::TextureConfig;
 pub use upgrade::{
     analyze_config, upgrade_config, ConfigUpgradeAnalysis, UpgradeResult, DEPRECATED_KEYS,
 };
-pub use xplane::{
+// Re-export X-Plane utilities for backwards compatibility
+// Prefer using xearthlayer::xplane module directly for new code
+pub use crate::xplane::{
     derive_mountpoint, detect_custom_scenery, detect_scenery_dir, detect_xplane_install,
     detect_xplane_installs, SceneryDetectionResult, XPlanePathError,
 };

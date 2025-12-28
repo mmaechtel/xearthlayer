@@ -12,6 +12,7 @@
 //! - [`packages`] - Package management (install, remove, update)
 //! - [`publish`] - Package publishing (for scenery creators)
 //! - [`run`] - Main command (mount all packages)
+//! - [`scenery_index`] - SceneryIndex cache management (update, clear, status)
 //! - [`start`] - Mount single scenery pack
 
 pub mod cache;
@@ -23,4 +24,5 @@ pub mod init;
 pub mod packages;
 pub mod publish;
 pub mod run;
+pub mod scenery_index;
 pub mod start;

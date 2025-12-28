@@ -289,6 +289,49 @@ pub struct SceneryTile {
 }
 ```
 
+#### 7. SceneryIndex Cache (`xearthlayer/src/prefetch/scenery_cache.rs`)
+
+The SceneryIndex is persisted to disk to avoid rebuilding on every launch. With EU + partial US (~445,000 tiles), initial indexing takes ~20 seconds. The cache reduces subsequent startups to ~200-500ms.
+
+**Cache Location**: `~/.xearthlayer/scenery_index.cache`
+
+**Cache Format**:
+```
+SCENERY INDEX CACHE
+1                                          # format version
+2                                          # number of packages
+445053                                     # total tile count
+12847                                      # sea tile count
+eu_ortho  /path/to/package  1703980800  125000   # package metadata (name, path, mtime, file_count)
+na_ortho  /path/to/package  1703980900  320053
+
+94800  47888  18  44.50434  -114.22485  0  # tile data (row col zoom lat lon is_sea)
+94801  47889  18  44.51234  -114.21485  1
+...
+```
+
+**Cache Invalidation**:
+The cache is invalidated when any of these conditions are detected:
+- Package list changed (packages added or removed)
+- Any terrain directory's modification time (mtime) changed
+- Any terrain directory's file count changed
+
+**Startup Flow**:
+1. Check if cache file exists
+2. Gather current package metadata (mtime, file counts)
+3. Compare against cached package metadata
+4. If valid → load tiles from cache (~200-500ms)
+5. If invalid → rebuild from .ter files (~20s) and save new cache
+
+**Performance**:
+| Scenario | Time |
+|----------|------|
+| First launch (no cache) | ~20s (build) + ~200ms (save) |
+| Subsequent launch (cache valid) | ~200-500ms (load + validate) |
+| Launch after package update | ~20s (rebuild) + ~200ms (save) |
+
+Cache file size: ~15-25 bytes per tile × 445,000 tiles ≈ **7-11 MB**
+
 ### Timeout Mechanism
 
 Prefetch requests include a 10-second timeout to prevent stuck jobs:
@@ -403,6 +446,43 @@ Disable with `--no-prefetch` flag:
 xearthlayer run --no-prefetch
 ```
 
+### SceneryIndex Cache Management
+
+Manage the SceneryIndex cache outside of `run` with dedicated CLI commands:
+
+```bash
+# Show cache status
+xearthlayer scenery-index status
+# Output:
+# Scenery index cache: /home/user/.xearthlayer/scenery_index.cache
+#   Status: Valid
+#   Version: 1
+#   Packages: 2
+#     - EU (402505 files)
+#     - NA (42548 files)
+#   Total tiles: 445053
+#   Land tiles: 246193
+#   Sea tiles: 198860
+#   File size: 16.9 MB
+
+# Rebuild the index from installed packages
+xearthlayer scenery-index update
+# Output:
+# Building scenery index from 2 packages...
+#   Indexing EU... 402505 tiles
+#   Indexing NA... 42548 tiles
+# Saving cache...
+# Done. 445053 tiles indexed (246193 land, 198860 sea)
+
+# Delete the cache file (forces rebuild on next run)
+xearthlayer scenery-index clear
+```
+
+These commands are useful for:
+- Verifying cache status after package installation
+- Manually rebuilding the index without running the full UI
+- Troubleshooting cache invalidation issues
+
 ## Design Decisions
 
 ### DD-001: HeadingAware vs Radial Prefetching
@@ -506,9 +586,11 @@ xearthlayer/src/prefetch/
 ├── radial.rs           # RadialPrefetcher (simple fallback)
 ├── cone.rs             # ConeGenerator for forward prefetch
 ├── buffer.rs           # BufferGenerator for lateral/rear
-├── intersection.rs     # Tile/zone intersection testing (NEW in v0.2.9)
+├── intersection.rs     # Tile/zone intersection testing
 ├── inference.rs        # FUSE request analyzer
 ├── scenery_index.rs    # SceneryIndex for exact tile lookup
+├── scenery_cache.rs    # Persistent cache for SceneryIndex
+├── prewarm.rs          # Cold-start cache warming
 ├── listener.rs         # UDP telemetry listener
 ├── config.rs           # Configuration types
 ├── builder.rs          # PrefetcherBuilder
@@ -548,6 +630,18 @@ Map view showing cached tiles, prefetch requests, and aircraft position.
 
 Reduce prefetch rate when provider shows signs of throttling.
 
+### FE-005: Incremental SceneryIndex Updates
+
+Only re-scan packages whose `mtime` changed instead of rebuilding the entire index. When the cache is stale due to a single package update, scan only that package and merge results with cached tiles from unchanged packages.
+
+### FE-006: Binary SceneryIndex Format
+
+Switch from text-based format to bincode/MessagePack for faster cache load times. The current text format (~7-11 MB for 445k tiles) loads in ~200-500ms. Binary format could reduce this to ~50-100ms for very large worldwide tile sets.
+
+### FE-007: Async SceneryIndex Cache I/O
+
+Use `tokio::fs` for non-blocking cache read/write operations. Currently cache operations are synchronous and block the main thread briefly during startup. Async I/O would allow the dashboard to render immediately while cache loads in background.
+
 ---
 
 ## Changelog
@@ -560,3 +654,4 @@ Reduce prefetch rate when provider shows signs of throttling.
 | 2025-12-25 | Claude | HeadingAwarePrefetcher: Cone and buffer generators, turn detection, FUSE inference fallback, graceful degradation chain |
 | 2025-12-26 | Claude | SceneryIndex: Parse .ter files for exact tile coordinates, sea tile detection, grid-based spatial index |
 | 2025-12-28 | Claude | **Dual-zone architecture**: Radial buffer (85-100nm, 360°) + heading cone (85-120nm, 60° forward). New intersection.rs module for proper tile/zone intersection testing. Config keys: radial_outer_radius_nm, cone_outer_radius_nm, cone_half_angle. Three-pool CPU limiter gives prefetch guaranteed capacity. |
+| 2025-12-28 | Claude | **SceneryIndex persistent cache**: New `scenery_cache.rs` module caches the SceneryIndex to disk (~7-11 MB for 445k tiles). First launch: ~20s build + save. Subsequent launches: ~200-500ms load. Cache invalidates on package changes (mtime, file count). Added `from_tiles()` and `all_tiles()` methods to SceneryIndex. Future enhancements: FE-005 (incremental updates), FE-006 (binary format), FE-007 (async I/O). |
