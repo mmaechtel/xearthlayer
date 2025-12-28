@@ -62,7 +62,7 @@ pub struct PrewarmConfig {
 impl Default for PrewarmConfig {
     fn default() -> Self {
         Self {
-            radius_nm: 100.0,
+            radius_nm: 300.0,
             max_concurrent: 8,
         }
     }
