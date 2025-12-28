@@ -4,8 +4,7 @@
 //! with BC1 or BC3 compression and mipmaps.
 
 use crate::pipeline::{
-    BlockingExecutor, JobError, JobId, PriorityConcurrencyLimiter, RequestPriority,
-    TextureEncoderAsync,
+    BlockingExecutor, CPUConcurrencyLimiter, JobError, JobId, RequestPriority, TextureEncoderAsync,
 };
 use crate::telemetry::PipelineMetrics;
 use image::RgbaImage;
@@ -40,7 +39,7 @@ pub async fn encode_stage<E, X>(
     encoder: Arc<E>,
     executor: &X,
     metrics: Option<Arc<PipelineMetrics>>,
-    encode_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<CPUConcurrencyLimiter>>,
     is_prefetch: bool,
 ) -> Result<Vec<u8>, JobError>
 where
@@ -198,7 +197,7 @@ mod tests {
         let image = RgbaImage::new(256, 256);
         let encoder = Arc::new(MockEncoder::new());
         let executor = TokioExecutor::new();
-        let limiter = Arc::new(PriorityConcurrencyLimiter::new(2, 50, "test_encode"));
+        let limiter = Arc::new(CPUConcurrencyLimiter::new(2, 50, "test_encode"));
 
         let result = encode_stage(
             JobId::new(),

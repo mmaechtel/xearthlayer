@@ -17,8 +17,8 @@ use crate::pipeline::stages::{
     download_stage_cancellable, download_stage_with_limiter, encode_stage,
 };
 use crate::pipeline::{
-    BlockingExecutor, ChunkProvider, DiskCache, Job, JobError, JobId, JobResult, MemoryCache,
-    PipelineConfig, PipelineContext, PriorityConcurrencyLimiter, TextureEncoderAsync,
+    BlockingExecutor, CPUConcurrencyLimiter, ChunkProvider, DiskCache, Job, JobError, JobId,
+    JobResult, MemoryCache, PipelineConfig, PipelineContext, TextureEncoderAsync,
 };
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
@@ -50,8 +50,8 @@ pub async fn process_job<P, E, M, D, X>(
     ctx: &PipelineContext<P, E, M, D, X>,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
-    assemble_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
-    encode_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<CPUConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<CPUConcurrencyLimiter>>,
     is_prefetch: bool,
 ) -> Result<JobResult, JobError>
 where
@@ -187,8 +187,8 @@ pub async fn process_tile<P, E, M, D, X>(
     config: &PipelineConfig,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
-    assemble_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
-    encode_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<CPUConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<CPUConcurrencyLimiter>>,
     is_prefetch: bool,
 ) -> Result<JobResult, JobError>
 where
@@ -306,8 +306,8 @@ pub async fn process_tile_cancellable<P, E, M, D, X>(
     config: &PipelineConfig,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
-    assemble_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
-    encode_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<CPUConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<CPUConcurrencyLimiter>>,
     cancellation_token: CancellationToken,
     is_prefetch: bool,
 ) -> Result<JobResult, JobError>
@@ -485,8 +485,8 @@ pub async fn process_tile_with_observer<P, E, M, D, X>(
     config: &PipelineConfig,
     metrics: Option<Arc<PipelineMetrics>>,
     http_limiter: Option<Arc<HttpConcurrencyLimiter>>,
-    assemble_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
-    encode_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<CPUConcurrencyLimiter>>,
+    encode_limiter: Option<Arc<CPUConcurrencyLimiter>>,
     cancellation_token: CancellationToken,
     observer: Option<Arc<dyn StageObserver>>,
     is_prefetch: bool,

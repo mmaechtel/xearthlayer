@@ -10,7 +10,7 @@ use crate::fuse::async_passthrough::{DdsHandler, DdsRequest};
 use crate::fuse::{
     get_default_placeholder, parse_dds_filename, validate_dds_or_placeholder, DdsFilename,
 };
-use crate::pipeline::{ConcurrencyLimiter, JobId};
+use crate::pipeline::{JobId, StorageConcurrencyLimiter};
 use crate::prefetch::TileRequestCallback;
 use bytes::Bytes;
 use fuse3::raw::prelude::*;
@@ -84,7 +84,7 @@ pub struct Fuse3PassthroughFS {
     /// Timeout for DDS generation
     generation_timeout: Duration,
     /// Limiter for concurrent disk I/O operations
-    disk_io_limiter: Arc<ConcurrencyLimiter>,
+    disk_io_limiter: Arc<StorageConcurrencyLimiter>,
     /// Optional callback for tile request tracking (for FUSE inference).
     tile_request_callback: Option<TileRequestCallback>,
 }
@@ -100,7 +100,7 @@ impl Fuse3PassthroughFS {
     /// * `dds_handler` - Handler function for DDS generation requests
     /// * `expected_dds_size` - Expected size of generated DDS files
     pub fn new(source_dir: PathBuf, dds_handler: DdsHandler, expected_dds_size: usize) -> Self {
-        let disk_io_limiter = Arc::new(ConcurrencyLimiter::with_defaults("fuse_disk_io"));
+        let disk_io_limiter = Arc::new(StorageConcurrencyLimiter::with_defaults("fuse_disk_io"));
         debug!(
             max_concurrent = disk_io_limiter.max_concurrent(),
             "FUSE disk I/O concurrency limiter initialized"
@@ -128,7 +128,7 @@ impl Fuse3PassthroughFS {
         source_dir: PathBuf,
         dds_handler: DdsHandler,
         expected_dds_size: usize,
-        disk_io_limiter: Arc<ConcurrencyLimiter>,
+        disk_io_limiter: Arc<StorageConcurrencyLimiter>,
     ) -> Self {
         Self {
             inode_manager: InodeManager::new(source_dir.clone()),
@@ -161,7 +161,7 @@ impl Fuse3PassthroughFS {
     }
 
     /// Returns the disk I/O limiter for monitoring/metrics.
-    pub fn disk_io_limiter(&self) -> &Arc<ConcurrencyLimiter> {
+    pub fn disk_io_limiter(&self) -> &Arc<StorageConcurrencyLimiter> {
         &self.disk_io_limiter
     }
 

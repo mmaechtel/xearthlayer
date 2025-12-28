@@ -23,8 +23,8 @@ use crate::pipeline::control_plane::{PipelineControlPlane, StageObserver, Submit
 use crate::pipeline::http_limiter::HttpConcurrencyLimiter;
 use crate::pipeline::processor::process_tile_with_observer;
 use crate::pipeline::{
-    BlockingExecutor, ChunkProvider, DiskCache, MemoryCache, PipelineConfig,
-    PriorityConcurrencyLimiter, TextureEncoderAsync,
+    BlockingExecutor, CPUConcurrencyLimiter, ChunkProvider, DiskCache, MemoryCache, PipelineConfig,
+    TextureEncoderAsync,
 };
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ where
 
     // Create shared priority-aware CPU limiter for both assemble and encode stages.
     // On-demand requests (from X-Plane) get priority over prefetch requests.
-    let cpu_limiter = Arc::new(PriorityConcurrencyLimiter::with_cpu_defaults("cpu_bound"));
+    let cpu_limiter = Arc::new(CPUConcurrencyLimiter::with_defaults("cpu_bound"));
 
     info!(
         metrics_enabled = metrics.is_some(),
@@ -156,8 +156,8 @@ async fn process_dds_request_with_control_plane<P, E, M, D, X>(
     disk_cache: Arc<D>,
     executor: Arc<X>,
     http_limiter: Arc<HttpConcurrencyLimiter>,
-    assemble_limiter: Arc<PriorityConcurrencyLimiter>,
-    encode_limiter: Arc<PriorityConcurrencyLimiter>,
+    assemble_limiter: Arc<CPUConcurrencyLimiter>,
+    encode_limiter: Arc<CPUConcurrencyLimiter>,
     metrics: Option<Arc<PipelineMetrics>>,
     config: PipelineConfig,
 ) where

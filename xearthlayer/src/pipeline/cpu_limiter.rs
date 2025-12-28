@@ -1,8 +1,8 @@
-//! Priority-aware concurrency limiter for CPU-bound operations.
+//! CPU concurrency limiter for CPU-bound operations.
 //!
-//! This module provides a limiter that prioritizes on-demand requests over
-//! prefetch requests, ensuring X-Plane's tile requests are never blocked
-//! by background prefetching.
+//! This module provides a priority-aware limiter for CPU-bound work (assembly,
+//! encoding) that prioritizes on-demand requests over prefetch requests,
+//! ensuring X-Plane's tile requests are never blocked by background prefetching.
 //!
 //! # Design
 //!
@@ -45,12 +45,12 @@ pub enum RequestPriority {
     Low,
 }
 
-/// A priority-aware concurrency limiter.
+/// CPU concurrency limiter for CPU-bound operations.
 ///
-/// Ensures high-priority (on-demand) requests are never blocked by
-/// low-priority (prefetch) requests.
+/// Uses priority pools to ensure high-priority (on-demand) requests are
+/// never blocked by low-priority (prefetch) requests during assembly/encoding.
 #[derive(Debug)]
-pub struct PriorityConcurrencyLimiter {
+pub struct CPUConcurrencyLimiter {
     /// Semaphore for priority (on-demand only) permits
     priority_semaphore: Arc<Semaphore>,
 
@@ -75,7 +75,7 @@ pub struct PriorityConcurrencyLimiter {
     label: String,
 }
 
-impl PriorityConcurrencyLimiter {
+impl CPUConcurrencyLimiter {
     /// Creates a new priority limiter with the specified total permits.
     ///
     /// # Arguments
@@ -88,7 +88,7 @@ impl PriorityConcurrencyLimiter {
     ///
     /// ```ignore
     /// // 20 total permits, 40% reserved = 8 priority + 12 shared
-    /// let limiter = PriorityConcurrencyLimiter::new(20, 40, "cpu_bound");
+    /// let limiter = CPUConcurrencyLimiter::new(20, 40, "cpu_bound");
     /// ```
     pub fn new(
         total_permits: usize,
@@ -116,7 +116,7 @@ impl PriorityConcurrencyLimiter {
             priority = priority_permits,
             shared = shared_permits,
             label = %label_str,
-            "Created priority concurrency limiter"
+            "Created CPU concurrency limiter"
         );
 
         Self {
@@ -133,12 +133,12 @@ impl PriorityConcurrencyLimiter {
     /// Creates a limiter with default settings for CPU-bound work.
     ///
     /// Uses modest over-subscription (1.25x cores) with 40% reserved for priority.
-    pub fn with_cpu_defaults(label: impl Into<String>) -> Self {
+    pub fn with_defaults(label: impl Into<String>) -> Self {
         let cpus = std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(4);
 
-        // Same formula as ConcurrencyLimiter::with_cpu_oversubscribe
+        // Modest over-subscription keeps cores busy during brief I/O waits
         let total = ((cpus as f64 * 1.25).ceil() as usize).max(cpus + 2);
 
         Self::new(total, DEFAULT_PRIORITY_RESERVE_PERCENT, label)
@@ -159,7 +159,7 @@ impl PriorityConcurrencyLimiter {
     ///
     /// For high priority: Always returns a permit (waits if necessary).
     /// For low priority: Returns `Some(permit)` if available, `None` otherwise.
-    pub async fn acquire(&self, priority: RequestPriority) -> Option<PriorityPermit> {
+    pub async fn acquire(&self, priority: RequestPriority) -> Option<CPUPermit> {
         match priority {
             RequestPriority::High => {
                 // High priority: try priority pool first, then shared
@@ -168,7 +168,7 @@ impl PriorityConcurrencyLimiter {
                 // First, try the priority pool (fast path)
                 if let Ok(permit) = self.priority_semaphore.clone().try_acquire_owned() {
                     self.high_priority_in_flight.fetch_add(1, Ordering::Relaxed);
-                    return Some(PriorityPermit {
+                    return Some(CPUPermit {
                         _permit: PermitInner::Priority(permit),
                         in_flight: Arc::clone(&self.high_priority_in_flight),
                     });
@@ -177,7 +177,7 @@ impl PriorityConcurrencyLimiter {
                 // Priority pool full, try shared pool (also fast path)
                 if let Ok(permit) = self.shared_semaphore.clone().try_acquire_owned() {
                     self.high_priority_in_flight.fetch_add(1, Ordering::Relaxed);
-                    return Some(PriorityPermit {
+                    return Some(CPUPermit {
                         _permit: PermitInner::Shared(permit),
                         in_flight: Arc::clone(&self.high_priority_in_flight),
                     });
@@ -192,7 +192,7 @@ impl PriorityConcurrencyLimiter {
                     .expect("priority semaphore closed");
 
                 self.high_priority_in_flight.fetch_add(1, Ordering::Relaxed);
-                Some(PriorityPermit {
+                Some(CPUPermit {
                     _permit: PermitInner::Priority(permit),
                     in_flight: Arc::clone(&self.high_priority_in_flight),
                 })
@@ -202,7 +202,7 @@ impl PriorityConcurrencyLimiter {
                 // Prefetch should not block - if busy, skip this cycle
                 if let Ok(permit) = self.shared_semaphore.clone().try_acquire_owned() {
                     self.low_priority_in_flight.fetch_add(1, Ordering::Relaxed);
-                    Some(PriorityPermit {
+                    Some(CPUPermit {
                         _permit: PermitInner::Shared(permit),
                         in_flight: Arc::clone(&self.low_priority_in_flight),
                     })
@@ -218,7 +218,7 @@ impl PriorityConcurrencyLimiter {
     ///
     /// This is the most common case - on-demand requests from X-Plane.
     /// Always returns a permit (waits if necessary).
-    pub async fn acquire_high(&self) -> PriorityPermit {
+    pub async fn acquire_high(&self) -> CPUPermit {
         self.acquire(RequestPriority::High)
             .await
             .expect("high priority acquire should always succeed")
@@ -227,7 +227,7 @@ impl PriorityConcurrencyLimiter {
     /// Tries to acquire a low-priority permit (convenience method).
     ///
     /// For prefetch requests. Returns `None` if no shared permits available.
-    pub async fn try_acquire_low(&self) -> Option<PriorityPermit> {
+    pub async fn try_acquire_low(&self) -> Option<CPUPermit> {
         self.acquire(RequestPriority::Low).await
     }
 
@@ -285,16 +285,16 @@ enum PermitInner {
     Shared(OwnedSemaphorePermit),
 }
 
-/// A permit from the priority limiter.
+/// A permit from the CPU limiter.
 ///
 /// While held, counts against either the priority or shared pool.
 /// Automatically released when dropped.
-pub struct PriorityPermit {
+pub struct CPUPermit {
     _permit: PermitInner,
     in_flight: Arc<AtomicUsize>,
 }
 
-impl Drop for PriorityPermit {
+impl Drop for CPUPermit {
     fn drop(&mut self) {
         self.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_new_limiter() {
-        let limiter = PriorityConcurrencyLimiter::new(20, 40, "test");
+        let limiter = CPUConcurrencyLimiter::new(20, 40, "test");
         assert_eq!(limiter.total_permits(), 20);
         assert_eq!(limiter.priority_permits(), 8); // 40% of 20
         assert_eq!(limiter.shared_permits(), 12); // Remaining
@@ -315,20 +315,20 @@ mod tests {
     #[test]
     fn test_minimum_priority_reserve() {
         // Even with low total, should have at least MIN_PRIORITY_RESERVE
-        let limiter = PriorityConcurrencyLimiter::new(6, 10, "test");
+        let limiter = CPUConcurrencyLimiter::new(6, 10, "test");
         assert!(limiter.priority_permits() >= MIN_PRIORITY_RESERVE);
     }
 
     #[test]
     fn test_shared_has_at_least_one() {
         // Should always leave at least 1 for shared
-        let limiter = PriorityConcurrencyLimiter::new(5, 100, "test");
+        let limiter = CPUConcurrencyLimiter::new(5, 100, "test");
         assert!(limiter.shared_permits() >= 1);
     }
 
     #[tokio::test]
     async fn test_high_priority_always_succeeds() {
-        let limiter = PriorityConcurrencyLimiter::new(10, 50, "test");
+        let limiter = CPUConcurrencyLimiter::new(10, 50, "test");
 
         // Acquire all permits
         let mut permits = Vec::new();
@@ -345,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_low_priority_non_blocking() {
-        let limiter = PriorityConcurrencyLimiter::new(10, 50, "test");
+        let limiter = CPUConcurrencyLimiter::new(10, 50, "test");
         // 5 priority + 5 shared
 
         // Fill shared pool with low priority
@@ -366,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_high_priority_uses_both_pools() {
-        let limiter = PriorityConcurrencyLimiter::new(10, 50, "test");
+        let limiter = CPUConcurrencyLimiter::new(10, 50, "test");
         // 5 priority + 5 shared
 
         // Fill with high priority - should use both pools
@@ -382,7 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_low_priority_blocked_by_high() {
-        let limiter = Arc::new(PriorityConcurrencyLimiter::new(10, 50, "test"));
+        let limiter = Arc::new(CPUConcurrencyLimiter::new(10, 50, "test"));
         // 5 priority + 5 shared
 
         // Fill shared pool with high priority
@@ -405,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_pool_waits_when_busy() {
-        let limiter = Arc::new(PriorityConcurrencyLimiter::new(6, 50, "test"));
+        let limiter = Arc::new(CPUConcurrencyLimiter::new(6, 50, "test"));
         // 3 priority + 3 shared (but minimum is 4, so might be different)
 
         // This test ensures high priority will wait on priority pool when all are busy

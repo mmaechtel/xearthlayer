@@ -26,7 +26,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::pipeline::ConcurrencyLimiter;
+use crate::pipeline::StorageConcurrencyLimiter;
 
 /// Parallel disk cache adapter with dedicated I/O threads.
 ///
@@ -53,7 +53,7 @@ pub struct ParallelDiskCache {
     cache_dir: PathBuf,
     provider: String,
     /// Concurrency limiter for disk I/O operations
-    io_limiter: Arc<ConcurrencyLimiter>,
+    io_limiter: Arc<StorageConcurrencyLimiter>,
 }
 
 impl ParallelDiskCache {
@@ -74,7 +74,7 @@ impl ParallelDiskCache {
         Self {
             cache_dir,
             provider: provider_str,
-            io_limiter: Arc::new(ConcurrencyLimiter::new(max_concurrent_io, label)),
+            io_limiter: Arc::new(StorageConcurrencyLimiter::new(max_concurrent_io, label)),
         }
     }
 
@@ -93,13 +93,13 @@ impl ParallelDiskCache {
     /// # Example
     ///
     /// ```ignore
-    /// let limiter = Arc::new(ConcurrencyLimiter::with_defaults("global_disk_io"));
+    /// let limiter = Arc::new(StorageConcurrencyLimiter::with_defaults("global_disk_io"));
     /// let cache = ParallelDiskCache::with_shared_limiter(path, "bing", limiter);
     /// ```
     pub fn with_shared_limiter(
         cache_dir: PathBuf,
         provider: impl Into<String>,
-        limiter: Arc<ConcurrencyLimiter>,
+        limiter: Arc<StorageConcurrencyLimiter>,
     ) -> Self {
         Self {
             cache_dir,
@@ -121,7 +121,7 @@ impl ParallelDiskCache {
         Self {
             cache_dir,
             provider: provider_str.clone(),
-            io_limiter: Arc::new(ConcurrencyLimiter::with_disk_io_defaults(format!(
+            io_limiter: Arc::new(StorageConcurrencyLimiter::with_disk_io_defaults(format!(
                 "disk_cache_{}",
                 provider_str
             ))),
@@ -227,7 +227,7 @@ impl BatchedDiskCache {
     pub fn with_shared_limiter(
         cache_dir: PathBuf,
         provider: impl Into<String>,
-        limiter: Arc<ConcurrencyLimiter>,
+        limiter: Arc<StorageConcurrencyLimiter>,
     ) -> Self {
         Self {
             inner: ParallelDiskCache::with_shared_limiter(cache_dir, provider, limiter),
@@ -424,7 +424,7 @@ mod tests {
         let temp_dir2 = tempfile::tempdir().unwrap();
 
         // Create a shared limiter with low concurrency for testing
-        let shared_limiter = Arc::new(ConcurrencyLimiter::new(4, "shared_test"));
+        let shared_limiter = Arc::new(StorageConcurrencyLimiter::new(4, "shared_test"));
 
         // Create two caches sharing the same limiter
         let cache1 = Arc::new(ParallelDiskCache::with_shared_limiter(

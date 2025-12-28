@@ -14,7 +14,7 @@ use crate::fuse::SpawnedMountHandle;
 use crate::package::PackageType;
 use crate::panic as panic_handler;
 use crate::pipeline::adapters::MemoryCacheAdapter;
-use crate::pipeline::{ConcurrencyLimiter, DiskIoProfile};
+use crate::pipeline::{DiskIoProfile, StorageConcurrencyLimiter};
 use crate::prefetch::TileRequestCallback;
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
 use crate::telemetry::TelemetrySnapshot;
@@ -498,7 +498,7 @@ pub struct ServiceBuilder {
     logger: Arc<dyn crate::log::Logger>,
     /// Shared disk I/O limiter across all service instances.
     /// Created lazily on first build to avoid allocation when unused.
-    disk_io_limiter: Arc<ConcurrencyLimiter>,
+    disk_io_limiter: Arc<StorageConcurrencyLimiter>,
     /// Shared memory cache across all service instances.
     /// Without this, each package would have its own cache with the full
     /// configured limit, potentially using N times the expected memory.
@@ -556,7 +556,7 @@ impl ServiceBuilder {
         };
 
         // Create limiter based on resolved profile
-        let disk_io_limiter = Arc::new(ConcurrencyLimiter::for_disk_io_profile(
+        let disk_io_limiter = Arc::new(StorageConcurrencyLimiter::for_disk_io_profile(
             resolved_profile,
             "global_disk_io",
         ));

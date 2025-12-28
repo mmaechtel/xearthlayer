@@ -1974,15 +1974,15 @@ Root cause: The assembly stage had **no concurrency limiter**, allowing unlimite
 
 1. **Merged assemble and encode into shared CPU limiter** (`pipeline/runner.rs`)
    ```rust
-   // Before: Separate limiters
-   let assemble_limiter = Arc::new(ConcurrencyLimiter::with_cpu_defaults("assemble"));
-   let encode_limiter = Arc::new(ConcurrencyLimiter::with_cpu_defaults("encode"));
+   // Before: Separate limiters (historical)
+   // let assemble_limiter = Arc::new(ConcurrencyLimiter::with_cpu_defaults("assemble"));
+   // let encode_limiter = Arc::new(ConcurrencyLimiter::with_cpu_defaults("encode"));
 
-   // After: Single shared limiter with modest over-subscription
-   let cpu_limiter = Arc::new(ConcurrencyLimiter::with_cpu_oversubscribe("cpu_bound"));
+   // After: Single shared priority-aware limiter with modest over-subscription
+   let cpu_limiter = Arc::new(CPUConcurrencyLimiter::with_defaults("cpu_bound"));
    ```
 
-2. **Over-subscription formula** (`pipeline/concurrency_limiter.rs`)
+2. **Over-subscription formula** (`pipeline/cpu_limiter.rs`)
    ```rust
    pub fn with_cpu_oversubscribe(label: impl Into<String>) -> Self {
        let cpus = std::thread::available_parallelism()
@@ -2063,7 +2063,7 @@ Different storage types have vastly different optimal I/O concurrency:
            // Resolve Auto profile based on cache directory
            let resolved_profile = disk_io_profile.resolve_for_path(cache_path);
            let disk_io_limiter = Arc::new(
-               ConcurrencyLimiter::for_disk_io_profile(resolved_profile, "global_disk_io")
+               StorageConcurrencyLimiter::for_disk_io_profile(resolved_profile, "global_disk_io")
            );
            // ...
        }
@@ -2086,15 +2086,16 @@ Different storage types have vastly different optimal I/O concurrency:
 | Resource | Limiter | Formula | Example (8 cores) |
 |----------|---------|---------|-------------------|
 | HTTP requests | `HttpConcurrencyLimiter` | `min(cpus * 16, 256)` | 128 |
-| CPU-bound work | `ConcurrencyLimiter` (shared) | `max(cpus * 1.25, cpus + 2)` | 10 |
-| Disk I/O (SSD) | `ConcurrencyLimiter` | `min(cpus * 4, 64)` | 32 |
-| Disk I/O (HDD) | `ConcurrencyLimiter` | `min(cpus * 1, 4)` | 4 |
-| Disk I/O (NVMe) | `ConcurrencyLimiter` | `min(cpus * 8, 256)` | 64 |
+| CPU-bound work | `CPUConcurrencyLimiter` (shared) | `max(cpus * 1.25, cpus + 2)` | 10 |
+| Disk I/O (SSD) | `StorageConcurrencyLimiter` | `min(cpus * 4, 64)` | 32 |
+| Disk I/O (HDD) | `StorageConcurrencyLimiter` | `min(cpus * 1, 4)` | 4 |
+| Disk I/O (NVMe) | `StorageConcurrencyLimiter` | `min(cpus * 8, 256)` | 64 |
 
 #### Files Modified
 
 - `pipeline/storage.rs` - New module with `DiskIoProfile` and storage detection
-- `pipeline/concurrency_limiter.rs` - Added `with_cpu_oversubscribe()`, `for_disk_io_profile()`
+- `pipeline/storage_limiter.rs` - `StorageConcurrencyLimiter` for disk I/O
+- `pipeline/cpu_limiter.rs` - `CPUConcurrencyLimiter` with priority support
 - `pipeline/runner.rs` - Uses shared `cpu_limiter` for assemble and encode
 - `pipeline/stages/assembly.rs` - Already had limiter parameter (from deadlock fix)
 - `config/file.rs` - Added `disk_io_profile` to `CacheSettings`
