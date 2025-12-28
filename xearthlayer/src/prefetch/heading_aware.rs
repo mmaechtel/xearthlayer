@@ -63,6 +63,7 @@ use super::buffer::BufferGenerator;
 use super::cone::ConeGenerator;
 use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
 use super::inference::FuseRequestAnalyzer;
+use super::intersection::{test_zone_intersection, TileBounds, ZoneIntersection};
 use super::scenery_index::SceneryIndex;
 use super::state::{
     AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode, SharedPrefetchStatus,
@@ -559,64 +560,142 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         tiles
     }
 
-    /// Generate tiles using scenery index lookup.
+    /// Generate tiles using scenery index lookup with dual-zone prefetch.
     ///
-    /// Queries the SceneryIndex for tiles near the aircraft position.
-    /// This provides exact tile coordinates and zoom levels from .ter files.
+    /// Implements a two-zone prefetch strategy:
+    /// 1. **Radial buffer** (85-100nm, 360°): Thin ring around X-Plane's boundary
+    ///    for coverage in all directions (handles unexpected turns)
+    /// 2. **Heading cone** (85-120nm, forward): Deep lookahead in the direction
+    ///    of travel for sustained flight
+    ///
+    /// Both zones run together and tiles are combined. Coalescing in the pipeline
+    /// handles deduplication.
     fn generate_scenery_tiles(&self, lat: f64, lon: f64) -> Vec<PrefetchTile> {
         let Some(ref index) = self.scenery_index else {
             return Vec::new();
         };
 
-        // Query tiles within the prefetch radius (use outer radius)
-        let radius_nm = self.config.heading.outer_radius_nm;
-        let scenery_tiles = index.tiles_near(lat, lon, radius_nm);
+        // Get heading for cone filtering (use 0 if no telemetry)
+        let heading = self
+            .last_telemetry_state
+            .as_ref()
+            .map(|s| s.heading)
+            .unwrap_or(0.0);
+
+        // Determine effective cone half-angle (may be widened during turns)
+        let effective_half_angle = match &self.turn_state {
+            TurnState::Straight => self.config.heading.cone_half_angle,
+            TurnState::Turning { .. } => {
+                self.config.heading.cone_half_angle * self.config.heading.turn_widening_factor
+            }
+        };
+
+        // Zone boundaries
+        let inner_radius = self.config.heading.inner_radius_nm;
+        let radial_outer = self.config.heading.radial_outer_radius_nm;
+        let cone_outer = self.config.heading.cone_outer_radius_nm;
+
+        // Add buffer for tile size to catch tiles whose center is outside but edge is inside.
+        // ZL12 tiles are the largest (~10nm at mid-latitudes), so use 15nm buffer to be safe.
+        // This ensures ANY tile with ANY part inside the catchment area is included.
+        let tile_size_buffer_nm = 15.0;
+        let query_radius = cone_outer + tile_size_buffer_nm;
+
+        // Query all tiles within the buffered radius
+        let scenery_tiles = index.tiles_near(lat, lon, query_radius);
 
         if scenery_tiles.is_empty() {
-            trace!(lat, lon, radius_nm, "No scenery tiles found in index");
+            trace!(lat, lon, cone_outer, "No scenery tiles found in index");
             return Vec::new();
         }
 
-        trace!(
-            lat,
-            lon,
-            radius_nm,
-            tiles = scenery_tiles.len(),
-            "Found scenery tiles in index"
-        );
+        let mut radial_count = 0u32;
+        let mut cone_count = 0u32;
 
-        // Convert to PrefetchTile with priority based on distance and type
+        // Filter tiles using intersection testing
         let mut tiles: Vec<PrefetchTile> = scenery_tiles
             .into_iter()
-            .map(|st| {
-                // Calculate approximate distance for priority
-                let lat_diff = (lat as f32 - st.lat) * 60.0; // 1 degree ≈ 60nm
-                let lon_diff = (lon as f32 - st.lon) * 60.0 * (st.lat.to_radians().cos());
-                let dist_nm = (lat_diff * lat_diff + lon_diff * lon_diff).sqrt();
+            .filter_map(|st| {
+                // Calculate tile bounds relative to aircraft position
+                let bounds = TileBounds::from_scenery_tile(&st, lat, lon);
 
-                // Base priority from distance (0-100 for typical 100nm radius)
-                let distance_priority = (dist_nm * 1.0).min(100.0) as u32;
+                // Test which zone(s) the tile intersects
+                let zone_result = test_zone_intersection(
+                    &bounds,
+                    heading,
+                    effective_half_angle,
+                    inner_radius,
+                    radial_outer,
+                    cone_outer,
+                );
 
-                // Deprioritize sea tiles (add 200 to priority, making them lower priority)
+                // Skip tiles that don't intersect any zone
+                if !zone_result.intersects() {
+                    return None;
+                }
+
+                // Map zone result to PrefetchZone and count
+                let zone = match zone_result {
+                    ZoneIntersection::ConeCenter => {
+                        cone_count += 1;
+                        PrefetchZone::ForwardCenter
+                    }
+                    ZoneIntersection::ConeEdge => {
+                        cone_count += 1;
+                        PrefetchZone::ForwardEdge
+                    }
+                    ZoneIntersection::RadialBuffer => {
+                        radial_count += 1;
+                        PrefetchZone::LateralBuffer
+                    }
+                    ZoneIntersection::None => unreachable!(),
+                };
+
+                // Calculate priority
+                let base_priority = zone_result.base_priority();
+
+                // Distance priority: tiles at inner edge have higher priority
+                let distance_priority =
+                    ((bounds.center_distance_nm - inner_radius).max(0.0) * 2.0) as u32;
+
+                // Angle priority for cone tiles
+                let angle_priority = match zone_result {
+                    ZoneIntersection::ConeCenter | ZoneIntersection::ConeEdge => {
+                        (bounds.angle_from_heading(heading) / 5.0) as u32
+                    }
+                    _ => 0,
+                };
+
+                // Deprioritize sea tiles
                 let type_priority = if st.is_sea { 200 } else { 0 };
 
-                // Include zoom level in priority (closer zoom levels get slight priority)
+                // Zoom level priority (lower zoom = larger tiles = lower priority)
                 let zoom_priority = (20u8.saturating_sub(st.tile_zoom())) as u32 * 5;
 
-                let priority = PrefetchZone::ForwardCenter.base_priority()
+                let priority = base_priority
                     + distance_priority
+                    + angle_priority
                     + type_priority
                     + zoom_priority;
 
-                let zone = if dist_nm < self.config.heading.inner_radius_nm {
-                    PrefetchZone::ForwardCenter
-                } else {
-                    PrefetchZone::ForwardEdge
-                };
-
-                PrefetchTile::new(st.to_tile_coord(), priority, zone)
+                Some(PrefetchTile::new(st.to_tile_coord(), priority, zone))
             })
             .collect();
+
+        info!(
+            lat = format!("{:.2}", lat),
+            lon = format!("{:.2}", lon),
+            heading = format!("{:.0}", heading),
+            radial_tiles = radial_count,
+            cone_tiles = cone_count,
+            total = tiles.len(),
+            "Prefetch cycle: radial={}-{}nm cone={}-{}nm half_angle={}°",
+            inner_radius,
+            radial_outer,
+            inner_radius,
+            cone_outer,
+            effective_half_angle
+        );
 
         // Sort by priority (lower = higher priority)
         tiles.sort_by_key(|t| t.priority);

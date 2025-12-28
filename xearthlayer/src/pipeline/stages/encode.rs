@@ -197,7 +197,7 @@ mod tests {
         let image = RgbaImage::new(256, 256);
         let encoder = Arc::new(MockEncoder::new());
         let executor = TokioExecutor::new();
-        let limiter = Arc::new(CPUConcurrencyLimiter::new(2, 50, "test_encode"));
+        let limiter = Arc::new(CPUConcurrencyLimiter::new(4, 40, 20, "test_encode"));
 
         let result = encode_stage(
             JobId::new(),

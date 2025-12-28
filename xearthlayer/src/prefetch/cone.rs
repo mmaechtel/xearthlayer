@@ -416,9 +416,9 @@ mod tests {
     fn test_new_generator() {
         let gen = default_generator();
         assert_eq!(gen.zoom(), 14);
-        // Default prefetch zone: 85nm to 105nm
+        // Default cone prefetch zone: 85nm to 120nm
         assert_eq!(gen.inner_radius_nm(), 85.0);
-        assert_eq!(gen.outer_radius_nm(), 105.0);
+        assert_eq!(gen.outer_radius_nm(), 120.0);
     }
 
     #[test]

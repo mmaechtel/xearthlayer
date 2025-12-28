@@ -84,6 +84,9 @@ pub enum ConfigKey {
     PrefetchRadialRadius,
     PrefetchInnerRadiusNm,
     PrefetchOuterRadiusNm,
+    PrefetchRadialOuterRadiusNm,
+    PrefetchConeOuterRadiusNm,
+    PrefetchConeHalfAngle,
     PrefetchMaxTilesPerCycle,
     PrefetchCycleIntervalMs,
 
@@ -144,6 +147,9 @@ impl FromStr for ConfigKey {
             "prefetch.radial_radius" => Ok(ConfigKey::PrefetchRadialRadius),
             "prefetch.inner_radius_nm" => Ok(ConfigKey::PrefetchInnerRadiusNm),
             "prefetch.outer_radius_nm" => Ok(ConfigKey::PrefetchOuterRadiusNm),
+            "prefetch.radial_outer_radius_nm" => Ok(ConfigKey::PrefetchRadialOuterRadiusNm),
+            "prefetch.cone_outer_radius_nm" => Ok(ConfigKey::PrefetchConeOuterRadiusNm),
+            "prefetch.cone_half_angle" => Ok(ConfigKey::PrefetchConeHalfAngle),
             "prefetch.max_tiles_per_cycle" => Ok(ConfigKey::PrefetchMaxTilesPerCycle),
             "prefetch.cycle_interval_ms" => Ok(ConfigKey::PrefetchCycleIntervalMs),
 
@@ -201,6 +207,9 @@ impl ConfigKey {
             ConfigKey::PrefetchRadialRadius => "prefetch.radial_radius",
             ConfigKey::PrefetchInnerRadiusNm => "prefetch.inner_radius_nm",
             ConfigKey::PrefetchOuterRadiusNm => "prefetch.outer_radius_nm",
+            ConfigKey::PrefetchRadialOuterRadiusNm => "prefetch.radial_outer_radius_nm",
+            ConfigKey::PrefetchConeOuterRadiusNm => "prefetch.cone_outer_radius_nm",
+            ConfigKey::PrefetchConeHalfAngle => "prefetch.cone_half_angle",
             ConfigKey::PrefetchMaxTilesPerCycle => "prefetch.max_tiles_per_cycle",
             ConfigKey::PrefetchCycleIntervalMs => "prefetch.cycle_interval_ms",
             ConfigKey::ControlPlaneMaxConcurrentJobs => "control_plane.max_concurrent_jobs",
@@ -297,6 +306,13 @@ impl ConfigKey {
             ConfigKey::PrefetchRadialRadius => config.prefetch.radial_radius.to_string(),
             ConfigKey::PrefetchInnerRadiusNm => config.prefetch.inner_radius_nm.to_string(),
             ConfigKey::PrefetchOuterRadiusNm => config.prefetch.outer_radius_nm.to_string(),
+            ConfigKey::PrefetchRadialOuterRadiusNm => {
+                config.prefetch.radial_outer_radius_nm.to_string()
+            }
+            ConfigKey::PrefetchConeOuterRadiusNm => {
+                config.prefetch.cone_outer_radius_nm.to_string()
+            }
+            ConfigKey::PrefetchConeHalfAngle => config.prefetch.cone_half_angle.to_string(),
             ConfigKey::PrefetchMaxTilesPerCycle => config.prefetch.max_tiles_per_cycle.to_string(),
             ConfigKey::PrefetchCycleIntervalMs => config.prefetch.cycle_interval_ms.to_string(),
             ConfigKey::ControlPlaneMaxConcurrentJobs => {
@@ -442,6 +458,15 @@ impl ConfigKey {
             ConfigKey::PrefetchOuterRadiusNm => {
                 config.prefetch.outer_radius_nm = value.parse().unwrap();
             }
+            ConfigKey::PrefetchRadialOuterRadiusNm => {
+                config.prefetch.radial_outer_radius_nm = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchConeOuterRadiusNm => {
+                config.prefetch.cone_outer_radius_nm = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchConeHalfAngle => {
+                config.prefetch.cone_half_angle = value.parse().unwrap();
+            }
             ConfigKey::PrefetchMaxTilesPerCycle => {
                 config.prefetch.max_tiles_per_cycle = value.parse().unwrap();
             }
@@ -518,6 +543,9 @@ impl ConfigKey {
             ConfigKey::PrefetchRadialRadius => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchInnerRadiusNm => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchOuterRadiusNm => Box::new(PositiveNumberSpec),
+            ConfigKey::PrefetchRadialOuterRadiusNm => Box::new(PositiveNumberSpec),
+            ConfigKey::PrefetchConeOuterRadiusNm => Box::new(PositiveNumberSpec),
+            ConfigKey::PrefetchConeHalfAngle => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchMaxTilesPerCycle => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCycleIntervalMs => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneMaxConcurrentJobs => Box::new(PositiveIntegerSpec),
@@ -566,6 +594,9 @@ impl ConfigKey {
             ConfigKey::PrefetchRadialRadius,
             ConfigKey::PrefetchInnerRadiusNm,
             ConfigKey::PrefetchOuterRadiusNm,
+            ConfigKey::PrefetchRadialOuterRadiusNm,
+            ConfigKey::PrefetchConeOuterRadiusNm,
+            ConfigKey::PrefetchConeHalfAngle,
             ConfigKey::PrefetchMaxTilesPerCycle,
             ConfigKey::PrefetchCycleIntervalMs,
             ConfigKey::ControlPlaneMaxConcurrentJobs,

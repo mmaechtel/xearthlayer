@@ -25,11 +25,17 @@ pub const XPLANE_LOADED_ZONE_NM: f32 = 90.0;
 /// network latency.
 pub const DEFAULT_INNER_MARGIN_NM: f32 = 5.0;
 
-/// Default buffer beyond X-Plane's loaded zone in nautical miles.
+/// Default buffer beyond X-Plane's loaded zone for radial prefetch in nautical miles.
 ///
-/// How far beyond the 90nm boundary to prefetch. Provides lookahead for
-/// sustained flight in one direction.
-pub const DEFAULT_OUTER_BUFFER_NM: f32 = 15.0;
+/// The radial buffer extends this far beyond X-Plane's 90nm boundary in ALL directions.
+/// Provides 360° coverage for unexpected turns.
+pub const DEFAULT_RADIAL_OUTER_BUFFER_NM: f32 = 10.0;
+
+/// Default buffer beyond X-Plane's loaded zone for heading cone in nautical miles.
+///
+/// The heading cone extends this far beyond X-Plane's 90nm boundary in the
+/// FORWARD direction only. Provides deep lookahead along the flight path.
+pub const DEFAULT_CONE_OUTER_BUFFER_NM: f32 = 30.0;
 
 // ==================== Cone Parameter Defaults ====================
 
@@ -44,11 +50,22 @@ pub const DEFAULT_CONE_HALF_ANGLE: f32 = 30.0;
 /// Prefetch begins just inside X-Plane's 90nm boundary.
 pub const DEFAULT_INNER_RADIUS_NM: f32 = XPLANE_LOADED_ZONE_NM - DEFAULT_INNER_MARGIN_NM; // 85nm
 
-/// Default outer radius - where prefetch zone ends.
+/// Default outer radius for radial buffer (360° coverage).
 ///
-/// This is `XPLANE_LOADED_ZONE_NM + DEFAULT_OUTER_BUFFER_NM`.
-/// Prefetch extends beyond X-Plane's 90nm boundary.
-pub const DEFAULT_OUTER_RADIUS_NM: f32 = XPLANE_LOADED_ZONE_NM + DEFAULT_OUTER_BUFFER_NM; // 105nm
+/// This is `XPLANE_LOADED_ZONE_NM + DEFAULT_RADIAL_OUTER_BUFFER_NM`.
+/// Radial prefetch extends 10nm beyond X-Plane's 90nm boundary in all directions.
+pub const DEFAULT_RADIAL_OUTER_RADIUS_NM: f32 =
+    XPLANE_LOADED_ZONE_NM + DEFAULT_RADIAL_OUTER_BUFFER_NM; // 100nm
+
+/// Default outer radius for heading cone (forward direction only).
+///
+/// This is `XPLANE_LOADED_ZONE_NM + DEFAULT_CONE_OUTER_BUFFER_NM`.
+/// Heading cone extends 30nm beyond X-Plane's 90nm boundary in forward direction.
+pub const DEFAULT_CONE_OUTER_RADIUS_NM: f32 = XPLANE_LOADED_ZONE_NM + DEFAULT_CONE_OUTER_BUFFER_NM; // 120nm
+
+/// Legacy: Default outer radius (kept for backward compatibility).
+/// New code should use DEFAULT_RADIAL_OUTER_RADIUS_NM or DEFAULT_CONE_OUTER_RADIUS_NM.
+pub const DEFAULT_OUTER_RADIUS_NM: f32 = DEFAULT_CONE_OUTER_RADIUS_NM;
 
 // ==================== Buffer Parameter Defaults ====================
 
@@ -186,12 +203,25 @@ pub struct HeadingAwarePrefetchConfig {
     ///
     /// Tiles closer than this are within X-Plane's ~90nm loaded zone and
     /// don't need prefetching. Default: 85nm (90nm - 5nm margin).
+    /// This applies to BOTH radial buffer and heading cone.
     pub inner_radius_nm: f32,
 
-    /// Outer radius in nautical miles - where prefetch zone ENDS.
+    /// Outer radius for RADIAL BUFFER in nautical miles.
     ///
-    /// How far beyond X-Plane's 90nm boundary to prefetch.
-    /// Default: 105nm (90nm + 15nm buffer).
+    /// The radial buffer extends this far in ALL directions (360°).
+    /// Provides coverage for unexpected turns.
+    /// Default: 100nm (90nm + 10nm buffer).
+    pub radial_outer_radius_nm: f32,
+
+    /// Outer radius for HEADING CONE in nautical miles.
+    ///
+    /// The heading cone extends this far in the FORWARD direction only.
+    /// Provides deep lookahead along the flight path.
+    /// Default: 120nm (90nm + 30nm buffer).
+    pub cone_outer_radius_nm: f32,
+
+    /// Legacy: outer_radius_nm (alias for cone_outer_radius_nm).
+    /// Kept for backward compatibility with existing code.
     pub outer_radius_nm: f32,
 
     // ==================== Cone Parameters ====================
@@ -258,7 +288,9 @@ impl Default for HeadingAwarePrefetchConfig {
         Self {
             // Prefetch zone boundaries (around X-Plane's 90nm loaded zone)
             inner_radius_nm: DEFAULT_INNER_RADIUS_NM, // 85nm
-            outer_radius_nm: DEFAULT_OUTER_RADIUS_NM, // 105nm
+            radial_outer_radius_nm: DEFAULT_RADIAL_OUTER_RADIUS_NM, // 100nm
+            cone_outer_radius_nm: DEFAULT_CONE_OUTER_RADIUS_NM, // 120nm
+            outer_radius_nm: DEFAULT_CONE_OUTER_RADIUS_NM, // Legacy alias
 
             // Cone parameters
             cone_half_angle: DEFAULT_CONE_HALF_ANGLE,
@@ -505,8 +537,14 @@ mod tests {
         // Inner radius should be 90nm - 5nm margin = 85nm
         assert_eq!(config.inner_radius_nm, 85.0);
 
-        // Outer radius should be 90nm + 15nm buffer = 105nm
-        assert_eq!(config.outer_radius_nm, 105.0);
+        // Radial outer should be 90nm + 10nm buffer = 100nm
+        assert_eq!(config.radial_outer_radius_nm, 100.0);
+
+        // Cone outer should be 90nm + 30nm buffer = 120nm
+        assert_eq!(config.cone_outer_radius_nm, 120.0);
+
+        // Legacy outer_radius_nm equals cone outer
+        assert_eq!(config.outer_radius_nm, 120.0);
 
         // Verify the constants are calculated from 90nm base
         assert_eq!(
@@ -514,8 +552,12 @@ mod tests {
             XPLANE_LOADED_ZONE_NM - DEFAULT_INNER_MARGIN_NM
         );
         assert_eq!(
-            DEFAULT_OUTER_RADIUS_NM,
-            XPLANE_LOADED_ZONE_NM + DEFAULT_OUTER_BUFFER_NM
+            DEFAULT_RADIAL_OUTER_RADIUS_NM,
+            XPLANE_LOADED_ZONE_NM + DEFAULT_RADIAL_OUTER_BUFFER_NM
+        );
+        assert_eq!(
+            DEFAULT_CONE_OUTER_RADIUS_NM,
+            XPLANE_LOADED_ZONE_NM + DEFAULT_CONE_OUTER_BUFFER_NM
         );
     }
 
@@ -687,22 +729,26 @@ mod tests {
     #[test]
     fn test_should_prefetch_distance_beyond_outer() {
         let config = HeadingAwarePrefetchConfig::default();
-        // Outer boundary: 105nm
+        // Cone outer boundary: 120nm
 
-        // Distance 106nm is beyond prefetch zone
-        assert!(!config.should_prefetch_distance(106.0));
+        // Distance 121nm is beyond prefetch zone
+        assert!(!config.should_prefetch_distance(121.0));
 
-        // Distance 120nm is well beyond prefetch zone
-        assert!(!config.should_prefetch_distance(120.0));
+        // Distance 150nm is well beyond prefetch zone
+        assert!(!config.should_prefetch_distance(150.0));
     }
 
     #[test]
     fn test_prefetch_zone_width() {
         let config = HeadingAwarePrefetchConfig::default();
 
-        // Prefetch zone should span 20nm (from 85nm to 105nm)
-        let zone_width = config.outer_radius_nm - config.inner_radius_nm;
-        assert_eq!(zone_width, 20.0);
+        // Radial buffer zone spans 15nm (from 85nm to 100nm)
+        let radial_width = config.radial_outer_radius_nm - config.inner_radius_nm;
+        assert_eq!(radial_width, 15.0);
+
+        // Cone zone spans 35nm (from 85nm to 120nm)
+        let cone_width = config.cone_outer_radius_nm - config.inner_radius_nm;
+        assert_eq!(cone_width, 35.0);
     }
 
     #[test]

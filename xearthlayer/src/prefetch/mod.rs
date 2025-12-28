@@ -50,6 +50,7 @@ pub mod coordinates;
 mod error;
 mod heading_aware;
 pub mod inference;
+pub mod intersection;
 mod listener;
 mod predictor;
 mod radial;

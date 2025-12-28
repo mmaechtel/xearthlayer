@@ -267,7 +267,7 @@ mod tests {
         chunks.add_success(0, 0, create_test_jpeg(255, 0, 0));
 
         let executor = TokioExecutor::new();
-        let limiter = Arc::new(CPUConcurrencyLimiter::new(2, 50, "test_assemble"));
+        let limiter = Arc::new(CPUConcurrencyLimiter::new(4, 40, 20, "test_assemble"));
 
         let result = assembly_stage(JobId::new(), chunks, &executor, Some(limiter), false)
             .await
