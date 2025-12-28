@@ -102,5 +102,6 @@ pub use prewarm::{PrewarmConfig, PrewarmPrefetcher, PrewarmProgress};
 
 // Scenery index cache
 pub use scenery_cache::{
-    cache_path as scenery_cache_path, load_cache, save_cache, CacheLoadResult,
+    cache_path as scenery_cache_path, cache_status, load_cache, save_cache, CacheLoadResult,
+    CacheStatus,
 };

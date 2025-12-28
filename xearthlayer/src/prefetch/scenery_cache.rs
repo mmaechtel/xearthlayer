@@ -91,9 +91,88 @@ pub enum CacheLoadResult {
     },
 }
 
+/// Status information from cache header (without loading all tiles).
+#[derive(Debug)]
+pub struct CacheStatus {
+    /// Cache format version.
+    pub version: u32,
+    /// Number of packages in the cache.
+    pub package_count: usize,
+    /// Total number of tiles.
+    pub total_tiles: usize,
+    /// Number of sea tiles.
+    pub sea_tiles: usize,
+    /// Package metadata from the cache.
+    pub packages: Vec<CachedPackageInfo>,
+}
+
 /// Get the path to the scenery index cache file.
 pub fn cache_path() -> PathBuf {
     config_directory().join(CACHE_FILENAME)
+}
+
+/// Read cache header to get status without loading all tiles.
+///
+/// This is useful for CLI commands that need to display cache statistics
+/// without the overhead of loading the full tile data.
+pub fn cache_status() -> io::Result<CacheStatus> {
+    let path = cache_path();
+    let file = File::open(&path)?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Helper to get next line with proper error
+    let mut next_line = || -> io::Result<String> {
+        lines
+            .next()
+            .ok_or_else(|| io::Error::other("Unexpected end of file"))?
+    };
+
+    // Validate header
+    let header = next_line()?;
+    if header != CACHE_HEADER {
+        return Err(io::Error::other(format!(
+            "Invalid header: expected '{}', got '{}'",
+            CACHE_HEADER, header
+        )));
+    }
+
+    // Parse version
+    let version: u32 = next_line()?
+        .parse()
+        .map_err(|_| io::Error::other("Failed to parse cache version"))?;
+
+    // Parse package count
+    let package_count: usize = next_line()?
+        .parse()
+        .map_err(|_| io::Error::other("Failed to parse package count"))?;
+
+    // Parse tile counts
+    let total_tiles: usize = next_line()?
+        .parse()
+        .map_err(|_| io::Error::other("Failed to parse total tile count"))?;
+
+    let sea_tiles: usize = next_line()?
+        .parse()
+        .map_err(|_| io::Error::other("Failed to parse sea tile count"))?;
+
+    // Parse package metadata
+    let mut packages = Vec::with_capacity(package_count);
+    for i in 0..package_count {
+        let line = next_line()?;
+        let info = parse_package_line(&line).ok_or_else(|| {
+            io::Error::other(format!("Failed to parse package metadata line {}", i))
+        })?;
+        packages.push(info);
+    }
+
+    Ok(CacheStatus {
+        version,
+        package_count,
+        total_tiles,
+        sea_tiles,
+        packages,
+    })
 }
 
 /// Gather package metadata for cache validation.

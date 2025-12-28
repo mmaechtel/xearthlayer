@@ -277,6 +277,28 @@ Clear only disk cache (preserve memory):
 xearthlayer cache clear --disk
 ```
 
+### Scenery Index Cache
+
+The scenery index is a metadata cache that stores information about which tiles exist in your installed packages. This enables efficient prefetching during flight. The index is automatically built on first run and cached to disk for faster subsequent startups.
+
+View scenery index status:
+
+```bash
+xearthlayer scenery-index status
+```
+
+Rebuild the index after installing new packages:
+
+```bash
+xearthlayer scenery-index update
+```
+
+Clear the index cache (forces rebuild on next run):
+
+```bash
+xearthlayer scenery-index clear
+```
+
 ## Imagery Providers
 
 Configure the default provider in `~/.xearthlayer/config.ini` or override at runtime:

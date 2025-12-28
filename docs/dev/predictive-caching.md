@@ -446,6 +446,43 @@ Disable with `--no-prefetch` flag:
 xearthlayer run --no-prefetch
 ```
 
+### SceneryIndex Cache Management
+
+Manage the SceneryIndex cache outside of `run` with dedicated CLI commands:
+
+```bash
+# Show cache status
+xearthlayer scenery-index status
+# Output:
+# Scenery index cache: /home/user/.xearthlayer/scenery_index.cache
+#   Status: Valid
+#   Version: 1
+#   Packages: 2
+#     - EU (402505 files)
+#     - NA (42548 files)
+#   Total tiles: 445053
+#   Land tiles: 246193
+#   Sea tiles: 198860
+#   File size: 16.9 MB
+
+# Rebuild the index from installed packages
+xearthlayer scenery-index update
+# Output:
+# Building scenery index from 2 packages...
+#   Indexing EU... 402505 tiles
+#   Indexing NA... 42548 tiles
+# Saving cache...
+# Done. 445053 tiles indexed (246193 land, 198860 sea)
+
+# Delete the cache file (forces rebuild on next run)
+xearthlayer scenery-index clear
+```
+
+These commands are useful for:
+- Verifying cache status after package installation
+- Manually rebuilding the index without running the full UI
+- Troubleshooting cache invalidation issues
+
 ## Design Decisions
 
 ### DD-001: HeadingAware vs Radial Prefetching
