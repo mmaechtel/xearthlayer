@@ -77,6 +77,7 @@ Press Ctrl+C to stop.
 
 | Option | Description |
 |--------|-------------|
+| `--airport <ICAO>` | Pre-warm cache around an airport before X-Plane loads (e.g., `KJFK`, `EGLL`) |
 | `--provider <TYPE>` | Override imagery provider: `bing`, `go2`, `google` |
 | `--dds-format <FMT>` | Override texture format: `bc1` or `bc3` |
 | `--timeout <SECS>` | Override download timeout |
@@ -135,6 +136,61 @@ xearthlayer start \
 ```
 
 When using `start`, you must manually add the `_xel` mount point to X-Plane's `scenery_packs.ini`.
+
+## Cold Start Pre-warming
+
+Use the `--airport` option to pre-load tiles around your departure airport before starting X-Plane. This dramatically reduces initial scenery load times.
+
+```bash
+xearthlayer run --airport KJFK
+```
+
+### How It Works
+
+1. XEarthLayer parses X-Plane's airport database (`apt.dat`) to find the airport coordinates
+2. Scans the SceneryIndex for all tiles within the configured radius (default: 100nm)
+3. Downloads and caches tiles at both ZL12 and ZL14 zoom levels
+4. Shows progress in the dashboard, then transitions to normal operation
+
+### Why 100nm?
+
+The default 100nm radius is optimized to match X-Plane's DSF loading behavior:
+
+| X-Plane Setting | DSF Tiles Loaded | Approximate Radius |
+|-----------------|------------------|-------------------|
+| Standard | 3×2 = 6 tiles | ~90nm |
+| Extended DSFs | 4×3 = 12 tiles | ~120nm |
+
+X-Plane loads terrain in 1° × 1° DSF tiles centered on the aircraft. With standard settings, only 6 tiles are loaded initially—pre-warming beyond this radius wastes bandwidth on tiles X-Plane won't request until you fly further.
+
+### Examples
+
+```bash
+# Pre-warm around JFK before flying
+xearthlayer run --airport KJFK
+
+# Pre-warm around Heathrow with Google imagery
+xearthlayer run --airport EGLL --provider go2
+
+# Pre-warm around Zurich
+xearthlayer run --airport LSZH
+```
+
+### Cancelling Pre-warm
+
+Press `c` during pre-warm to cancel and proceed directly to normal operation. Pre-warm is also automatically cancelled if X-Plane makes a FUSE request (flight started).
+
+### Configuration
+
+The pre-warm radius can be adjusted in `~/.xearthlayer/config.ini`:
+
+```ini
+[prewarm]
+radius_nm = 100  ; Default: covers standard DSF loading
+; radius_nm = 150  ; Use for Extended DSFs
+```
+
+See [Configuration](configuration.md#prewarm) for more details on X-Plane's DSF loading behavior.
 
 ## Stopping the Service
 

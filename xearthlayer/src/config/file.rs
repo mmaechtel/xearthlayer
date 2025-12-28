@@ -298,7 +298,7 @@ impl Default for ConfigFile {
                 health_check_interval_secs: DEFAULT_CONTROL_PLANE_HEALTH_CHECK_INTERVAL_SECS,
                 semaphore_timeout_secs: DEFAULT_CONTROL_PLANE_SEMAPHORE_TIMEOUT_SECS,
             },
-            prewarm: PrewarmSettings { radius_nm: 300.0 },
+            prewarm: PrewarmSettings { radius_nm: 100.0 },
         }
     }
 }
@@ -1084,7 +1084,7 @@ semaphore_timeout_secs = {}
 ; Settings for cold-start cache pre-warming.
 ; Use with --airport ICAO to pre-load tiles around an airport before flight.
 
-; Radius in nautical miles around the airport to prewarm (default: 300)
+; Radius in nautical miles around the airport to prewarm (default: 100)
 radius_nm = {}
 "#,
             self.provider.provider_type,
