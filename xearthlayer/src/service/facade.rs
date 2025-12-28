@@ -14,7 +14,7 @@ use crate::pipeline::adapters::MemoryCacheAdapter;
 use crate::pipeline::control_plane::{
     ControlPlaneConfig, ControlPlaneHealth, PipelineControlPlane,
 };
-use crate::pipeline::{ConcurrencyLimiter, DiskIoProfile, RequestCoalescer};
+use crate::pipeline::{DiskIoProfile, RequestCoalescer, StorageConcurrencyLimiter};
 use crate::prefetch::TileRequestCallback;
 use crate::provider::{AsyncProviderType, Provider, ProviderConfig};
 use crate::telemetry::{PipelineMetrics, TelemetrySnapshot};
@@ -94,7 +94,7 @@ pub struct XEarthLayerService {
     /// Pipeline telemetry metrics
     metrics: Arc<PipelineMetrics>,
     /// Shared disk I/O concurrency limiter (for global limiting across packages)
-    disk_io_limiter: Option<Arc<ConcurrencyLimiter>>,
+    disk_io_limiter: Option<Arc<StorageConcurrencyLimiter>>,
     /// Pipeline control plane for job management and health monitoring
     control_plane: Arc<PipelineControlPlane>,
     /// Health monitor join handle (runs in background)
@@ -439,7 +439,7 @@ impl XEarthLayerService {
     /// # Arguments
     ///
     /// * `limiter` - The shared concurrency limiter for disk I/O operations
-    pub fn set_disk_io_limiter(&mut self, limiter: Arc<ConcurrencyLimiter>) {
+    pub fn set_disk_io_limiter(&mut self, limiter: Arc<StorageConcurrencyLimiter>) {
         self.disk_io_limiter = Some(limiter);
     }
 

@@ -40,7 +40,7 @@ use crate::pipeline::adapters::{
 };
 use crate::pipeline::control_plane::PipelineControlPlane;
 use crate::pipeline::{
-    create_dds_handler_with_control_plane, ConcurrencyLimiter, PipelineConfig, TokioExecutor,
+    create_dds_handler_with_control_plane, PipelineConfig, StorageConcurrencyLimiter, TokioExecutor,
 };
 use crate::provider::{AsyncProviderType, Provider};
 use crate::telemetry::PipelineMetrics;
@@ -79,7 +79,7 @@ pub struct DdsHandlerBuilder {
     /// Shared memory cache adapter (implements pipeline::MemoryCache trait)
     memory_cache_adapter: Option<Arc<MemoryCacheAdapter>>,
     /// Shared disk I/O limiter (None = local limiter per cache)
-    disk_io_limiter: Option<Arc<ConcurrencyLimiter>>,
+    disk_io_limiter: Option<Arc<StorageConcurrencyLimiter>>,
     /// DDS compression format
     dds_format: DdsFormat,
     /// Number of mipmap levels
@@ -182,7 +182,7 @@ impl DdsHandlerBuilder {
     ///     .with_disk_io_limiter(disk_io_limiter)
     ///     .build(handle);
     /// ```
-    pub fn with_disk_io_limiter(mut self, limiter: Arc<ConcurrencyLimiter>) -> Self {
+    pub fn with_disk_io_limiter(mut self, limiter: Arc<StorageConcurrencyLimiter>) -> Self {
         self.disk_io_limiter = Some(limiter);
         self
     }

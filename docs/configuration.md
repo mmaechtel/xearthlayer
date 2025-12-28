@@ -260,20 +260,27 @@ The TUI dashboard shows control plane health including:
 
 Controls predictive tile prefetching based on X-Plane telemetry. The prefetch system pre-loads tiles ahead of the aircraft to reduce FPS drops when new scenery loads.
 
+**Dual-Zone Architecture:**
+
+XEarthLayer uses a dual-zone prefetch system that targets the boundary around X-Plane's ~90nm loaded scenery:
+
+![Heading-Aware Prefetch Zones](images/heading-aware-prefetch.png)
+
+- **Radial Buffer (85-100nm, 360°)**: Catches unexpected turns in any direction
+- **Heading Cone (85-120nm, 60° forward)**: Deep lookahead along the flight path
+
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable/disable predictive tile prefetching |
 | `strategy` | string | `auto` | Prefetch strategy: `auto`, `heading-aware`, or `radial` |
 | `udp_port` | integer | `49002` | UDP port for X-Plane telemetry (ForeFlight protocol) |
-| `cone_angle` | float | `45` | Prediction cone half-angle in degrees |
-| `inner_radius_nm` | float | `85` | Inner edge of prefetch zone (nautical miles) |
-| `outer_radius_nm` | float | `95` | Outer edge of prefetch zone (nautical miles) |
+| `inner_radius_nm` | float | `85` | Inner edge of prefetch zone (both radial and cone) |
+| `radial_outer_radius_nm` | float | `100` | Outer edge of 360° radial buffer |
+| `cone_outer_radius_nm` | float | `120` | Outer edge of forward heading cone |
+| `cone_half_angle` | float | `30` | Half-angle of heading cone (30° = 60° total width) |
 | `max_tiles_per_cycle` | integer | `50` | Maximum tiles to submit per prefetch cycle |
 | `cycle_interval_ms` | integer | `2000` | Interval between prefetch cycles (milliseconds) |
 | `radial_radius` | integer | `3` | Radial fallback tile radius (3 = 7×7 = 49 tiles) |
-| `enable_zl12` | bool | `true` | Enable ZL12 prefetching for distant terrain |
-| `zl12_inner_radius_nm` | float | `88` | Inner edge of ZL12 prefetch zone (nautical miles) |
-| `zl12_outer_radius_nm` | float | `100` | Outer edge of ZL12 prefetch zone (nautical miles) |
 
 **Strategy Options:**
 
@@ -283,13 +290,9 @@ Controls predictive tile prefetching based on X-Plane telemetry. The prefetch sy
 | `heading-aware` | Direction-aware cone prefetching, requires telemetry |
 | `radial` | Simple grid around current position, works without telemetry |
 
-**Multi-Zoom Prefetching:**
+**Zoom Level Handling:**
 
-XEarthLayer prefetches tiles at two zoom levels:
-- **ZL14** (primary): High-resolution tiles for nearby scenery (85-95nm)
-- **ZL12** (secondary): Low-resolution tiles for distant scenery (88-100nm)
-
-This eliminates stutters when transitioning between zoom levels at the ~90nm boundary.
+XEarthLayer automatically prefetches tiles at the correct zoom levels by reading the `.ter` files in your scenery packages. The SceneryIndex knows exactly which tiles exist and at what zoom level, so no manual zoom level configuration is needed.
 
 **Example:**
 ```ini
@@ -298,17 +301,15 @@ enabled = true
 strategy = auto
 udp_port = 49002
 
-; Primary prefetch zone (ZL14)
-cone_angle = 45
-inner_radius_nm = 85
-outer_radius_nm = 95
+; Dual-zone prefetch boundaries
+inner_radius_nm = 85           ; Start prefetching 5nm inside X-Plane's 90nm boundary
+radial_outer_radius_nm = 100   ; 360° buffer extends 10nm beyond boundary
+cone_outer_radius_nm = 120     ; Forward cone extends 30nm beyond boundary
+cone_half_angle = 30           ; 60° total cone width
+
+; Rate limiting
 max_tiles_per_cycle = 50
 cycle_interval_ms = 2000
-
-; Secondary prefetch zone (ZL12) for distant terrain
-enable_zl12 = true
-zl12_inner_radius_nm = 88
-zl12_outer_radius_nm = 100
 ```
 
 **X-Plane Setup:**
@@ -421,17 +422,15 @@ enabled = true
 strategy = auto  ; auto, heading-aware, or radial
 ; udp_port = 49002
 
-; Primary prefetch zone (ZL14 - high resolution near scenery)
-; cone_angle = 45              ; half-angle of prediction cone (degrees)
-; inner_radius_nm = 85         ; start prefetching just inside 90nm boundary
-; outer_radius_nm = 95         ; 10nm prefetch depth
+; Dual-zone prefetch boundaries (see docs for diagram)
+; inner_radius_nm = 85              ; inner edge (5nm inside X-Plane's 90nm zone)
+; radial_outer_radius_nm = 100      ; 360° buffer (10nm beyond boundary)
+; cone_outer_radius_nm = 120        ; forward cone (30nm beyond boundary)
+; cone_half_angle = 30              ; half-angle of cone (60° total width)
+
+; Rate limiting
 ; max_tiles_per_cycle = 50     ; tiles per cycle (lower = less bandwidth)
 ; cycle_interval_ms = 2000     ; cycle interval (higher = less aggressive)
-
-; Secondary prefetch zone (ZL12 - low resolution distant scenery)
-enable_zl12 = true            ; prefetch distant terrain tiles
-; zl12_inner_radius_nm = 88
-; zl12_outer_radius_nm = 100
 
 ; Radial fallback (when telemetry unavailable)
 ; radial_radius = 3            ; 7×7 tile grid
@@ -547,15 +546,13 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `prefetch.enabled` | `true`, `false` | Enable predictive prefetching |
 | `prefetch.strategy` | `auto`, `heading-aware`, `radial` | Prefetch strategy |
 | `prefetch.udp_port` | positive integer | X-Plane telemetry UDP port |
-| `prefetch.cone_angle` | positive number | Prediction cone half-angle (degrees) |
 | `prefetch.inner_radius_nm` | positive number | Inner edge of prefetch zone (nm) |
-| `prefetch.outer_radius_nm` | positive number | Outer edge of prefetch zone (nm) |
+| `prefetch.radial_outer_radius_nm` | positive number | Outer edge of 360° radial buffer (nm) |
+| `prefetch.cone_outer_radius_nm` | positive number | Outer edge of forward heading cone (nm) |
+| `prefetch.cone_half_angle` | positive number | Half-angle of heading cone (degrees) |
 | `prefetch.max_tiles_per_cycle` | positive integer | Max tiles per prefetch cycle |
 | `prefetch.cycle_interval_ms` | positive integer | Prefetch cycle interval (ms) |
 | `prefetch.radial_radius` | positive integer | Radial fallback tile radius |
-| `prefetch.enable_zl12` | `true`, `false` | Enable ZL12 distant terrain prefetch |
-| `prefetch.zl12_inner_radius_nm` | positive number | ZL12 zone inner edge (nm) |
-| `prefetch.zl12_outer_radius_nm` | positive number | ZL12 zone outer edge (nm) |
 | `xplane.scenery_dir` | path | X-Plane Custom Scenery directory |
 | `packages.library_url` | URL | Package library index URL |
 | `packages.install_location` | path | Package installation directory |

@@ -265,8 +265,8 @@ impl ConeGenerator {
 
     /// Generate tiles for a specific zoom level with custom zone boundaries.
     ///
-    /// This is used for multi-zoom prefetching where different zoom levels
-    /// have different prefetch zones (e.g., ZL12 tiles at 88-100nm, ZL14 at 85-95nm).
+    /// This is used for generating tiles at a specific zoom level with custom
+    /// prefetch zone boundaries different from the configured defaults.
     ///
     /// # Arguments
     ///
@@ -416,9 +416,9 @@ mod tests {
     fn test_new_generator() {
         let gen = default_generator();
         assert_eq!(gen.zoom(), 14);
-        // Default prefetch zone: 85nm to 105nm
+        // Default cone prefetch zone: 85nm to 120nm
         assert_eq!(gen.inner_radius_nm(), 85.0);
-        assert_eq!(gen.outer_radius_nm(), 105.0);
+        assert_eq!(gen.outer_radius_nm(), 120.0);
     }
 
     #[test]

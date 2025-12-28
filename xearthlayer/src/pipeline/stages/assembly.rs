@@ -4,7 +4,7 @@
 //! RGBA image. Failed chunks are replaced with magenta placeholders.
 
 use crate::pipeline::{
-    BlockingExecutor, ChunkResults, JobError, JobId, PriorityConcurrencyLimiter, RequestPriority,
+    BlockingExecutor, CPUConcurrencyLimiter, ChunkResults, JobError, JobId, RequestPriority,
 };
 use image::{Rgba, RgbaImage};
 use std::sync::Arc;
@@ -41,7 +41,7 @@ pub async fn assembly_stage<E>(
     job_id: JobId,
     chunks: ChunkResults,
     executor: &E,
-    assemble_limiter: Option<Arc<PriorityConcurrencyLimiter>>,
+    assemble_limiter: Option<Arc<CPUConcurrencyLimiter>>,
     is_prefetch: bool,
 ) -> Result<RgbaImage, JobError>
 where
@@ -267,7 +267,7 @@ mod tests {
         chunks.add_success(0, 0, create_test_jpeg(255, 0, 0));
 
         let executor = TokioExecutor::new();
-        let limiter = Arc::new(PriorityConcurrencyLimiter::new(2, 50, "test_assemble"));
+        let limiter = Arc::new(CPUConcurrencyLimiter::new(4, 40, 20, "test_assemble"));
 
         let result = assembly_stage(JobId::new(), chunks, &executor, Some(limiter), false)
             .await

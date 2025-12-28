@@ -44,29 +44,26 @@
 
 pub mod adapters;
 mod coalesce;
-mod concurrency_limiter;
 mod context;
 pub mod control_plane;
+mod cpu_limiter;
 mod error;
 mod executor;
 mod fd_budget;
 mod http_limiter;
 mod job;
-mod priority_limiter;
 mod processor;
 mod runner;
 pub mod stages;
 mod storage;
+mod storage_limiter;
 
 pub use coalesce::{CoalescerStats, RequestCoalescer};
-pub use concurrency_limiter::{
-    AcquireTimeoutError, ConcurrencyLimiter, ConcurrencyPermit, DEFAULT_CEILING,
-    DEFAULT_SCALING_FACTOR,
-};
 pub use context::{
     ChunkDownloadError, ChunkProvider, DiskCache, MemoryCache, PipelineConfig, PipelineContext,
     TextureEncodeError, TextureEncoderAsync,
 };
+pub use cpu_limiter::{CPUConcurrencyLimiter, CPUPermit, RequestPriority};
 pub use error::{ChunkFailure, ChunkResults, ChunkSuccess, JobError, StageError};
 pub use executor::{BlockingExecutor, ConcurrentRunner, ExecutorError, Timer, TokioExecutor};
 pub use fd_budget::{
@@ -74,7 +71,6 @@ pub use fd_budget::{
 };
 pub use http_limiter::HttpConcurrencyLimiter;
 pub use job::{Job, JobId, JobResult, Priority};
-pub use priority_limiter::{PriorityConcurrencyLimiter, PriorityPermit, RequestPriority};
 pub use processor::{
     process_job, process_tile, process_tile_cancellable, process_tile_with_observer,
 };
@@ -88,4 +84,8 @@ pub use storage::{
     HDD_IO_CEILING, HDD_IO_SCALING_FACTOR, NVME_BLOCKING_CEILING, NVME_BLOCKING_SCALING_FACTOR,
     NVME_IO_CEILING, NVME_IO_SCALING_FACTOR, SSD_BLOCKING_CEILING, SSD_BLOCKING_SCALING_FACTOR,
     SSD_IO_CEILING, SSD_IO_SCALING_FACTOR,
+};
+pub use storage_limiter::{
+    AcquireTimeoutError, StorageConcurrencyLimiter, StoragePermit, DEFAULT_CEILING,
+    DEFAULT_SCALING_FACTOR,
 };

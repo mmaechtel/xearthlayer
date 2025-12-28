@@ -1,7 +1,7 @@
-//! Generic concurrency limiter for I/O operations.
+//! Storage concurrency limiter for disk I/O operations.
 //!
-//! This module provides a configurable semaphore-based limiter that can be used
-//! to constrain concurrent operations for any resource type (HTTP, disk I/O, etc.).
+//! This module provides a configurable semaphore-based limiter for disk I/O
+//! operations, preventing file descriptor exhaustion under heavy load.
 //!
 //! # Scaling Formula
 //!
@@ -18,16 +18,16 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use xearthlayer::pipeline::ConcurrencyLimiter;
+//! use xearthlayer::pipeline::StorageConcurrencyLimiter;
 //!
 //! // Create limiter with default scaling (num_cpus * 16, max 256)
-//! let limiter = Arc::new(ConcurrencyLimiter::with_defaults());
+//! let limiter = Arc::new(StorageConcurrencyLimiter::with_defaults());
 //!
 //! // Or with custom scaling
-//! let limiter = Arc::new(ConcurrencyLimiter::with_scaling(8, 128));
+//! let limiter = Arc::new(StorageConcurrencyLimiter::with_scaling(8, 128));
 //!
 //! // Acquire permit before I/O operation
-//! async fn do_io(limiter: Arc<ConcurrencyLimiter>) {
+//! async fn do_io(limiter: Arc<StorageConcurrencyLimiter>) {
 //!     let _permit = limiter.acquire().await;
 //!     // I/O operation happens here...
 //!     // permit is released when _permit goes out of scope
@@ -62,13 +62,12 @@ pub const DISK_IO_SCALING_FACTOR: usize = 4;
 /// SSDs and NVMe can handle this easily, HDDs may still benefit from lower values.
 pub const DISK_IO_CEILING: usize = 64;
 
-/// Generic concurrency limiter for I/O operations.
+/// Storage concurrency limiter for disk I/O operations.
 ///
-/// Wraps a Tokio semaphore to limit the total number of concurrent operations.
-/// This prevents resource exhaustion (file descriptors, network connections, etc.)
-/// under heavy load.
+/// Wraps a Tokio semaphore to limit the total number of concurrent disk operations.
+/// This prevents file descriptor exhaustion under heavy FUSE and cache load.
 #[derive(Debug)]
-pub struct ConcurrencyLimiter {
+pub struct StorageConcurrencyLimiter {
     /// Semaphore controlling concurrent operations
     semaphore: Arc<Semaphore>,
 
@@ -85,7 +84,7 @@ pub struct ConcurrencyLimiter {
     label: String,
 }
 
-impl ConcurrencyLimiter {
+impl StorageConcurrencyLimiter {
     /// Creates a new limiter with the specified maximum concurrent operations.
     ///
     /// # Arguments
@@ -223,7 +222,7 @@ impl ConcurrencyLimiter {
     /// operations limit has been reached.
     ///
     /// The permit is automatically released when dropped.
-    pub async fn acquire(&self) -> ConcurrencyPermit<'_> {
+    pub async fn acquire(&self) -> StoragePermit<'_> {
         let permit = self
             .semaphore
             .clone()
@@ -237,7 +236,7 @@ impl ConcurrencyLimiter {
         // Update peak if this is a new high
         self.update_peak(current);
 
-        ConcurrencyPermit {
+        StoragePermit {
             _permit: permit,
             in_flight: &self.in_flight,
         }
@@ -246,13 +245,13 @@ impl ConcurrencyLimiter {
     /// Tries to acquire a permit without waiting.
     ///
     /// Returns `None` if no permits are available.
-    pub fn try_acquire(&self) -> Option<ConcurrencyPermit<'_>> {
+    pub fn try_acquire(&self) -> Option<StoragePermit<'_>> {
         let permit = self.semaphore.clone().try_acquire_owned().ok()?;
 
         let current = self.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
         self.update_peak(current);
 
-        Some(ConcurrencyPermit {
+        Some(StoragePermit {
             _permit: permit,
             in_flight: &self.in_flight,
         })
@@ -271,7 +270,7 @@ impl ConcurrencyLimiter {
     /// # Example
     ///
     /// ```ignore
-    /// let limiter = ConcurrencyLimiter::new(10, "test");
+    /// let limiter = StorageConcurrencyLimiter::new(10, "test");
     /// match limiter.acquire_timeout(Duration::from_secs(30)).await {
     ///     Ok(permit) => {
     ///         // Use permit...
@@ -284,13 +283,13 @@ impl ConcurrencyLimiter {
     pub async fn acquire_timeout(
         &self,
         timeout: Duration,
-    ) -> Result<ConcurrencyPermit<'_>, AcquireTimeoutError> {
+    ) -> Result<StoragePermit<'_>, AcquireTimeoutError> {
         match tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned()).await {
             Ok(Ok(permit)) => {
                 let current = self.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
                 self.update_peak(current);
 
-                Ok(ConcurrencyPermit {
+                Ok(StoragePermit {
                     _permit: permit,
                     in_flight: &self.in_flight,
                 })
@@ -356,16 +355,16 @@ impl ConcurrencyLimiter {
     }
 }
 
-/// A permit for performing a concurrent operation.
+/// A permit for performing a storage I/O operation.
 ///
 /// While this permit is held, it counts against the limiter's concurrency limit.
 /// The permit is automatically released when dropped.
-pub struct ConcurrencyPermit<'a> {
+pub struct StoragePermit<'a> {
     _permit: OwnedSemaphorePermit,
     in_flight: &'a AtomicUsize,
 }
 
-impl Drop for ConcurrencyPermit<'_> {
+impl Drop for StoragePermit<'_> {
     fn drop(&mut self) {
         self.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
@@ -413,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_new_limiter() {
-        let limiter = ConcurrencyLimiter::new(128, "test");
+        let limiter = StorageConcurrencyLimiter::new(128, "test");
         assert_eq!(limiter.max_concurrent(), 128);
         assert_eq!(limiter.in_flight(), 0);
         assert_eq!(limiter.available_permits(), 128);
@@ -422,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_with_defaults() {
-        let limiter = ConcurrencyLimiter::with_defaults("disk_io");
+        let limiter = StorageConcurrencyLimiter::with_defaults("disk_io");
         // Should be between 64 (4 CPUs * 16) and 256 (cap)
         assert!(limiter.max_concurrent() >= 64);
         assert!(limiter.max_concurrent() <= 256);
@@ -431,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_with_scaling() {
-        let limiter = ConcurrencyLimiter::with_scaling(8, 64, "custom");
+        let limiter = StorageConcurrencyLimiter::with_scaling(8, 64, "custom");
         // With 4+ CPUs, should hit ceiling of 64
         // With fewer CPUs, should be cpus * 8
         assert!(limiter.max_concurrent() <= 64);
@@ -441,19 +440,19 @@ mod tests {
     #[test]
     fn test_scaling_ceiling() {
         // Very high scaling factor should be capped at ceiling
-        let limiter = ConcurrencyLimiter::with_scaling(1000, 50, "capped");
+        let limiter = StorageConcurrencyLimiter::with_scaling(1000, 50, "capped");
         assert_eq!(limiter.max_concurrent(), 50);
     }
 
     #[test]
     #[should_panic(expected = "max_concurrent must be > 0")]
     fn test_zero_concurrency_panics() {
-        ConcurrencyLimiter::new(0, "test");
+        StorageConcurrencyLimiter::new(0, "test");
     }
 
     #[tokio::test]
     async fn test_acquire_releases_on_drop() {
-        let limiter = ConcurrencyLimiter::new(2, "test");
+        let limiter = StorageConcurrencyLimiter::new(2, "test");
 
         assert_eq!(limiter.available_permits(), 2);
         assert_eq!(limiter.in_flight(), 0);
@@ -481,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_acquire() {
-        let limiter = ConcurrencyLimiter::new(1, "test");
+        let limiter = StorageConcurrencyLimiter::new(1, "test");
 
         let permit1 = limiter.try_acquire();
         assert!(permit1.is_some());
@@ -501,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peak_tracking() {
-        let limiter = ConcurrencyLimiter::new(10, "test");
+        let limiter = StorageConcurrencyLimiter::new(10, "test");
 
         assert_eq!(limiter.peak_in_flight(), 0);
 
@@ -524,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_acquire() {
-        let limiter = Arc::new(ConcurrencyLimiter::new(5, "test"));
+        let limiter = Arc::new(StorageConcurrencyLimiter::new(5, "test"));
         let mut handles = Vec::new();
 
         // Spawn 10 tasks that each try to acquire
@@ -553,7 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_acquire_timeout_success() {
-        let limiter = ConcurrencyLimiter::new(2, "test");
+        let limiter = StorageConcurrencyLimiter::new(2, "test");
 
         // Should succeed quickly when permits available
         let permit = limiter
@@ -568,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_acquire_timeout_expires() {
-        let limiter = ConcurrencyLimiter::new(1, "test_limiter");
+        let limiter = StorageConcurrencyLimiter::new(1, "test_limiter");
 
         // Take the only permit
         let _permit = limiter.acquire().await;
@@ -589,7 +588,7 @@ mod tests {
     async fn test_acquire_timeout_succeeds_after_release() {
         use tokio::sync::oneshot;
 
-        let limiter = Arc::new(ConcurrencyLimiter::new(1, "test"));
+        let limiter = Arc::new(StorageConcurrencyLimiter::new(1, "test"));
         let limiter_holder = Arc::clone(&limiter);
         let limiter_waiter = Arc::clone(&limiter);
 

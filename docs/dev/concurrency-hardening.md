@@ -28,10 +28,10 @@ XEarthLayer uses a multi-layered concurrency control system designed to prevent 
 | Component | Mechanism | Limit Formula | Location |
 |-----------|-----------|---------------|----------|
 | HTTP Requests | `HttpConcurrencyLimiter` | `min(num_cpus * 16, 256)` | `pipeline/http_limiter.rs` |
-| CPU Work | Shared `ConcurrencyLimiter` | `num_cpus * 1.25` | `pipeline/runner.rs` |
-| Disk I/O | Profile-based `ConcurrencyLimiter` | NVMe: 128, SSD: 64, HDD: 4 | `pipeline/adapters/disk_cache_parallel.rs` |
+| CPU Work | Shared `CPUConcurrencyLimiter` | `num_cpus * 1.25` | `pipeline/runner.rs` |
+| Disk I/O | Profile-based `StorageConcurrencyLimiter` | NVMe: 128, SSD: 64, HDD: 4 | `pipeline/adapters/disk_cache_parallel.rs` |
 | Prefetch Jobs | `Semaphore` | `max(num_cpus / 4, 2)` | `pipeline/runner.rs` |
-| FUSE Disk I/O | `ConcurrencyLimiter` | `min(num_cpus * 16, 256)` | `fuse/fuse3/filesystem.rs` |
+| FUSE Disk I/O | `StorageConcurrencyLimiter` | `min(num_cpus * 16, 256)` | `fuse/fuse3/filesystem.rs` |
 | **Job-Level** | **None (GAP)** | **Unlimited** | **N/A** |
 
 ### Key Design Patterns
@@ -207,12 +207,12 @@ let runtime = tokio::runtime::Builder::new_multi_thread()
 **Effort**: Low (~30 mins)
 **Status**: Complete
 
-Add timeout variant to `ConcurrencyLimiter`:
+Add timeout variant to `StorageConcurrencyLimiter`:
 
 ```rust
-impl ConcurrencyLimiter {
+impl StorageConcurrencyLimiter {
     pub async fn acquire_timeout(&self, timeout: Duration)
-        -> Result<ConcurrencyPermit<'_>, AcquireTimeoutError>;
+        -> Result<StoragePermit<'_>, AcquireTimeoutError>;
 }
 ```
 
@@ -571,7 +571,8 @@ pub const NVME_BLOCKING_CEILING: usize = 128;
 
 - `docs/dev/async-pipeline-architecture.md` - Pipeline design and deadlock fixes
 - `docs/dev/predictive-caching.md` - Prefetch system design
-- `xearthlayer/src/pipeline/concurrency_limiter.rs` - ConcurrencyLimiter implementation
+- `xearthlayer/src/pipeline/storage_limiter.rs` - StorageConcurrencyLimiter (disk I/O)
+- `xearthlayer/src/pipeline/cpu_limiter.rs` - CPUConcurrencyLimiter (CPU-bound work)
 - `xearthlayer/src/pipeline/runner.rs` - DDS handler with coalescing
 - `xearthlayer/src/pipeline/coalesce.rs` - RequestCoalescer with cancel() method
 
