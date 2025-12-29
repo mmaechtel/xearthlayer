@@ -7,8 +7,8 @@
 use semver::Version;
 
 use super::args::{
-    AddArgs, BuildArgs, InitArgs, ListArgs, ReleaseArgs, ScanArgs, StatusArgs, UrlsArgs,
-    ValidateArgs, VersionArgs,
+    AddArgs, BuildArgs, CoverageArgs, InitArgs, ListArgs, ReleaseArgs, ScanArgs, StatusArgs,
+    UrlsArgs, ValidateArgs, VersionArgs,
 };
 use super::output::{
     format_size_display, format_status, print_process_summary, print_region_suggestion,
@@ -644,6 +644,63 @@ impl CommandHandler for ValidateHandler {
         ctx.output.println(&format!("Packages: {}", packages.len()));
         ctx.output.newline();
         ctx.output.println("Repository is valid. No issues found.");
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Coverage Handler
+// ============================================================================
+
+/// Handler for the `publish coverage` command.
+pub struct CoverageHandler;
+
+impl CommandHandler for CoverageHandler {
+    type Args = CoverageArgs;
+
+    fn execute(args: Self::Args, ctx: &CommandContext<'_>) -> Result<(), CliError> {
+        let repo = ctx.publisher.open_repository(&args.repo)?;
+        let packages_dir = repo.root().join("packages");
+
+        let format_type = if args.geojson { "GeoJSON" } else { "PNG" };
+        ctx.output
+            .println(&format!("Generating {} coverage map...", format_type));
+        ctx.output.newline();
+
+        let result = if args.geojson {
+            ctx.publisher
+                .generate_coverage_geojson(&packages_dir, &args.output)?
+        } else {
+            ctx.publisher.generate_coverage_map(
+                &packages_dir,
+                &args.output,
+                args.width,
+                args.height,
+                args.dark,
+            )?
+        };
+
+        ctx.output.println(&format!(
+            "{} coverage map generated successfully!",
+            format_type
+        ));
+        ctx.output.newline();
+        ctx.output
+            .indented(&format!("Output:  {}", args.output.display()));
+        if !args.geojson {
+            ctx.output
+                .indented(&format!("Size:    {}x{}", args.width, args.height));
+        }
+        ctx.output
+            .indented(&format!("Tiles:   {}", result.total_tiles));
+        ctx.output.newline();
+
+        ctx.output.println("Tile counts by region:");
+        for (region, count) in &result.tiles_by_region {
+            ctx.output
+                .indented(&format!("{}: {}", region.to_uppercase(), count));
+        }
 
         Ok(())
     }
