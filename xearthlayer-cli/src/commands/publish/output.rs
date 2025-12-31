@@ -3,7 +3,7 @@
 //! This module provides helper functions for formatting output consistently
 //! across all publish command handlers.
 
-use super::traits::Output;
+use super::traits::{DedupeReport, Output, OverlapSummary};
 use xearthlayer::config::format_size;
 use xearthlayer::publisher::{ProcessSummary, RegionSuggestion, ReleaseStatus, SceneryScanResult};
 
@@ -103,4 +103,143 @@ pub fn format_status(status: &ReleaseStatus) -> String {
 /// Format a size in bytes as a human-readable string.
 pub fn format_size_display(size: u64) -> String {
     format_size(size as usize)
+}
+
+/// Print dedupe results to the output.
+pub fn print_dedupe_result(out: &dyn Output, report: &DedupeReport) {
+    out.header("Deduplication Results");
+    out.newline();
+
+    // Summary
+    out.println(&format!("Tiles analyzed: {}", report.tiles_analyzed));
+    out.println(&format!("Zoom levels:    {:?}", report.zoom_levels_present));
+    out.newline();
+
+    // Overlaps detected
+    if report.overlaps_by_pair.is_empty() {
+        out.println("No overlapping tiles detected.");
+    } else {
+        out.subheader("Overlaps Detected");
+        let mut pairs: Vec<_> = report.overlaps_by_pair.iter().collect();
+        pairs.sort_by_key(|((h, l), _)| (*h, *l));
+        for ((higher, lower), count) in pairs {
+            out.println(&format!(
+                "  ZL{} overlaps ZL{}: {} tiles",
+                higher, lower, count
+            ));
+        }
+        out.newline();
+
+        // Action taken
+        if report.dry_run {
+            out.println(&format!(
+                "Would remove {} tiles (dry run - no files modified)",
+                report.tiles_removed.len()
+            ));
+        } else {
+            out.println(&format!("Removed {} tiles", report.tiles_removed.len()));
+        }
+
+        out.println(&format!("Preserved {} tiles", report.tiles_preserved.len()));
+    }
+}
+
+/// Print overlap summary from scan.
+pub fn print_overlap_summary(out: &dyn Output, summary: &OverlapSummary) {
+    if summary.tiles_scanned == 0 {
+        return;
+    }
+
+    out.subheader("Zoom Level Analysis");
+
+    // Print tiles by zoom level
+    let mut zooms: Vec<_> = summary.tiles_by_zoom.iter().collect();
+    zooms.sort_by_key(|(z, _)| *z);
+    for (zoom, count) in zooms {
+        out.println(&format!("  ZL{} tiles: {}", zoom, count));
+    }
+    out.newline();
+
+    // Print overlaps
+    if summary.total_overlaps > 0 {
+        out.println("Overlaps Detected:");
+        let mut pairs: Vec<_> = summary.overlaps_by_pair.iter().collect();
+        pairs.sort_by_key(|((h, l), _)| (*h, *l));
+        for ((higher, lower), count) in pairs {
+            out.println(&format!(
+                "  ZL{} overlaps ZL{}: {} tiles",
+                higher, lower, count
+            ));
+        }
+        out.println(&format!(
+            "  Total redundant tiles: {}",
+            summary.total_overlaps
+        ));
+        out.newline();
+        out.println("Recommendation:");
+        out.indented("Use 'publish dedupe' to remove redundant tiles before building.");
+    } else {
+        out.println("No overlapping tiles detected.");
+    }
+}
+
+/// Print dedupe result as JSON.
+#[allow(dead_code)]
+pub fn print_dedupe_json(out: &dyn Output, report: &DedupeReport) {
+    // Build a simple JSON structure
+    let mut json_parts = Vec::new();
+
+    // tiles_analyzed
+    json_parts.push(format!("  \"tiles_analyzed\": {}", report.tiles_analyzed));
+
+    // zoom_levels_present
+    let zl_arr: Vec<String> = report
+        .zoom_levels_present
+        .iter()
+        .map(|z| z.to_string())
+        .collect();
+    json_parts.push(format!(
+        "  \"zoom_levels_present\": [{}]",
+        zl_arr.join(", ")
+    ));
+
+    // overlaps_by_pair
+    let mut overlap_parts = Vec::new();
+    for ((h, l), count) in &report.overlaps_by_pair {
+        overlap_parts.push(format!("    \"{}-{}\": {}", h, l, count));
+    }
+    json_parts.push(format!(
+        "  \"overlaps_by_pair\": {{\n{}\n  }}",
+        overlap_parts.join(",\n")
+    ));
+
+    // tiles_removed count
+    json_parts.push(format!(
+        "  \"tiles_removed_count\": {}",
+        report.tiles_removed.len()
+    ));
+
+    // tiles_preserved count
+    json_parts.push(format!(
+        "  \"tiles_preserved_count\": {}",
+        report.tiles_preserved.len()
+    ));
+
+    // dry_run
+    json_parts.push(format!("  \"dry_run\": {}", report.dry_run));
+
+    // removed tile paths
+    let removed_paths: Vec<String> = report
+        .tiles_removed
+        .iter()
+        .map(|t| format!("    \"{}\"", t.ter_path.display()))
+        .collect();
+    json_parts.push(format!(
+        "  \"tiles_removed\": [\n{}\n  ]",
+        removed_paths.join(",\n")
+    ));
+
+    out.println("{");
+    out.println(&json_parts.join(",\n"));
+    out.println("}");
 }

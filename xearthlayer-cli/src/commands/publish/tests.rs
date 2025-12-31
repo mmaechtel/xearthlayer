@@ -13,6 +13,7 @@ use super::handlers::*;
 use super::traits::*;
 use crate::error::CliError;
 use xearthlayer::package::{ArchivePart, PackageMetadata, PackageType};
+use xearthlayer::publisher::dedupe::{DedupeFilter, ZoomPriority};
 use xearthlayer::publisher::{
     ArchiveBuildResult, BuildResult, ProcessSummary, RegionSuggestion, ReleaseResult,
     ReleaseStatus, RepoConfig, SceneryScanResult, SuggestedRegion, TileInfo, UrlConfigResult,
@@ -463,6 +464,37 @@ impl PublisherService for MockPublisherService {
             tiles_by_region: [("na".to_string(), 100)].into_iter().collect(),
         })
     }
+
+    fn dedupe_package(
+        &self,
+        _repo: &dyn RepositoryOperations,
+        _region: &str,
+        _package_type: PackageType,
+        _priority: ZoomPriority,
+        _filter: Option<DedupeFilter>,
+        dry_run: bool,
+    ) -> Result<DedupeReport, CliError> {
+        // Return a mock dedupe result
+        Ok(DedupeReport {
+            tiles_analyzed: 100,
+            zoom_levels_present: vec![16, 18],
+            overlaps_by_pair: [(18, 16)].into_iter().map(|k| (k, 10)).collect(),
+            tiles_removed: Vec::new(),
+            tiles_preserved: Vec::new(),
+            dry_run,
+        })
+    }
+
+    fn scan_overlaps(&self, _source: &Path) -> Result<OverlapSummary, CliError> {
+        // Return a mock overlap summary
+        Ok(OverlapSummary {
+            tiles_scanned: 100,
+            zoom_levels: vec![16, 18],
+            tiles_by_zoom: [(16, 80), (18, 20)].into_iter().collect(),
+            overlaps_by_pair: [(18, 16)].into_iter().map(|k| (k, 10)).collect(),
+            total_overlaps: 10,
+        })
+    }
 }
 
 // ============================================================================
@@ -736,6 +768,8 @@ mod add_tests {
             region: "na".to_string(),
             package_type: PackageTypeArg::Ortho,
             version: "1.0.0".to_string(),
+            dedupe: false,
+            priority: ZoomPriorityArg("highest".to_string()),
             repo: PathBuf::from("/test/repo"),
         };
 
@@ -762,6 +796,8 @@ mod add_tests {
             region: "na".to_string(),
             package_type: PackageTypeArg::Ortho,
             version: "1.0.0".to_string(),
+            dedupe: false,
+            priority: ZoomPriorityArg("highest".to_string()),
             repo: PathBuf::from("/test/repo"),
         };
 
@@ -786,6 +822,8 @@ mod add_tests {
             region: "na".to_string(),
             package_type: PackageTypeArg::Ortho,
             version: "not-a-version".to_string(),
+            dedupe: false,
+            priority: ZoomPriorityArg("highest".to_string()),
             repo: PathBuf::from("/test/repo"),
         };
 
@@ -819,6 +857,8 @@ mod add_tests {
             region: "na".to_string(),
             package_type: PackageTypeArg::Overlay,
             version: "1.0.0".to_string(),
+            dedupe: false,
+            priority: ZoomPriorityArg("highest".to_string()),
             repo: PathBuf::from("/test/repo"),
         };
 
@@ -931,6 +971,8 @@ mod build_tests {
         let args = BuildArgs {
             region: "na".to_string(),
             package_type: PackageTypeArg::Ortho,
+            dedupe: false,
+            priority: ZoomPriorityArg("highest".to_string()),
             repo: PathBuf::from("/test/repo"),
         };
 

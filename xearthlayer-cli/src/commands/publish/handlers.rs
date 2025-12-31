@@ -7,16 +7,17 @@
 use semver::Version;
 
 use super::args::{
-    AddArgs, BuildArgs, CoverageArgs, InitArgs, ListArgs, ReleaseArgs, ScanArgs, StatusArgs,
-    UrlsArgs, ValidateArgs, VersionArgs,
+    AddArgs, BuildArgs, CoverageArgs, DedupeArgs, InitArgs, ListArgs, ReleaseArgs, ReportFormatArg,
+    ScanArgs, StatusArgs, UrlsArgs, ValidateArgs, VersionArgs,
 };
 use super::output::{
-    format_size_display, format_status, print_process_summary, print_region_suggestion,
-    print_scan_result, print_status_short,
+    format_size_display, format_status, print_dedupe_result, print_overlap_summary,
+    print_process_summary, print_region_suggestion, print_scan_result, print_status_short,
 };
 use super::traits::{CommandContext, CommandHandler};
 use crate::error::CliError;
 use xearthlayer::package::{PackageType, ValidationContext};
+use xearthlayer::publisher::dedupe::{DedupeAuditReport, DedupeFilter, TileCoord};
 use xearthlayer::publisher::{
     parse_size, RepoConfig, VersionBump, DEFAULT_PART_SIZE, LIBRARY_FILENAME,
 };
@@ -120,6 +121,13 @@ impl CommandHandler for ScanHandler {
             print_region_suggestion(ctx.output, &suggestion);
         }
 
+        // Scan for overlaps (ortho only, overlays don't have zoom levels)
+        if package_type == PackageType::Ortho && !scan_result.tiles.is_empty() {
+            ctx.output.newline();
+            let overlap_summary = ctx.publisher.scan_overlaps(&args.source)?;
+            print_overlap_summary(ctx.output, &overlap_summary);
+        }
+
         Ok(())
     }
 }
@@ -180,6 +188,35 @@ impl CommandHandler for AddHandler {
                 .process_tiles(&scan_result, &args.region, package_type, repo.as_ref())?;
 
         print_process_summary(ctx.output, &summary);
+
+        // Deduplicate if requested (ortho only - overlays don't have zoom levels)
+        if args.dedupe && package_type == PackageType::Ortho {
+            ctx.output.newline();
+            ctx.output.println("Deduplicating overlapping tiles...");
+
+            let priority = args
+                .priority
+                .parse()
+                .map_err(|e| CliError::Publish(format!("Invalid priority: {}", e)))?;
+
+            let report = ctx.publisher.dedupe_package(
+                repo.as_ref(),
+                &args.region,
+                package_type,
+                priority,
+                None,  // No filter - dedupe entire package
+                false, // Not a dry run
+            )?;
+
+            if !report.overlaps_by_pair.is_empty() {
+                ctx.output.indented(&format!(
+                    "Removed {} overlapping tiles",
+                    report.tiles_removed.len()
+                ));
+            } else {
+                ctx.output.indented("No overlapping tiles found");
+            }
+        }
 
         // Generate initial metadata
         ctx.output.newline();
@@ -297,6 +334,36 @@ impl CommandHandler for BuildHandler {
             format_size_display(config.part_size)
         ));
         ctx.output.newline();
+
+        // Deduplicate if requested (ortho only - overlays don't have zoom levels)
+        if args.dedupe && package_type == PackageType::Ortho {
+            ctx.output
+                .println("Deduplicating overlapping tiles before archiving...");
+
+            let priority = args
+                .priority
+                .parse()
+                .map_err(|e| CliError::Publish(format!("Invalid priority: {}", e)))?;
+
+            let report = ctx.publisher.dedupe_package(
+                repo.as_ref(),
+                &args.region,
+                package_type,
+                priority,
+                None,  // No filter - dedupe entire package
+                false, // Not a dry run
+            )?;
+
+            if !report.overlaps_by_pair.is_empty() {
+                ctx.output.indented(&format!(
+                    "Removed {} overlapping tiles",
+                    report.tiles_removed.len()
+                ));
+            } else {
+                ctx.output.indented("No overlapping tiles found");
+            }
+            ctx.output.newline();
+        }
 
         let result =
             ctx.publisher
@@ -700,6 +767,111 @@ impl CommandHandler for CoverageHandler {
         for (region, count) in &result.tiles_by_region {
             ctx.output
                 .indented(&format!("{}: {}", region.to_uppercase(), count));
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Dedupe Handler
+// ============================================================================
+
+/// Handler for the `publish dedupe` command.
+pub struct DedupeHandler;
+
+impl CommandHandler for DedupeHandler {
+    type Args = DedupeArgs;
+
+    fn execute(args: Self::Args, ctx: &CommandContext<'_>) -> Result<(), CliError> {
+        let package_type = PackageType::from(args.package_type);
+
+        // Parse priority
+        let priority = args
+            .priority
+            .parse()
+            .map_err(|e| CliError::Publish(format!("Invalid priority: {}", e)))?;
+
+        // Parse tile filter if specified
+        let filter = if let Some(ref tile_str) = args.tile {
+            let coord = TileCoord::parse(tile_str)
+                .map_err(|e| CliError::Publish(format!("Invalid tile coordinate: {}", e)))?;
+            Some(DedupeFilter::for_tile(coord.lat, coord.lon))
+        } else {
+            None
+        };
+
+        let repo = ctx.publisher.open_repository(&args.repo)?;
+
+        ctx.output.println(&format!(
+            "Deduplicating {} {} with priority: {}",
+            args.region.to_uppercase(),
+            package_type,
+            priority
+        ));
+        if args.dry_run {
+            ctx.output.indented("(dry run - no files will be modified)");
+        }
+        if let Some(ref tile_str) = args.tile {
+            ctx.output
+                .indented(&format!("Targeting tile: {}", tile_str));
+        }
+        ctx.output.newline();
+
+        let report = ctx.publisher.dedupe_package(
+            repo.as_ref(),
+            &args.region,
+            package_type,
+            priority,
+            filter,
+            args.dry_run,
+        )?;
+
+        // Print results
+        print_dedupe_result(ctx.output, &report);
+
+        // Write report file if requested
+        if let Some(ref report_path) = args.report {
+            ctx.output.newline();
+            ctx.output
+                .println(&format!("Writing report to: {}", report_path.display()));
+
+            // Build audit report with full context
+            let tile_filter = args
+                .tile
+                .as_ref()
+                .and_then(|t| TileCoord::parse(t).ok().map(|c| (c.lat, c.lon)));
+
+            let audit_report = DedupeAuditReport {
+                tiles_analyzed: report.tiles_analyzed,
+                zoom_levels_present: report.zoom_levels_present.clone(),
+                overlaps_by_pair: report.overlaps_by_pair.clone(),
+                tiles_removed: report.tiles_removed.clone(),
+                tiles_preserved: report.tiles_preserved.clone(),
+                dry_run: report.dry_run,
+                priority_mode: format!("{}", priority),
+                tile_filter,
+            };
+
+            let content = match args.report_format {
+                ReportFormatArg::Json => audit_report.to_json(),
+                ReportFormatArg::Text => audit_report.to_text(),
+            };
+
+            std::fs::write(report_path, content)
+                .map_err(|e| CliError::Publish(format!("Failed to write report: {}", e)))?;
+        }
+
+        // Next steps
+        ctx.output.newline();
+        if !report.overlaps_by_pair.is_empty() && args.dry_run {
+            ctx.output.println("Next steps:");
+            ctx.output
+                .indented("Run without --dry-run to apply changes");
+        } else if !report.overlaps_by_pair.is_empty() && !args.dry_run {
+            ctx.output.println("Note:");
+            ctx.output
+                .indented("Run 'publish build' to recreate archives with deduplicated tiles");
         }
 
         Ok(())

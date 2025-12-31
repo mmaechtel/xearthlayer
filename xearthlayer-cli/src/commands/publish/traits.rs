@@ -11,6 +11,7 @@ use semver::Version;
 
 use crate::error::CliError;
 use xearthlayer::package::{PackageMetadata, PackageType};
+use xearthlayer::publisher::dedupe::{DedupeFilter, TileReference, ZoomPriority};
 use xearthlayer::publisher::{
     BuildResult, ProcessSummary, RegionSuggestion, ReleaseResult, ReleaseStatus, RepoConfig,
     SceneryScanResult, UrlConfigResult, VersionBump,
@@ -23,6 +24,39 @@ pub struct CoverageResult {
     pub total_tiles: usize,
     /// Count of tiles by region.
     pub tiles_by_region: HashMap<String, usize>,
+}
+
+/// Result of a dedupe operation.
+#[derive(Debug)]
+pub struct DedupeReport {
+    /// Total tiles analyzed in the package.
+    pub tiles_analyzed: usize,
+    /// Zoom levels present in the package.
+    pub zoom_levels_present: Vec<u8>,
+    /// Overlap counts by (higher_zl, lower_zl) pair.
+    pub overlaps_by_pair: HashMap<(u8, u8), usize>,
+    /// Tiles that were removed.
+    pub tiles_removed: Vec<TileReference>,
+    /// Tiles that were preserved.
+    pub tiles_preserved: Vec<TileReference>,
+    /// Whether this was a dry run (no files modified).
+    pub dry_run: bool,
+}
+
+/// Summary of overlap scan results.
+#[derive(Debug, Default)]
+pub struct OverlapSummary {
+    /// Total .ter files scanned.
+    pub tiles_scanned: usize,
+    /// Zoom levels present.
+    #[allow(dead_code)]
+    pub zoom_levels: Vec<u8>,
+    /// Count of tiles by zoom level.
+    pub tiles_by_zoom: HashMap<u8, usize>,
+    /// Overlap counts by (higher_zl, lower_zl) pair.
+    pub overlaps_by_pair: HashMap<(u8, u8), usize>,
+    /// Total overlap count.
+    pub total_overlaps: usize,
 }
 
 // ============================================================================
@@ -209,6 +243,24 @@ pub trait PublisherService: Send + Sync {
         packages_dir: &Path,
         output_path: &Path,
     ) -> Result<CoverageResult, CliError>;
+
+    /// Deduplicate overlapping zoom level tiles in a package.
+    ///
+    /// Scans for overlapping tiles and removes redundant ones based on priority.
+    fn dedupe_package(
+        &self,
+        repo: &dyn RepositoryOperations,
+        region: &str,
+        package_type: PackageType,
+        priority: ZoomPriority,
+        filter: Option<DedupeFilter>,
+        dry_run: bool,
+    ) -> Result<DedupeReport, CliError>;
+
+    /// Scan a source directory for zoom level overlaps.
+    ///
+    /// Returns a summary of overlapping tiles without modifying any files.
+    fn scan_overlaps(&self, source: &Path) -> Result<OverlapSummary, CliError>;
 }
 
 // ============================================================================
