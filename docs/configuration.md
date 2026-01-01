@@ -417,7 +417,7 @@ Controls package manager behavior.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `library_url` | URL | (none) | URL to the package library index file |
+| `library_url` | URL | `https://xearthlayer.app/packages/xearthlayer_package_library.txt` | URL to the package library index file |
 | `install_location` | path | `~/.xearthlayer/packages` | Directory for storing installed packages |
 | `custom_scenery_path` | path | (auto-detect) | X-Plane Custom Scenery directory for overlay symlinks |
 | `auto_install_overlays` | bool | `false` | Automatically install matching overlay when installing ortho |
@@ -426,7 +426,7 @@ Controls package manager behavior.
 **Example:**
 ```ini
 [packages]
-library_url = https://example.com/xearthlayer_package_library.txt
+; library_url defaults to https://xearthlayer.app/packages/xearthlayer_package_library.txt
 install_location = ~/.xearthlayer/packages
 custom_scenery_path = /home/user/X-Plane 12/Custom Scenery
 auto_install_overlays = true
@@ -434,7 +434,7 @@ temp_dir = ~/Downloads/xearthlayer-temp
 ```
 
 **Notes:**
-- When `library_url` is set, you don't need to pass `--library-url` to package commands
+- The default `library_url` points to the official XEarthLayer package library; override only if using a custom package source
 - The `temp_dir` is used for downloading archives before extraction; files are cleaned up after installation
 - When `auto_install_overlays` is enabled, installing an ortho package will automatically install the matching overlay package for the same region (if available)
 - If `custom_scenery_path` is not set, it falls back to `[xplane] scenery_dir` or auto-detects from X-Plane installation
@@ -509,7 +509,7 @@ strategy = auto  ; auto, heading-aware, or radial
 file = ~/.xearthlayer/xearthlayer.log
 
 [packages]
-; library_url = https://example.com/xearthlayer_package_library.txt
+; library_url defaults to https://xearthlayer.app/packages/xearthlayer_package_library.txt
 ; install_location = ~/.xearthlayer/packages
 ; custom_scenery_path = /path/to/X-Plane 12/Custom Scenery
 ; auto_install_overlays = true

@@ -18,12 +18,12 @@ Set your library URL in `~/.xearthlayer/config.ini`:
 scenery_dir = /path/to/X-Plane 12/Custom Scenery
 
 [packages]
-library_url = https://example.com/xearthlayer_package_library.txt
+# library_url defaults to https://xearthlayer.app/packages/xearthlayer_package_library.txt
 install_location = ~/.xearthlayer/packages
 auto_install_overlays = true
 ```
 
-With this configured, you won't need to pass `--library-url` to every command.
+The default `library_url` points to the official XEarthLayer package library, so most users don't need to configure this.
 
 ### Auto-Install Overlays
 
