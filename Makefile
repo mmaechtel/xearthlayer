@@ -208,17 +208,40 @@ ci-full: verify coverage-check audit deps-check ## Run comprehensive CI checks
 
 ##@ Installation
 
+# Installation directory configuration
+# Default: ~/.local/bin (user-local, XDG compliant, no sudo needed)
+# Override: make install PREFIX=/usr/local (system-wide, needs sudo)
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+
 .PHONY: install
-install: release ## Install binary to system
-	@echo "$(BLUE)Installing xearthlayer...$(NC)"
-	$(CARGO) install --path .
-	@echo "$(GREEN)Installation complete!$(NC)"
+install: release ## Install binary to $(BINDIR)
+	@echo "$(BLUE)Installing xearthlayer to $(BINDIR)...$(NC)"
+	@mkdir -p "$(BINDIR)"
+	@cp target/release/xearthlayer "$(BINDIR)/"
+	@chmod 755 "$(BINDIR)/xearthlayer"
+	@echo "$(GREEN)Installed: $(BINDIR)/xearthlayer$(NC)"
+	@if ! echo "$$PATH" | tr ':' '\n' | grep -qx "$(BINDIR)"; then \
+		echo ""; \
+		echo "$(YELLOW)Note: $(BINDIR) may not be in your PATH$(NC)"; \
+		echo "Add it to your shell profile if needed:"; \
+		echo "  echo 'export PATH=\"$(BINDIR):\$$PATH\"' >> ~/.bashrc"; \
+	fi
+
+.PHONY: setup
+setup: build ## Run the interactive setup wizard
+	@echo "$(BLUE)Starting XEarthLayer setup wizard...$(NC)"
+	@./target/debug/xearthlayer setup
 
 .PHONY: uninstall
-uninstall: ## Uninstall binary from system
-	@echo "$(BLUE)Uninstalling xearthlayer...$(NC)"
-	$(CARGO) uninstall xearthlayer
-	@echo "$(GREEN)Uninstall complete!$(NC)"
+uninstall: ## Remove installed binary from $(BINDIR)
+	@echo "$(BLUE)Uninstalling xearthlayer from $(BINDIR)...$(NC)"
+	@if [ -f "$(BINDIR)/xearthlayer" ]; then \
+		rm "$(BINDIR)/xearthlayer"; \
+		echo "$(GREEN)Uninstalled: $(BINDIR)/xearthlayer$(NC)"; \
+	else \
+		echo "$(YELLOW)Not found: $(BINDIR)/xearthlayer$(NC)"; \
+	fi
 
 ##@ Packaging
 

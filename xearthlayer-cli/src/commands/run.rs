@@ -33,6 +33,7 @@ use crate::runner::CliRunner;
 use crate::ui::{self, DashboardState, LoadingProgress, PrewarmProgress};
 
 /// Arguments for the run command.
+#[derive(Default)]
 pub struct RunArgs {
     pub provider: Option<ProviderType>,
     pub google_api_key: Option<String>,
@@ -50,6 +51,21 @@ pub struct RunArgs {
 pub fn run(args: RunArgs) -> Result<(), CliError> {
     // Initialize panic handler early for crash cleanup
     panic_handler::init();
+
+    // Check for first-run scenario: no config file and no packages directory
+    // This provides a friendly welcome message instead of confusing errors
+    let config_path = xearthlayer::config::config_file_path();
+    if !config_path.exists() {
+        let default_packages_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".xearthlayer")
+            .join("packages");
+
+        if !default_packages_dir.exists() {
+            // First-run scenario: show welcome message and exit cleanly
+            return Err(CliError::NeedsSetup);
+        }
+    }
 
     let runner = CliRunner::with_debug(args.debug)?;
     runner.log_startup("run");
