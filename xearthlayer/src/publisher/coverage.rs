@@ -105,7 +105,7 @@ impl CoverageConfig {
             region_colors,
             default_color: (150, 150, 150, 200),
             border_color: (80, 80, 80, 255),
-            border_width: 0.5,
+            border_width: 0.3,
             style: MapStyle::Dark,
         }
     }
@@ -178,15 +178,44 @@ impl Tool for FilledRect {
     }
 
     fn draw(&self, bounds: &Bounds, mut pixmap: PixmapMut) {
-        let mut path_builder = PathBuilder::new();
+        // Convert lat/lon corners to pixel coordinates (raw values before any clamping)
+        let x1_raw = bounds.x_to_px(lon_to_x(self.lon_min, bounds.zoom)) as f32;
+        let y1_raw = bounds.y_to_px(lat_to_y(self.lat_max, bounds.zoom)) as f32; // north
+        let x2_raw = bounds.x_to_px(lon_to_x(self.lon_max, bounds.zoom)) as f32;
+        let y2_raw = bounds.y_to_px(lat_to_y(self.lat_min, bounds.zoom)) as f32; // south
 
-        // Convert lat/lon corners to pixel coordinates
-        let x1 = bounds.x_to_px(lon_to_x(self.lon_min, bounds.zoom)) as f32;
-        let y1 = bounds.y_to_px(lat_to_y(self.lat_max, bounds.zoom)) as f32; // north
-        let x2 = bounds.x_to_px(lon_to_x(self.lon_max, bounds.zoom)) as f32;
-        let y2 = bounds.y_to_px(lat_to_y(self.lat_min, bounds.zoom)) as f32; // south
+        let img_width = pixmap.width() as f32;
+        let img_height = pixmap.height() as f32;
+
+        // Skip tiles that are completely outside the visible area
+        // This prevents wrapped tiles from appearing on the wrong side of the map
+        if x2_raw < 0.0 || x1_raw > img_width || y2_raw < 0.0 || y1_raw > img_height {
+            return;
+        }
+
+        // Skip tiles whose width is impossibly large (indicating world wrapping)
+        // A single degree of longitude should never span more than a small fraction of the image
+        // At most zoom levels, a 1-degree tile should be less than img_width / 4
+        let raw_width = (x2_raw - x1_raw).abs();
+        if raw_width > img_width / 4.0 {
+            return;
+        }
+
+        // Clamp to image bounds for tiles that are partially visible
+        let x1 = x1_raw.max(0.0).min(img_width);
+        let x2 = x2_raw.max(0.0).min(img_width);
+        let y1 = y1_raw.max(0.0).min(img_height);
+        let y2 = y2_raw.max(0.0).min(img_height);
+
+        // Skip if the clamped rectangle is too small or invalid
+        let width = (x2 - x1).abs();
+        let height = (y2 - y1).abs();
+        if width < 1.0 || height < 1.0 {
+            return;
+        }
 
         // Build rectangle path
+        let mut path_builder = PathBuilder::new();
         path_builder.move_to(x1, y1);
         path_builder.line_to(x2, y1);
         path_builder.line_to(x2, y2);
@@ -372,11 +401,69 @@ impl CoverageMapGenerator {
             ));
         }
 
-        // Create staticmap builder with configured tile server
+        // Calculate geographic bounds of all tiles
+        let mut min_lat = 90i32;
+        let mut max_lat = -90i32;
+        let mut min_lon = 180i32;
+        let mut max_lon = -180i32;
+
+        for tile in tiles {
+            min_lat = min_lat.min(tile.latitude);
+            max_lat = max_lat.max(tile.latitude + 1); // +1 for tile extent
+            min_lon = min_lon.min(tile.longitude);
+            max_lon = max_lon.max(tile.longitude + 1);
+        }
+
+        // Calculate the longitude span
+        let lon_span = (max_lon - min_lon) as f64;
+
+        // Calculate zoom level and center to prevent world wrapping/repetition
+        // At zoom z, world width = 256 * 2^z pixels
+        // To prevent repetition: world_width >= image_width
+        //
+        // Zoom 1: 512px world  → repeats on 1200px image
+        // Zoom 2: 1024px world → slight repetition on 1200px image
+        // Zoom 3: 2048px world → no repetition, fits well
+
+        // For global coverage (span > 180°), use zoom 2 centered appropriately
+        // This provides a good balance between showing all regions and minimizing repetition
+        let (center_lat, center_lon, zoom) = if lon_span > 180.0 {
+            // Center latitude on our coverage (not equator) for better framing
+            let center_lat = (min_lat + max_lat) as f64 / 2.0;
+
+            // For longitude, center between our westernmost (NA ~-160°) and easternmost (OC ~+170°)
+            // The "visual center" going eastward is approximately the Atlantic/Europe area
+            // Using 0° (prime meridian) puts NA on the left and OC on the right, with the gap in the Pacific
+            let center_lon = 0.0;
+
+            // Zoom 2 shows 1024px world in 1200px image - slight edge repetition but all regions visible
+            // The draw() function will filter out any wrapped tiles outside the visible area
+            (center_lat, center_lon, 2_u8)
+        } else {
+            // For regional coverage, center on the tile bounds
+            let center_lat = (min_lat + max_lat) as f64 / 2.0;
+            let center_lon = (min_lon + max_lon) as f64 / 2.0;
+
+            // Calculate zoom that fits the span with some padding
+            // At zoom z, 360° of longitude = 256 * 2^z pixels
+            // We want: span_in_pixels = (lon_span / 360) * 256 * 2^z <= width * 0.9 (leave 10% margin)
+            let max_span_pixels = self.config.width as f64 * 0.9;
+            let zoom = ((max_span_pixels * 360.0) / (lon_span * 256.0))
+                .log2()
+                .floor() as u8;
+            let zoom = zoom.clamp(1, 6);
+
+            (center_lat, center_lon, zoom)
+        };
+
+        // Create staticmap builder with explicit center and zoom to prevent auto-calculation
+        // that could cause world wrapping
         let mut map = StaticMapBuilder::default()
             .width(self.config.width)
             .height(self.config.height)
-            .padding(self.config.padding)
+            .lat_center(center_lat)
+            .lon_center(center_lon)
+            .zoom(zoom)
             .url_template(self.config.style.url_template())
             .build()
             .map_err(|e| PublishError::ArchiveFailed(format!("Failed to create map: {}", e)))?;
