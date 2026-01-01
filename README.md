@@ -59,23 +59,20 @@ See [How It Works](docs/how-it-works.md) for detailed architecture.
 ## Quick Start
 
 ```bash
-# Build from source
+# Build and install
 git clone https://github.com/samsoir/xearthlayer.git
 cd xearthlayer
 make release
+make install  # Installs to ~/.local/bin (no sudo required)
 
-# Initialize configuration
-xearthlayer init
-
-# Configure your package library in ~/.xearthlayer/config.ini:
-# [packages]
-library_url = https://raw.githubusercontent.com/samsoir/xearthlayer-regional-scenery/main/xearthlayer_package_library.txt
+# Run the setup wizard (first-time configuration)
+xearthlayer setup
 
 # Install a regional package
 xearthlayer packages install eu
 
-# Start XEarthLayer (mounts all installed packages automatically)
-xearthlayer run
+# Start XEarthLayer
+xearthlayer  # Defaults to 'run' command
 
 # Fly!
 ```
@@ -135,8 +132,11 @@ See [Developer Documentation](docs/dev/) for architecture, design principles, an
 ## CLI Reference
 
 ```bash
-# Setup
-xearthlayer init                      # Create config file
+# Setup & Configuration
+xearthlayer setup                     # Interactive setup wizard (recommended for first-time users)
+xearthlayer init                      # Create config file with defaults
+xearthlayer config list               # View all settings
+xearthlayer config set <key> <value>  # Change a setting
 
 # Package Management
 xearthlayer packages check            # Check available packages
@@ -145,8 +145,10 @@ xearthlayer packages list             # List installed packages
 xearthlayer packages update [region]  # Update packages
 xearthlayer packages remove <region>  # Remove a package
 
-# Running (primary command)
-xearthlayer run                       # Mount all packages and start streaming (with real-time dashboard)
+# Running
+xearthlayer                           # Start streaming (defaults to 'run')
+xearthlayer run                       # Mount all packages with real-time dashboard
+xearthlayer run --airport KJFK        # Pre-warm cache around an airport
 
 # Advanced: Single Package Mode
 xearthlayer start --source <path>     # Start streaming for a single scenery pack

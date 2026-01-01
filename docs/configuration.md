@@ -1,6 +1,20 @@
 # XEarthLayer Configuration
 
-XEarthLayer uses an INI configuration file located at `~/.xearthlayer/config.ini`. This file is created automatically on first run with sensible defaults.
+XEarthLayer uses an INI configuration file located at `~/.xearthlayer/config.ini`.
+
+## Setup Wizard (Recommended)
+
+The easiest way to configure XEarthLayer is with the interactive setup wizard:
+
+```bash
+xearthlayer setup
+```
+
+The wizard auto-detects your X-Plane installation, system hardware (CPU, memory, storage type), and recommends optimal settings. It handles all the configuration below automatically.
+
+## Manual Configuration
+
+For users who prefer manual configuration, this file is created with `xearthlayer init` and can be edited directly.
 
 ## Configuration File Location
 
@@ -646,6 +660,12 @@ To regenerate the config file with defaults:
 ```bash
 rm ~/.xearthlayer/config.ini
 xearthlayer init
+```
+
+Or use the setup wizard for guided reconfiguration:
+
+```bash
+xearthlayer setup  # Offers to reconfigure or backup existing config
 ```
 
 ## Size Format

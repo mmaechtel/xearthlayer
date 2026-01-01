@@ -4,13 +4,15 @@ The XEarthLayer streaming service generates satellite imagery textures on-demand
 
 ## Quick Start
 
-The simplest way to run XEarthLayer is with the `run` command:
+The simplest way to run XEarthLayer is just:
 
 ```bash
-xearthlayer run
+xearthlayer
 ```
 
-This automatically discovers all installed ortho packages and mounts them in your X-Plane Custom Scenery directory.
+When no command is specified, XEarthLayer defaults to `run`. This automatically discovers all installed ortho packages and mounts them in your X-Plane Custom Scenery directory.
+
+You can also explicitly use `xearthlayer run` if you prefer.
 
 ## How It Works
 
@@ -28,15 +30,19 @@ The result is cached so subsequent requests are instant.
 ## Prerequisites
 
 - **Linux** with FUSE support (most distributions have this built-in)
+- **Configuration completed** (run `xearthlayer setup` for first-time setup)
 - **At least one ortho package installed** (use `xearthlayer packages install <region>`)
 - **Internet connection** for downloading satellite imagery
 
+**First-time users:** If you haven't configured XEarthLayer yet, running `xearthlayer` will display a welcome message with instructions to run the setup wizard.
+
 ## The `run` Command
 
-The `run` command is the primary way to use XEarthLayer:
+The `run` command is the primary way to use XEarthLayer. Running `xearthlayer` with no arguments defaults to this command:
 
 ```bash
-xearthlayer run
+xearthlayer      # Same as 'xearthlayer run'
+xearthlayer run  # Explicit form
 ```
 
 Output:
