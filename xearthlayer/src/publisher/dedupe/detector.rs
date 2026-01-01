@@ -113,6 +113,10 @@ impl OverlapDetector {
     }
 
     /// Detect overlaps between two specific zoom levels.
+    ///
+    /// This uses a "parent-centric" approach: for each low ZL tile, we check
+    /// if ALL of its children at the high ZL exist. This ensures we only
+    /// mark overlaps as Complete when removing the low ZL tile won't create gaps.
     fn detect_between_levels(
         &self,
         by_zoom: &HashMap<u8, Vec<&TileReference>>,
@@ -126,42 +130,66 @@ impl OverlapDetector {
             return Vec::new();
         };
 
-        // Build lookup for low ZL tiles: (row, col) → tile
-        let low_lookup: HashMap<(u32, u32), &TileReference> =
-            low_tiles.iter().map(|t| ((t.row, t.col), *t)).collect();
+        // Build lookup for high ZL tiles: (row, col) → &tile
+        let high_lookup: HashMap<(u32, u32), &TileReference> =
+            high_tiles.iter().map(|t| ((t.row, t.col), *t)).collect();
 
-        // Check each high ZL tile against low ZL lookup
-        high_tiles
-            .iter()
-            .filter_map(|high| {
-                let (parent_row, parent_col) = high.parent_at(low_zl)?;
-                let low = low_lookup.get(&(parent_row, parent_col))?;
+        // Calculate how many children each low ZL tile should have
+        let zl_diff = high_zl - low_zl;
+        let scale = 4u32.pow((zl_diff / 2) as u32); // 4 for 2 levels, 16 for 4 levels
+        let expected_children = scale * scale; // 16 for 2 levels, 256 for 4 levels
 
-                Some(ZoomOverlap {
-                    higher_zl: (*high).clone(),
+        let mut overlaps = Vec::new();
+
+        // For each low ZL tile, check how many high ZL children exist
+        for low in low_tiles {
+            // Calculate the range of child coordinates
+            let child_row_start = low.row * scale;
+            let child_col_start = low.col * scale;
+
+            // Collect all existing children
+            let mut existing_children: Vec<TileReference> = Vec::new();
+
+            for row_offset in 0..scale {
+                for col_offset in 0..scale {
+                    let child_row = child_row_start + row_offset;
+                    let child_col = child_col_start + col_offset;
+                    if let Some(child) = high_lookup.get(&(child_row, child_col)) {
+                        existing_children.push((*child).clone());
+                    }
+                }
+            }
+
+            // Only create an overlap if at least one child exists
+            if !existing_children.is_empty() {
+                let coverage = if existing_children.len() as u32 == expected_children {
+                    OverlapCoverage::Complete
+                } else {
+                    OverlapCoverage::Partial
+                };
+
+                trace!(
+                    low_row = low.row,
+                    low_col = low.col,
+                    low_zl = low_zl,
+                    high_zl = high_zl,
+                    existing = existing_children.len(),
+                    expected = expected_children,
+                    coverage = ?coverage,
+                    "Detected overlap"
+                );
+
+                overlaps.push(ZoomOverlap {
+                    higher_zl: existing_children[0].clone(), // First child as representative
                     lower_zl: (*low).clone(),
-                    zl_diff: high_zl - low_zl,
-                    coverage: self.determine_coverage(high, low, high_zl, low_zl),
-                })
-            })
-            .collect()
-    }
+                    all_higher_zl: existing_children,
+                    zl_diff,
+                    coverage,
+                });
+            }
+        }
 
-    /// Determine if a higher ZL tile completely covers a lower ZL tile.
-    ///
-    /// For complete coverage, all child tiles at the higher ZL must exist
-    /// within the lower ZL tile's area. Currently returns Complete for
-    /// direct parent-child relationships.
-    fn determine_coverage(
-        &self,
-        _high: &TileReference,
-        _low: &TileReference,
-        _high_zl: u8,
-        _low_zl: u8,
-    ) -> OverlapCoverage {
-        // For now, assume complete coverage if the parent relationship exists.
-        // A more sophisticated check would verify that ALL child tiles exist.
-        OverlapCoverage::Complete
+        overlaps
     }
 
     /// Parse a .ter file to extract tile information.

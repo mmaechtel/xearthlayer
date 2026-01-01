@@ -1,6 +1,11 @@
 //! Integration tests for the dedupe module.
 //!
 //! These tests verify that the detector and resolver work together correctly.
+//!
+//! Key concepts:
+//! - Complete coverage: All 16 ZL18 children (4×4 grid) exist for a ZL16 parent
+//! - Partial coverage: Some but not all children exist (creates gaps if removed)
+//! - Only complete overlaps are safe to dedupe
 
 use super::*;
 use std::path::PathBuf;
@@ -19,65 +24,119 @@ fn make_tile(row: u32, col: u32, zoom: u8, lat: f32, lon: f32) -> TileReference 
     }
 }
 
+/// Create all 16 ZL18 children for a ZL16 parent tile.
+/// ZL16 (parent_row, parent_col) → ZL18 children at (row*4..row*4+3, col*4..col*4+3)
+fn make_complete_zl18_coverage(
+    parent_row: u32,
+    parent_col: u32,
+    lat: f32,
+    lon: f32,
+) -> Vec<TileReference> {
+    let mut children = Vec::new();
+    let base_row = parent_row * 4;
+    let base_col = parent_col * 4;
+
+    for row_off in 0..4 {
+        for col_off in 0..4 {
+            children.push(make_tile(
+                base_row + row_off,
+                base_col + col_off,
+                18,
+                lat + (row_off as f32) * 0.01,
+                lon + (col_off as f32) * 0.01,
+            ));
+        }
+    }
+    children
+}
+
 /// Create a ZoomOverlap for two tiles.
+#[allow(dead_code)]
 fn make_overlap(higher: &TileReference, lower: &TileReference) -> ZoomOverlap {
     ZoomOverlap {
         higher_zl: higher.clone(),
         lower_zl: lower.clone(),
+        all_higher_zl: vec![higher.clone()],
         zl_diff: higher.zoom - lower.zoom,
         coverage: OverlapCoverage::Complete,
     }
 }
 
 #[test]
-fn test_full_workflow_highest_priority() {
-    // Simulate a package with overlapping ZL18 and ZL16 tiles
-    // ZL18 (100032, 42688) → ZL16 (25008, 10672)
+fn test_partial_coverage_not_removed() {
+    // Only 1 ZL18 child exists - this is PARTIAL coverage
+    // Should NOT remove the ZL16 tile (would create a 15/16 gap)
     let zl18 = make_tile(100032, 42688, 18, 39.15, -121.36);
-    let zl16 = make_tile(25008, 10672, 16, 39.15, -121.36);
+    let zl16 = make_tile(25008, 10672, 16, 39.15, -121.36); // parent of (100032..100035, 42688..42691)
 
     let tiles = vec![zl18.clone(), zl16.clone()];
 
-    // Detect overlaps
     let detector = OverlapDetector::new();
     let overlaps = detector.detect_overlaps(&tiles);
 
+    // Should detect 1 overlap with PARTIAL coverage
     assert_eq!(overlaps.len(), 1);
-    assert_eq!(overlaps[0].higher_zl.zoom, 18);
-    assert_eq!(overlaps[0].lower_zl.zoom, 16);
+    assert_eq!(overlaps[0].coverage, OverlapCoverage::Partial);
 
-    // Resolve with highest priority (default)
+    // Resolve with highest priority - should NOT remove the ZL16 (partial coverage)
     let result = resolve_overlaps(&tiles, &overlaps, ZoomPriority::Highest);
 
     assert_eq!(result.tiles_analyzed, 2);
-    assert_eq!(result.tiles_removed.len(), 1);
-    assert_eq!(result.tiles_removed[0].zoom, 16); // Lower removed
-    assert_eq!(result.tiles_preserved.len(), 1);
-    assert_eq!(result.tiles_preserved[0].zoom, 18); // Higher kept
+    assert_eq!(result.tiles_removed.len(), 0); // Nothing removed - gap protection!
+    assert_eq!(result.tiles_preserved.len(), 2); // Both preserved
 }
 
 #[test]
-fn test_full_workflow_lowest_priority() {
-    let zl18 = make_tile(100032, 42688, 18, 39.15, -121.36);
+fn test_complete_coverage_removed() {
+    // All 16 ZL18 children exist - this is COMPLETE coverage
+    // Safe to remove the ZL16 tile
     let zl16 = make_tile(25008, 10672, 16, 39.15, -121.36);
+    let zl18_children = make_complete_zl18_coverage(25008, 10672, 39.15, -121.36);
 
-    let tiles = vec![zl18.clone(), zl16.clone()];
+    let mut tiles = zl18_children.clone();
+    tiles.push(zl16.clone());
+
+    let detector = OverlapDetector::new();
+    let overlaps = detector.detect_overlaps(&tiles);
+
+    // Should detect 1 overlap with COMPLETE coverage
+    assert_eq!(overlaps.len(), 1);
+    assert_eq!(overlaps[0].coverage, OverlapCoverage::Complete);
+
+    // Resolve with highest priority - ZL16 should be removed
+    let result = resolve_overlaps(&tiles, &overlaps, ZoomPriority::Highest);
+
+    assert_eq!(result.tiles_removed.len(), 1);
+    assert_eq!(result.tiles_removed[0].zoom, 16); // Lower removed
+    assert_eq!(result.tiles_preserved.len(), 16); // All 16 ZL18 tiles kept
+}
+
+#[test]
+fn test_complete_coverage_lowest_priority() {
+    // All 16 ZL18 children exist
+    // With lowest priority, remove all ZL18 children and keep ZL16
+    let zl16 = make_tile(25008, 10672, 16, 39.15, -121.36);
+    let zl18_children = make_complete_zl18_coverage(25008, 10672, 39.15, -121.36);
+
+    let mut tiles = zl18_children.clone();
+    tiles.push(zl16.clone());
+
     let detector = OverlapDetector::new();
     let overlaps = detector.detect_overlaps(&tiles);
 
     // Resolve with lowest priority (smaller package)
     let result = resolve_overlaps(&tiles, &overlaps, ZoomPriority::Lowest);
 
-    assert_eq!(result.tiles_removed.len(), 1);
-    assert_eq!(result.tiles_removed[0].zoom, 18); // Higher removed
+    // With complete coverage, we can remove higher ZL tiles
+    assert_eq!(result.tiles_removed.len(), 16); // All 16 ZL18 removed
     assert_eq!(result.tiles_preserved.len(), 1);
-    assert_eq!(result.tiles_preserved[0].zoom, 16); // Lower kept
+    assert_eq!(result.tiles_preserved[0].zoom, 16); // ZL16 kept
 }
 
 #[test]
-fn test_three_level_cascade() {
-    // ZL18 → ZL16 → ZL14 overlaps
-    // Coordinates: ZL18(100032, 42688) → ZL16(25008, 10672) → ZL14(6252, 2668)
+fn test_partial_cascade_protection() {
+    // ZL18 → ZL16 → ZL14 overlaps, but only 1 tile at each level
+    // All should be marked as PARTIAL (only 1 of 16/256 children)
     let zl18 = make_tile(100032, 42688, 18, 39.15, -121.36);
     let zl16 = make_tile(25008, 10672, 16, 39.15, -121.36);
     let zl14 = make_tile(6252, 2668, 14, 39.15, -121.36);
@@ -87,34 +146,34 @@ fn test_three_level_cascade() {
     let detector = OverlapDetector::new();
     let overlaps = detector.detect_overlaps(&tiles);
 
-    // Should detect 3 overlaps: 18→16, 18→14, 16→14
+    // Should detect 3 overlaps, all PARTIAL
     assert_eq!(overlaps.len(), 3);
+    for overlap in &overlaps {
+        assert_eq!(overlap.coverage, OverlapCoverage::Partial);
+    }
 
-    // With highest priority, ZL14 and ZL16 should be removed
+    // With highest priority, NOTHING should be removed (all partial)
     let result = resolve_overlaps(&tiles, &overlaps, ZoomPriority::Highest);
 
-    assert_eq!(result.tiles_removed.len(), 2);
-    let removed_zooms: Vec<u8> = result.tiles_removed.iter().map(|t| t.zoom).collect();
-    assert!(removed_zooms.contains(&14));
-    assert!(removed_zooms.contains(&16));
-    assert_eq!(result.tiles_preserved.len(), 1);
-    assert_eq!(result.tiles_preserved[0].zoom, 18);
+    assert_eq!(result.tiles_removed.len(), 0); // Gap protection!
+    assert_eq!(result.tiles_preserved.len(), 3); // All preserved
 }
 
 #[test]
-fn test_specific_zoom_priority() {
-    let zl18 = make_tile(100032, 42688, 18, 39.15, -121.36);
+fn test_specific_zoom_with_complete_coverage() {
     let zl16 = make_tile(25008, 10672, 16, 39.15, -121.36);
+    let zl18_children = make_complete_zl18_coverage(25008, 10672, 39.15, -121.36);
 
-    let tiles = vec![zl18.clone(), zl16.clone()];
+    let mut tiles = zl18_children.clone();
+    tiles.push(zl16.clone());
+
     let detector = OverlapDetector::new();
     let overlaps = detector.detect_overlaps(&tiles);
 
-    // Keep ZL16 specifically
+    // Keep ZL16 specifically - all ZL18 children removed
     let result = resolve_overlaps(&tiles, &overlaps, ZoomPriority::Specific(16));
 
-    assert_eq!(result.tiles_removed.len(), 1);
-    assert_eq!(result.tiles_removed[0].zoom, 18); // ZL18 removed
+    assert_eq!(result.tiles_removed.len(), 16); // All ZL18 removed
     assert_eq!(result.tiles_preserved[0].zoom, 16); // ZL16 kept
 }
 

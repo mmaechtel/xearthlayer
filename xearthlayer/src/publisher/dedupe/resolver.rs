@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use super::types::{DedupeResult, TileReference, ZoomOverlap, ZoomPriority};
+use super::types::{DedupeResult, OverlapCoverage, TileReference, ZoomOverlap, ZoomPriority};
 
 /// Set of tiles to remove after resolution.
 #[derive(Debug, Default)]
@@ -84,34 +84,59 @@ pub fn resolve_overlaps(
 }
 
 /// Build a set of tile paths to remove based on priority.
+///
+/// Only processes overlaps with Complete coverage to avoid creating gaps.
+/// Partial overlaps are skipped - the higher ZL tiles will naturally
+/// take precedence in X-Plane's rendering without needing to remove
+/// the lower ZL tile.
 fn build_removal_set(overlaps: &[ZoomOverlap], priority: ZoomPriority) -> RemovalSet {
     let mut removal_set = RemovalSet::default();
 
     for overlap in overlaps {
-        let tile_to_remove = match priority {
+        // Only remove tiles when coverage is complete to avoid creating gaps
+        if overlap.coverage != OverlapCoverage::Complete {
+            continue;
+        }
+
+        match priority {
             ZoomPriority::Highest => {
-                // Keep higher ZL, remove lower
-                &overlap.lower_zl
-            }
-            ZoomPriority::Lowest => {
-                // Keep lower ZL, remove higher
-                &overlap.higher_zl
-            }
-            ZoomPriority::Specific(target_zl) => {
-                // Keep the one matching target_zl, remove the other
-                if overlap.higher_zl.zoom == target_zl {
-                    &overlap.lower_zl
-                } else if overlap.lower_zl.zoom == target_zl {
-                    &overlap.higher_zl
-                } else {
-                    // Neither matches target, keep higher by default
-                    &overlap.lower_zl
+                // Keep higher ZL tiles, remove lower ZL parent
+                let tile = &overlap.lower_zl;
+                if removal_set.paths.insert(tile.ter_path.clone()) {
+                    removal_set.tiles.push(tile.clone());
                 }
             }
-        };
-
-        if removal_set.paths.insert(tile_to_remove.ter_path.clone()) {
-            removal_set.tiles.push(tile_to_remove.clone());
+            ZoomPriority::Lowest => {
+                // Keep lower ZL parent, remove ALL higher ZL children
+                for tile in &overlap.all_higher_zl {
+                    if removal_set.paths.insert(tile.ter_path.clone()) {
+                        removal_set.tiles.push(tile.clone());
+                    }
+                }
+            }
+            ZoomPriority::Specific(target_zl) => {
+                // Keep the one matching target_zl, remove the other(s)
+                if overlap.higher_zl.zoom == target_zl {
+                    // Keep higher, remove lower
+                    let tile = &overlap.lower_zl;
+                    if removal_set.paths.insert(tile.ter_path.clone()) {
+                        removal_set.tiles.push(tile.clone());
+                    }
+                } else if overlap.lower_zl.zoom == target_zl {
+                    // Keep lower, remove ALL higher children
+                    for tile in &overlap.all_higher_zl {
+                        if removal_set.paths.insert(tile.ter_path.clone()) {
+                            removal_set.tiles.push(tile.clone());
+                        }
+                    }
+                } else {
+                    // Neither matches target, keep higher by default (remove lower)
+                    let tile = &overlap.lower_zl;
+                    if removal_set.paths.insert(tile.ter_path.clone()) {
+                        removal_set.tiles.push(tile.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -176,6 +201,7 @@ mod tests {
         ZoomOverlap {
             higher_zl: higher.clone(),
             lower_zl: lower.clone(),
+            all_higher_zl: vec![higher.clone()],
             zl_diff: higher.zoom - lower.zoom,
             coverage: OverlapCoverage::Complete,
         }

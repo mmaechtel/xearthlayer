@@ -70,10 +70,14 @@ impl TileReference {
 /// A detected overlap between two tiles at different zoom levels.
 #[derive(Debug, Clone)]
 pub struct ZoomOverlap {
-    /// Higher resolution tile (to keep by default).
+    /// Higher resolution tile (representative, for backward compatibility).
     pub higher_zl: TileReference,
-    /// Lower resolution tile (redundant by default).
+    /// Lower resolution tile (parent).
     pub lower_zl: TileReference,
+    /// All higher resolution tiles that overlap this parent.
+    /// When coverage is Complete, this contains all children (e.g., 16 for ZL18→ZL16).
+    /// When coverage is Partial, this contains only the existing children.
+    pub all_higher_zl: Vec<TileReference>,
     /// Zoom level difference (e.g., 2 for ZL18→ZL16).
     pub zl_diff: u8,
     /// Whether the overlap is complete or partial.
