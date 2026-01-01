@@ -27,13 +27,21 @@ GitHub Releases provides free hosting for package archives with these benefits:
 │  1. Process Tiles ──► 2. Set Version ──► 3. Build Archives          │
 │                                                │                    │
 │                                                ▼                    │
-│  6. Release ◄── 5. Configure URLs ◄── 4. Upload to GitHub           │
+│                              4. Generate Coverage Maps              │
+│                                                │                    │
+│                                                ▼                    │
+│                              5. Update README & Commit              │
+│                                                │                    │
+│                                                ▼                    │
+│  9. Release ◄── 8. Configure URLs ◄── 7. Upload ◄── 6. Create Tag   │
 │       │                                                             │
 │       ▼                                                             │
-│  7. Push Library Index                                              │
+│  10. Push Library Index                                             │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**Important:** Steps 4-5 (coverage maps and README) must be committed BEFORE creating the GitHub release tag. This ensures the tag captures all documentation updates.
 
 ## Complete Step-by-Step Guide
 
@@ -170,7 +178,37 @@ Archive parts:
 
 Archives are stored in `dist/<region>/<type>/`.
 
-### Step 7: Create GitHub Release
+### Step 7: Generate Coverage Maps
+
+Generate both static PNG and interactive GeoJSON coverage maps:
+
+```bash
+# Dark theme PNG (recommended for GitHub READMEs)
+xearthlayer publish coverage --dark --output coverage.png
+
+# Interactive GeoJSON (GitHub renders these automatically)
+xearthlayer publish coverage --geojson --output coverage.geojson
+```
+
+### Step 8: Update README and Commit
+
+Update the repository README with the new region information, then commit all changes:
+
+```bash
+# Edit README.md to add/update:
+# - Coverage map legend (if new region)
+# - Available Regions table
+# - Coverage Details section
+
+# Commit everything BEFORE creating the release tag
+git add xearthlayer_package_library.txt coverage.png coverage.geojson README.md
+git commit -m "Release XX v1.0.0 - add coverage and docs"
+git push origin main
+```
+
+**Critical:** The release tag must be created AFTER this commit so it captures all documentation updates.
+
+### Step 9: Create GitHub Release
 
 ```bash
 # Create the release (this also creates the git tag)
@@ -189,7 +227,7 @@ gh release create na-v0.2.0 \
 | Overlay | 1,804 | 1.8 GB | 2 |"
 ```
 
-### Step 8: Upload Archive Parts
+### Step 10: Upload Archive Parts
 
 ```bash
 # Upload overlay parts (smaller, faster)
@@ -205,7 +243,7 @@ gh release upload na-v0.2.0 \
 
 **Tip:** For very large uploads, you can run these in parallel or use `--clobber` to retry failed uploads.
 
-### Step 9: Verify Upload
+### Step 11: Verify Upload
 
 ```bash
 # Count uploaded assets
@@ -216,7 +254,7 @@ gh release view na-v0.2.0 \
 # Expected: 38 (36 ortho + 2 overlay)
 ```
 
-### Step 10: Configure URLs
+### Step 12: Configure URLs
 
 ```bash
 # Configure ortho URLs
@@ -232,7 +270,7 @@ xearthlayer publish urls \
   --base-url https://github.com/owner/repo-name/releases/download/na-v0.2.0/
 ```
 
-### Step 11: Upload Metadata Files
+### Step 13: Upload Metadata Files
 
 ```bash
 # Copy metadata files with proper names
@@ -248,7 +286,7 @@ gh release upload na-v0.2.0 \
   /tmp/yzXEL_na_overlay-metadata.txt
 ```
 
-### Step 12: Release to Library Index
+### Step 14: Release to Library Index
 
 ```bash
 # Release ortho to library
@@ -264,18 +302,20 @@ xearthlayer publish release \
   --metadata-url https://github.com/owner/repo-name/releases/download/na-v0.2.0/yzXEL_na_overlay-metadata.txt
 ```
 
-### Step 13: Commit and Push Library Index
+### Step 15: Commit and Push Library Index Update
+
+The `publish release` command updates the library index file. Commit and push this change:
 
 ```bash
 git add xearthlayer_package_library.txt
-git commit -m "Release NA v0.2.0 to library index
+git commit -m "Update library index for NA v0.2.0
 
 - Ortho: 1,950 tiles, 36 parts, 35.9 GB
 - Overlay: 1,804 DSFs, 2 parts, 1.8 GB"
 git push origin main
 ```
 
-### Step 14: Verify Release
+### Step 16: Verify Release
 
 ```bash
 # Test metadata URL accessibility
@@ -367,6 +407,8 @@ For GitHub Releases:
 
 ```bash
 # Full workflow for a new region
+
+# 1-6. Process tiles, set version, build archives
 xearthlayer publish add --source /tiles --region xx --type ortho
 xearthlayer publish add --source /overlays --region xx --type overlay
 xearthlayer publish version --region xx --type ortho --set 1.0.0
@@ -374,10 +416,20 @@ xearthlayer publish version --region xx --type overlay --set 1.0.0
 xearthlayer publish build --region xx --type ortho
 xearthlayer publish build --region xx --type overlay
 
+# 7-8. Generate coverage maps and update README BEFORE creating release
+xearthlayer publish coverage --dark --output coverage.png
+xearthlayer publish coverage --geojson --output coverage.geojson
+# Edit README.md to add new region info
+git add coverage.png coverage.geojson README.md
+git commit -m "Add XX region coverage maps and docs"
+git push origin main
+
+# 9-11. Create release and upload archives
 gh release create xx-v1.0.0 --repo owner/repo --title "Region XX v1.0.0" --notes "..."
 gh release upload xx-v1.0.0 --repo owner/repo dist/xx/ortho/*.tar.gz.*
 gh release upload xx-v1.0.0 --repo owner/repo dist/xx/overlay/*.tar.gz.*
 
+# 12-14. Configure URLs, upload metadata, release to library
 xearthlayer publish urls --region xx --type ortho --base-url https://github.com/owner/repo/releases/download/xx-v1.0.0/
 xearthlayer publish urls --region xx --type overlay --base-url https://github.com/owner/repo/releases/download/xx-v1.0.0/
 
@@ -388,6 +440,7 @@ gh release upload xx-v1.0.0 --repo owner/repo /tmp/*-metadata.txt
 xearthlayer publish release --region xx --type ortho --metadata-url https://github.com/owner/repo/releases/download/xx-v1.0.0/zzXEL_xx_ortho-metadata.txt
 xearthlayer publish release --region xx --type overlay --metadata-url https://github.com/owner/repo/releases/download/xx-v1.0.0/yzXEL_xx_overlay-metadata.txt
 
+# 15-16. Commit library index update and verify
 git add xearthlayer_package_library.txt && git commit -m "Release XX v1.0.0" && git push
 ```
 
