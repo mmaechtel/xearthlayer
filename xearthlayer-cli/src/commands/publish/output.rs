@@ -5,6 +5,7 @@
 
 use super::traits::{DedupeReport, Output, OverlapSummary};
 use xearthlayer::config::format_size;
+use xearthlayer::publisher::dedupe::GapAnalysisResult;
 use xearthlayer::publisher::{ProcessSummary, RegionSuggestion, ReleaseStatus, SceneryScanResult};
 
 /// Print scan results to the output.
@@ -141,6 +142,62 @@ pub fn print_dedupe_result(out: &dyn Output, report: &DedupeReport) {
         }
 
         out.println(&format!("Preserved {} tiles", report.tiles_preserved.len()));
+    }
+}
+
+/// Print gap analysis results to the output.
+pub fn print_gap_result(out: &dyn Output, result: &GapAnalysisResult) {
+    out.header("Coverage Gap Analysis");
+    out.newline();
+
+    // Summary
+    out.println(&format!("Tiles analyzed: {}", result.tiles_analyzed));
+    out.println(&format!("Zoom levels:    {:?}", result.zoom_levels_present));
+    out.newline();
+
+    if result.gaps.is_empty() {
+        out.println("No coverage gaps detected.");
+        out.println("All higher zoom level tiles have complete coverage.");
+    } else {
+        out.subheader("Gaps Found");
+        out.println(&format!(
+            "  {} parent tiles have incomplete ZL18 coverage",
+            result.gaps.len()
+        ));
+        out.println(&format!(
+            "  {} ZL18 tiles needed to complete coverage",
+            result.total_missing_tiles
+        ));
+        out.newline();
+
+        // Estimate download size
+        let estimated_download = result.total_missing_tiles * 50 * 1024 * 256;
+        out.println(&format!(
+            "Estimated download: ~{} (to generate missing tiles)",
+            format_size(estimated_download)
+        ));
+
+        // Show first few gaps as examples
+        if !result.gaps.is_empty() {
+            out.newline();
+            out.subheader("Example Gaps");
+            for gap in result.gaps.iter().take(5) {
+                out.println(&format!(
+                    "  ZL{} ({}, {}) at {:.2},{:.2}: {}/{} coverage ({:.1}%)",
+                    gap.parent.zoom,
+                    gap.parent.row,
+                    gap.parent.col,
+                    gap.parent.lat,
+                    gap.parent.lon,
+                    gap.existing_children.len(),
+                    gap.expected_count,
+                    gap.coverage_percent()
+                ));
+            }
+            if result.gaps.len() > 5 {
+                out.println(&format!("  ... and {} more gaps", result.gaps.len() - 5));
+            }
+        }
     }
 }
 

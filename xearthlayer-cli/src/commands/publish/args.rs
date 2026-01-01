@@ -329,6 +329,49 @@ pub enum PublishCommands {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+
+    /// Analyze coverage gaps where higher zoom tiles partially cover lower zoom tiles
+    ///
+    /// Identifies missing tiles needed to complete ZL18 coverage over ZL16 areas.
+    /// Outputs coordinates that can be used to regenerate tiles in Ortho4XP.
+    Gaps {
+        /// Region code (e.g., "na", "eur", "asia")
+        #[arg(long)]
+        region: String,
+
+        /// Package type
+        #[arg(long, value_enum, default_value = "ortho")]
+        r#type: PackageTypeArg,
+
+        /// Limit operation to a specific 1°×1° tile (format: "lat,lon", e.g., "37,-122")
+        #[arg(long)]
+        tile: Option<String>,
+
+        /// Output a report file with details
+        #[arg(long)]
+        report: Option<PathBuf>,
+
+        /// Format for the report file
+        #[arg(long, value_enum, default_value = "text")]
+        report_format: GapReportFormatArg,
+
+        /// Repository path (default: current directory)
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+}
+
+/// Report format options for gap analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GapReportFormatArg {
+    /// Human-readable text format
+    Text,
+    /// Machine-readable JSON format
+    Json,
+    /// Ortho4XP-compatible coordinate list
+    Ortho4xp,
+    /// Summary grouped by 1°×1° cells
+    Summary,
 }
 
 // ============================================================================
@@ -430,5 +473,15 @@ pub struct DedupeArgs {
     pub dry_run: bool,
     pub report: Option<PathBuf>,
     pub report_format: ReportFormatArg,
+    pub repo: PathBuf,
+}
+
+/// Arguments for the gaps command.
+pub struct GapsArgs {
+    pub region: String,
+    pub package_type: PackageTypeArg,
+    pub tile: Option<String>,
+    pub report: Option<PathBuf>,
+    pub report_format: GapReportFormatArg,
     pub repo: PathBuf,
 }

@@ -13,7 +13,7 @@ use super::handlers::*;
 use super::traits::*;
 use crate::error::CliError;
 use xearthlayer::package::{ArchivePart, PackageMetadata, PackageType};
-use xearthlayer::publisher::dedupe::{DedupeFilter, ZoomPriority};
+use xearthlayer::publisher::dedupe::{DedupeFilter, GapAnalysisResult, ZoomPriority};
 use xearthlayer::publisher::{
     ArchiveBuildResult, BuildResult, ProcessSummary, RegionSuggestion, ReleaseResult,
     ReleaseStatus, RepoConfig, SceneryScanResult, SuggestedRegion, TileInfo, UrlConfigResult,
@@ -494,6 +494,17 @@ impl PublisherService for MockPublisherService {
             overlaps_by_pair: [(18, 16)].into_iter().map(|k| (k, 10)).collect(),
             total_overlaps: 10,
         })
+    }
+
+    fn analyze_gaps(
+        &self,
+        _repo: &dyn RepositoryOperations,
+        _region: &str,
+        _package_type: PackageType,
+        _filter: Option<DedupeFilter>,
+    ) -> Result<GapAnalysisResult, CliError> {
+        // Return an empty gap analysis result
+        Ok(GapAnalysisResult::default())
     }
 }
 

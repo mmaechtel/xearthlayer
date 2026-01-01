@@ -10,7 +10,10 @@ use std::path::Path;
 
 use tracing::{debug, trace};
 
-use super::types::{DedupeError, DedupeFilter, OverlapCoverage, TileReference, ZoomOverlap};
+use super::types::{
+    CoverageGap, DedupeError, DedupeFilter, GapAnalysisResult, MissingTile, OverlapCoverage,
+    TileReference, ZoomOverlap,
+};
 
 /// Detects overlapping zoom level tiles in scenery packages.
 #[derive(Debug, Default)]
@@ -110,6 +113,153 @@ impl OverlapDetector {
         }
 
         overlaps
+    }
+
+    /// Analyze gaps in coverage where higher ZL tiles partially overlap lower ZL tiles.
+    ///
+    /// Returns a `GapAnalysisResult` containing all gaps and missing tiles needed
+    /// to complete coverage.
+    pub fn analyze_gaps(&self, tiles: &[TileReference]) -> GapAnalysisResult {
+        let mut result = GapAnalysisResult {
+            tiles_analyzed: tiles.len(),
+            zoom_levels_present: get_zoom_levels(tiles),
+            tile_filter: self.filter.tile.map(|c| (c.lat, c.lon)),
+            ..Default::default()
+        };
+
+        // Group tiles by zoom level
+        let by_zoom: HashMap<u8, Vec<&TileReference>> =
+            tiles.iter().fold(HashMap::new(), |mut acc, tile| {
+                acc.entry(tile.zoom).or_default().push(tile);
+                acc
+            });
+
+        // Get sorted zoom levels (highest first)
+        let mut zoom_levels: Vec<u8> = by_zoom.keys().copied().collect();
+        zoom_levels.sort_by(|a, b| b.cmp(a));
+
+        // For each pair of adjacent zoom levels, find gaps
+        for (i, &high_zl) in zoom_levels.iter().enumerate() {
+            for &low_zl in &zoom_levels[i + 1..] {
+                // Only process even differences (tiles align)
+                if (high_zl - low_zl) % 2 != 0 {
+                    continue;
+                }
+
+                let gaps = self.find_gaps_between_levels(&by_zoom, high_zl, low_zl);
+                result.gaps.extend(gaps);
+            }
+        }
+
+        // Calculate total missing tiles
+        result.total_missing_tiles = result.gaps.iter().map(|g| g.missing_count()).sum();
+
+        debug!(
+            gaps = result.gaps.len(),
+            missing_tiles = result.total_missing_tiles,
+            "Gap analysis complete"
+        );
+
+        result
+    }
+
+    /// Find gaps between two specific zoom levels.
+    fn find_gaps_between_levels(
+        &self,
+        by_zoom: &HashMap<u8, Vec<&TileReference>>,
+        high_zl: u8,
+        low_zl: u8,
+    ) -> Vec<CoverageGap> {
+        let Some(high_tiles) = by_zoom.get(&high_zl) else {
+            return Vec::new();
+        };
+        let Some(low_tiles) = by_zoom.get(&low_zl) else {
+            return Vec::new();
+        };
+
+        // Build lookup for high ZL tiles: (row, col) → &tile
+        let high_lookup: HashMap<(u32, u32), &TileReference> =
+            high_tiles.iter().map(|t| ((t.row, t.col), *t)).collect();
+
+        // Calculate children per parent
+        let zl_diff = high_zl - low_zl;
+        let scale = 4u32.pow((zl_diff / 2) as u32);
+        let expected_children = scale * scale;
+
+        let mut gaps = Vec::new();
+
+        for low in low_tiles {
+            let child_row_start = low.row * scale;
+            let child_col_start = low.col * scale;
+
+            let mut existing_children: Vec<TileReference> = Vec::new();
+            let mut missing_tiles: Vec<MissingTile> = Vec::new();
+
+            for row_offset in 0..scale {
+                for col_offset in 0..scale {
+                    let child_row = child_row_start + row_offset;
+                    let child_col = child_col_start + col_offset;
+
+                    if let Some(child) = high_lookup.get(&(child_row, child_col)) {
+                        existing_children.push((*child).clone());
+                    } else {
+                        // Calculate approximate lat/lon for the missing tile
+                        let (lat, lon) = self.estimate_tile_center(
+                            child_row, child_col, high_zl, low.lat, low.lon, scale,
+                        );
+                        missing_tiles.push(MissingTile {
+                            row: child_row,
+                            col: child_col,
+                            zoom: high_zl,
+                            lat,
+                            lon,
+                        });
+                    }
+                }
+            }
+
+            // Only report gaps where there's partial coverage (some but not all children)
+            if !existing_children.is_empty() && !missing_tiles.is_empty() {
+                gaps.push(CoverageGap {
+                    parent: (*low).clone(),
+                    existing_children,
+                    missing_tiles,
+                    expected_count: expected_children,
+                });
+            }
+        }
+
+        gaps
+    }
+
+    /// Estimate the center coordinates for a tile based on parent and offset.
+    fn estimate_tile_center(
+        &self,
+        child_row: u32,
+        child_col: u32,
+        _high_zl: u8,
+        parent_lat: f32,
+        parent_lon: f32,
+        scale: u32,
+    ) -> (f32, f32) {
+        // The parent's lat/lon is approximately the center of its coverage area.
+        // Children are distributed in a grid within that area.
+        // This is an approximation - actual coordinates depend on the projection.
+
+        // Calculate which child position this is relative to parent's first child
+        let parent_first_row = (child_row / scale) * scale;
+        let parent_first_col = (child_col / scale) * scale;
+        let row_offset = child_row - parent_first_row;
+        let col_offset = child_col - parent_first_col;
+
+        // Estimate offset from parent center
+        // Tile size varies by latitude, but this gives a reasonable approximation
+        let tile_fraction = 1.0 / scale as f32;
+        let lat_offset = (row_offset as f32 - scale as f32 / 2.0 + 0.5) * tile_fraction * 0.5;
+        let lon_offset = (col_offset as f32 - scale as f32 / 2.0 + 0.5) * tile_fraction * 0.5;
+
+        // Note: latitude decreases as row increases in Web Mercator
+        (parent_lat - lat_offset, parent_lon + lon_offset)
     }
 
     /// Detect overlaps between two specific zoom levels.

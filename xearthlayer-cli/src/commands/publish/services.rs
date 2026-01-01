@@ -13,7 +13,7 @@ use super::traits::{
 use crate::error::CliError;
 use xearthlayer::package::{PackageMetadata, PackageType};
 use xearthlayer::publisher::dedupe::{
-    resolve_overlaps, DedupeFilter, OverlapDetector, ZoomPriority,
+    resolve_overlaps, DedupeFilter, GapAnalysisResult, OverlapDetector, ZoomPriority,
 };
 use xearthlayer::publisher::{
     coverage::{CoverageConfig, CoverageMapGenerator},
@@ -455,5 +455,31 @@ impl PublisherService for DefaultPublisherService {
             overlaps_by_pair,
             total_overlaps: overlaps.len(),
         })
+    }
+
+    fn analyze_gaps(
+        &self,
+        repo: &dyn RepositoryOperations,
+        region: &str,
+        package_type: PackageType,
+        filter: Option<DedupeFilter>,
+    ) -> Result<GapAnalysisResult, CliError> {
+        let package_dir = repo.package_dir(region, package_type);
+
+        // Create detector with optional filter
+        let detector = match filter {
+            Some(f) => OverlapDetector::with_filter(f),
+            None => OverlapDetector::new(),
+        };
+
+        // Scan package for tiles
+        let tiles = detector
+            .scan_package(&package_dir)
+            .map_err(|e| CliError::Publish(format!("Failed to scan package: {}", e)))?;
+
+        // Analyze gaps
+        let result = detector.analyze_gaps(&tiles);
+
+        Ok(result)
     }
 }

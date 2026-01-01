@@ -7,17 +7,18 @@
 use semver::Version;
 
 use super::args::{
-    AddArgs, BuildArgs, CoverageArgs, DedupeArgs, InitArgs, ListArgs, ReleaseArgs, ReportFormatArg,
-    ScanArgs, StatusArgs, UrlsArgs, ValidateArgs, VersionArgs,
+    AddArgs, BuildArgs, CoverageArgs, DedupeArgs, GapReportFormatArg, GapsArgs, InitArgs, ListArgs,
+    ReleaseArgs, ReportFormatArg, ScanArgs, StatusArgs, UrlsArgs, ValidateArgs, VersionArgs,
 };
 use super::output::{
-    format_size_display, format_status, print_dedupe_result, print_overlap_summary,
-    print_process_summary, print_region_suggestion, print_scan_result, print_status_short,
+    format_size_display, format_status, print_dedupe_result, print_gap_result,
+    print_overlap_summary, print_process_summary, print_region_suggestion, print_scan_result,
+    print_status_short,
 };
 use super::traits::{CommandContext, CommandHandler};
 use crate::error::CliError;
 use xearthlayer::package::{PackageType, ValidationContext};
-use xearthlayer::publisher::dedupe::{DedupeAuditReport, DedupeFilter, TileCoord};
+use xearthlayer::publisher::dedupe::{DedupeAuditReport, DedupeFilter, GapAuditReport, TileCoord};
 use xearthlayer::publisher::{
     parse_size, RepoConfig, VersionBump, DEFAULT_PART_SIZE, LIBRARY_FILENAME,
 };
@@ -872,6 +873,87 @@ impl CommandHandler for DedupeHandler {
             ctx.output.println("Note:");
             ctx.output
                 .indented("Run 'publish build' to recreate archives with deduplicated tiles");
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Gaps Handler
+// ============================================================================
+
+/// Handler for the `publish gaps` command.
+pub struct GapsHandler;
+
+impl CommandHandler for GapsHandler {
+    type Args = GapsArgs;
+
+    fn execute(args: Self::Args, ctx: &CommandContext<'_>) -> Result<(), CliError> {
+        let package_type = PackageType::from(args.package_type);
+
+        // Parse tile filter if specified
+        let filter = if let Some(ref tile_str) = args.tile {
+            let coord = TileCoord::parse(tile_str)
+                .map_err(|e| CliError::Publish(format!("Invalid tile coordinate: {}", e)))?;
+            Some(DedupeFilter::for_tile(coord.lat, coord.lon))
+        } else {
+            None
+        };
+
+        let repo = ctx.publisher.open_repository(&args.repo)?;
+
+        ctx.output.println(&format!(
+            "Analyzing coverage gaps in {} {}...",
+            args.region.to_uppercase(),
+            package_type
+        ));
+        if let Some(ref tile_str) = args.tile {
+            ctx.output
+                .indented(&format!("Targeting tile: {}", tile_str));
+        }
+        ctx.output.newline();
+
+        let result =
+            ctx.publisher
+                .analyze_gaps(repo.as_ref(), &args.region, package_type, filter)?;
+
+        // Print results
+        print_gap_result(ctx.output, &result);
+
+        // Save for later check
+        let has_missing_tiles = result.total_missing_tiles > 0;
+
+        // Write report file if requested
+        if let Some(ref report_path) = args.report {
+            ctx.output.newline();
+            ctx.output
+                .println(&format!("Writing report to: {}", report_path.display()));
+
+            let audit_report = GapAuditReport::new(result);
+
+            let content = match args.report_format {
+                GapReportFormatArg::Json => audit_report.to_json(),
+                GapReportFormatArg::Text => audit_report.to_text(),
+                GapReportFormatArg::Ortho4xp => audit_report.to_ortho4xp_coords(),
+                GapReportFormatArg::Summary => audit_report.to_tile_summary(),
+            };
+
+            std::fs::write(report_path, content)
+                .map_err(|e| CliError::Publish(format!("Failed to write report: {}", e)))?;
+        }
+
+        // Next steps
+        if has_missing_tiles {
+            ctx.output.newline();
+            ctx.output.println("Next steps:");
+            ctx.output.indented(
+                "1. Use --report with --report-format ortho4xp to get coordinates for Ortho4XP",
+            );
+            ctx.output
+                .indented("2. Generate missing tiles in Ortho4XP using the coordinate list");
+            ctx.output
+                .indented("3. Run 'publish add' to import the new tiles");
         }
 
         Ok(())

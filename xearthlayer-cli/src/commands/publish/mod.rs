@@ -45,15 +45,16 @@ mod tests;
 // Re-export public types
 pub use args::PublishCommands;
 pub use handlers::{
-    AddHandler, BuildHandler, CoverageHandler, DedupeHandler, InitHandler, ListHandler,
-    ReleaseHandler, ScanHandler, StatusHandler, UrlsHandler, ValidateHandler, VersionHandler,
+    AddHandler, BuildHandler, CoverageHandler, DedupeHandler, GapsHandler, InitHandler,
+    ListHandler, ReleaseHandler, ScanHandler, StatusHandler, UrlsHandler, ValidateHandler,
+    VersionHandler,
 };
 pub use services::{ConsoleOutput, DefaultPublisherService};
 pub use traits::CommandHandler;
 
 use args::{
-    AddArgs, BuildArgs, CoverageArgs, DedupeArgs, InitArgs, ListArgs, ReleaseArgs, ScanArgs,
-    StatusArgs, UrlsArgs, ValidateArgs, VersionArgs,
+    AddArgs, BuildArgs, CoverageArgs, DedupeArgs, GapsArgs, InitArgs, ListArgs, ReleaseArgs,
+    ScanArgs, StatusArgs, UrlsArgs, ValidateArgs, VersionArgs,
 };
 use traits::CommandContext;
 
@@ -225,6 +226,25 @@ pub fn run(command: PublishCommands) -> Result<(), CliError> {
                 priority,
                 tile,
                 dry_run,
+                report,
+                report_format,
+                repo,
+            },
+            &ctx,
+        ),
+
+        PublishCommands::Gaps {
+            region,
+            r#type,
+            tile,
+            report,
+            report_format,
+            repo,
+        } => GapsHandler::execute(
+            GapsArgs {
+                region,
+                package_type: r#type,
+                tile,
                 report,
                 report_format,
                 repo,

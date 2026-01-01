@@ -42,11 +42,12 @@ mod resolver;
 mod types;
 
 pub use detector::OverlapDetector;
-pub use report::DedupeAuditReport;
+pub use report::{DedupeAuditReport, GapAuditReport};
 pub use resolver::{resolve_overlaps, RemovalSet};
 pub use types::{
-    DedupeError, DedupeFilter, DedupeResult, OverlapCoverage, TileCoord, TileReference,
-    ZoomOverlap, ZoomPriority, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL,
+    CoverageGap, DedupeError, DedupeFilter, DedupeResult, GapAnalysisResult, MissingTile,
+    OverlapCoverage, TileCoord, TileReference, ZoomOverlap, ZoomPriority, MAX_ZOOM_LEVEL,
+    MIN_ZOOM_LEVEL,
 };
 
 #[cfg(test)]

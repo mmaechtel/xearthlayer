@@ -11,7 +11,9 @@ use semver::Version;
 
 use crate::error::CliError;
 use xearthlayer::package::{PackageMetadata, PackageType};
-use xearthlayer::publisher::dedupe::{DedupeFilter, TileReference, ZoomPriority};
+use xearthlayer::publisher::dedupe::{
+    DedupeFilter, GapAnalysisResult, TileReference, ZoomPriority,
+};
 use xearthlayer::publisher::{
     BuildResult, ProcessSummary, RegionSuggestion, ReleaseResult, ReleaseStatus, RepoConfig,
     SceneryScanResult, UrlConfigResult, VersionBump,
@@ -261,6 +263,19 @@ pub trait PublisherService: Send + Sync {
     ///
     /// Returns a summary of overlapping tiles without modifying any files.
     fn scan_overlaps(&self, source: &Path) -> Result<OverlapSummary, CliError>;
+
+    /// Analyze coverage gaps in a package.
+    ///
+    /// Identifies areas where higher zoom level tiles partially cover lower zoom
+    /// level tiles, and returns the coordinates of missing tiles needed for
+    /// complete coverage.
+    fn analyze_gaps(
+        &self,
+        repo: &dyn RepositoryOperations,
+        region: &str,
+        package_type: PackageType,
+        filter: Option<DedupeFilter>,
+    ) -> Result<GapAnalysisResult, CliError>;
 }
 
 // ============================================================================

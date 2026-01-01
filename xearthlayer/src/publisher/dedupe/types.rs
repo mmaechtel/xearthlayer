@@ -230,6 +230,63 @@ pub struct DedupeResult {
     pub tiles_preserved: Vec<TileReference>,
     /// Partial overlaps where no action was taken.
     pub partial_overlaps: Vec<ZoomOverlap>,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+}
+
+/// A missing tile needed to complete coverage.
+#[derive(Debug, Clone)]
+pub struct MissingTile {
+    /// Row coordinate at the higher zoom level.
+    pub row: u32,
+    /// Column coordinate at the higher zoom level.
+    pub col: u32,
+    /// Zoom level of the missing tile.
+    pub zoom: u8,
+    /// Approximate latitude (center of tile).
+    pub lat: f32,
+    /// Approximate longitude (center of tile).
+    pub lon: f32,
+}
+
+/// A gap in coverage where a lower ZL tile has incomplete higher ZL coverage.
+#[derive(Debug, Clone)]
+pub struct CoverageGap {
+    /// The parent tile that has incomplete coverage.
+    pub parent: TileReference,
+    /// Existing higher ZL children.
+    pub existing_children: Vec<TileReference>,
+    /// Missing higher ZL tiles needed to complete coverage.
+    pub missing_tiles: Vec<MissingTile>,
+    /// Number of expected children (e.g., 16 for ZL16→ZL18).
+    pub expected_count: u32,
+}
+
+impl CoverageGap {
+    /// Calculate the percentage of coverage.
+    pub fn coverage_percent(&self) -> f32 {
+        (self.existing_children.len() as f32 / self.expected_count as f32) * 100.0
+    }
+
+    /// Get the number of missing tiles.
+    pub fn missing_count(&self) -> usize {
+        self.missing_tiles.len()
+    }
+}
+
+/// Result of gap analysis.
+#[derive(Debug, Default, Clone)]
+pub struct GapAnalysisResult {
+    /// Total tiles analyzed.
+    pub tiles_analyzed: usize,
+    /// Zoom levels present in the package.
+    pub zoom_levels_present: Vec<u8>,
+    /// Gaps found (partial overlaps that need filling).
+    pub gaps: Vec<CoverageGap>,
+    /// Total missing tiles across all gaps.
+    pub total_missing_tiles: usize,
+    /// Filter applied (if any).
+    pub tile_filter: Option<(i32, i32)>,
 }
 
 impl DedupeResult {

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use super::types::TileReference;
+use super::types::{GapAnalysisResult, MissingTile, TileReference};
 
 /// A comprehensive audit report of deduplication results.
 #[derive(Debug, Clone)]
@@ -195,6 +195,241 @@ impl DedupeAuditReport {
 
         lines.join("\n")
     }
+}
+
+/// A comprehensive report of coverage gaps.
+#[derive(Debug, Clone)]
+pub struct GapAuditReport {
+    /// Gap analysis result
+    pub result: GapAnalysisResult,
+}
+
+impl GapAuditReport {
+    /// Create a new gap audit report from analysis result.
+    pub fn new(result: GapAnalysisResult) -> Self {
+        Self { result }
+    }
+
+    /// Generate a JSON-formatted report string.
+    pub fn to_json(&self) -> String {
+        let mut json_parts = Vec::new();
+
+        json_parts.push(format!(
+            "  \"tiles_analyzed\": {}",
+            self.result.tiles_analyzed
+        ));
+
+        let zl_arr: Vec<String> = self
+            .result
+            .zoom_levels_present
+            .iter()
+            .map(|z| z.to_string())
+            .collect();
+        json_parts.push(format!(
+            "  \"zoom_levels_present\": [{}]",
+            zl_arr.join(", ")
+        ));
+
+        json_parts.push(format!("  \"gaps_count\": {}", self.result.gaps.len()));
+        json_parts.push(format!(
+            "  \"total_missing_tiles\": {}",
+            self.result.total_missing_tiles
+        ));
+
+        if let Some((lat, lon)) = self.result.tile_filter {
+            json_parts.push(format!("  \"tile_filter\": \"{},{}\"", lat, lon));
+        } else {
+            json_parts.push("  \"tile_filter\": null".to_string());
+        }
+
+        // Missing tiles array
+        let missing: Vec<String> = self
+            .result
+            .gaps
+            .iter()
+            .flat_map(|g| g.missing_tiles.iter())
+            .map(|t| {
+                format!(
+                    "    {{ \"row\": {}, \"col\": {}, \"zoom\": {}, \"lat\": {:.4}, \"lon\": {:.4} }}",
+                    t.row, t.col, t.zoom, t.lat, t.lon
+                )
+            })
+            .collect();
+        json_parts.push(format!(
+            "  \"missing_tiles\": [\n{}\n  ]",
+            missing.join(",\n")
+        ));
+
+        format!("{{\n{}\n}}", json_parts.join(",\n"))
+    }
+
+    /// Generate a text-formatted report string.
+    pub fn to_text(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push("Coverage Gap Analysis Report".to_string());
+        lines.push("============================".to_string());
+        lines.push(String::new());
+
+        // Summary
+        lines.push("Summary".to_string());
+        lines.push("-------".to_string());
+        lines.push(format!("Tiles analyzed: {}", self.result.tiles_analyzed));
+        lines.push(format!(
+            "Zoom levels: {:?}",
+            self.result.zoom_levels_present
+        ));
+        lines.push(format!("Gaps found: {}", self.result.gaps.len()));
+        lines.push(format!(
+            "Total missing tiles: {}",
+            self.result.total_missing_tiles
+        ));
+        if let Some((lat, lon)) = self.result.tile_filter {
+            lines.push(format!("Tile filter: {},{}", lat, lon));
+        }
+        lines.push(String::new());
+
+        // Estimated download size
+        let estimated_size = estimate_missing_tile_size(&self.result);
+        lines.push(format!(
+            "Estimated download size: ~{} (to generate missing tiles)",
+            format_size(estimated_size)
+        ));
+        lines.push(String::new());
+
+        // Gap details (limited to first 20)
+        if !self.result.gaps.is_empty() {
+            lines.push("Gap Details".to_string());
+            lines.push("-----------".to_string());
+
+            for (i, gap) in self.result.gaps.iter().take(20).enumerate() {
+                lines.push(format!(
+                    "\n{}. Parent ZL{} ({}, {}) at {:.2},{:.2}:",
+                    i + 1,
+                    gap.parent.zoom,
+                    gap.parent.row,
+                    gap.parent.col,
+                    gap.parent.lat,
+                    gap.parent.lon
+                ));
+                lines.push(format!(
+                    "   Coverage: {}/{} ({:.1}%)",
+                    gap.existing_children.len(),
+                    gap.expected_count,
+                    gap.coverage_percent()
+                ));
+                lines.push(format!("   Missing {} tiles", gap.missing_count()));
+            }
+
+            if self.result.gaps.len() > 20 {
+                lines.push(format!(
+                    "\n... and {} more gaps",
+                    self.result.gaps.len() - 20
+                ));
+            }
+            lines.push(String::new());
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate Ortho4XP-compatible coordinate list.
+    ///
+    /// Format: One line per tile with lat, lon coordinates.
+    /// Can be used to manually regenerate tiles in Ortho4XP.
+    pub fn to_ortho4xp_coords(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push("# Ortho4XP Missing Tile Coordinates".to_string());
+        lines.push("# ==================================".to_string());
+        lines.push(format!(
+            "# Generated for {} gaps, {} missing tiles",
+            self.result.gaps.len(),
+            self.result.total_missing_tiles
+        ));
+        lines.push("#".to_string());
+        lines.push("# Format: latitude, longitude, zoom_level".to_string());
+        lines.push("# Use these coordinates to regenerate tiles in Ortho4XP".to_string());
+        lines.push("#".to_string());
+        lines.push(String::new());
+
+        // Collect and deduplicate all missing tiles
+        let mut missing_tiles: Vec<&MissingTile> = self
+            .result
+            .gaps
+            .iter()
+            .flat_map(|g| g.missing_tiles.iter())
+            .collect();
+
+        // Sort by lat/lon for easier reading
+        missing_tiles.sort_by(|a, b| {
+            a.lat
+                .partial_cmp(&b.lat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(
+                    a.lon
+                        .partial_cmp(&b.lon)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+        });
+
+        for tile in missing_tiles {
+            lines.push(format!("{:.4}, {:.4}, {}", tile.lat, tile.lon, tile.zoom));
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate a summary grouped by 1°×1° tiles.
+    ///
+    /// Useful for understanding which geographic areas need work.
+    pub fn to_tile_summary(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push("Missing Tiles by 1°×1° Cell".to_string());
+        lines.push("===========================".to_string());
+        lines.push(String::new());
+
+        // Group missing tiles by their floor(lat), floor(lon)
+        let mut by_cell: HashMap<(i32, i32), Vec<&MissingTile>> = HashMap::new();
+        for gap in &self.result.gaps {
+            for tile in &gap.missing_tiles {
+                let key = (tile.lat.floor() as i32, tile.lon.floor() as i32);
+                by_cell.entry(key).or_default().push(tile);
+            }
+        }
+
+        // Sort cells
+        let mut cells: Vec<_> = by_cell.iter().collect();
+        cells.sort_by_key(|((lat, lon), _)| (*lat, *lon));
+
+        for ((lat, lon), tiles) in cells {
+            let cell_name = format!(
+                "{}{:02}{}{:03}",
+                if *lat >= 0 { '+' } else { '-' },
+                lat.abs(),
+                if *lon >= 0 { '+' } else { '-' },
+                lon.abs()
+            );
+            lines.push(format!(
+                "{}: {} missing ZL{} tiles",
+                cell_name,
+                tiles.len(),
+                tiles.first().map(|t| t.zoom).unwrap_or(0)
+            ));
+        }
+
+        lines.join("\n")
+    }
+}
+
+/// Estimate download size for missing tiles.
+fn estimate_missing_tile_size(result: &GapAnalysisResult) -> u64 {
+    // Rough estimate: each source tile download is ~50KB average
+    // across all 256 chunks that need to be fetched
+    const APPROX_DOWNLOAD_PER_TILE: u64 = 50 * 1024 * 256; // ~12.5 MB per tile
+
+    result.total_missing_tiles as u64 * APPROX_DOWNLOAD_PER_TILE
 }
 
 /// Estimate space savings from removed tiles.
