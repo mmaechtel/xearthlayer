@@ -451,7 +451,7 @@ impl CoverageMapGenerator {
             let zoom = ((max_span_pixels * 360.0) / (lon_span * 256.0))
                 .log2()
                 .floor() as u8;
-            let zoom = zoom.max(1).min(6); // Clamp between 1 and 6
+            let zoom = zoom.clamp(1, 6);
 
             (center_lat, center_lon, zoom)
         };
