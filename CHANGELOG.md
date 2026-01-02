@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-01-02
+
+### Added
+
+- **Setup Wizard**: Interactive first-time configuration (`xearthlayer setup`)
+  - Detects X-Plane 12 Custom Scenery folder automatically
+  - Auto-detects system hardware (CPU, memory, storage type)
+  - Recommends optimal cache settings based on hardware
+  - Configures package and cache directories
+
+- **Default-to-Run Behavior**: Running `xearthlayer` without arguments starts the service
+  - Same as `xearthlayer run`
+  - Streamlined onboarding for new users
+
+- **Coverage Map Generator**: Visualize package tile coverage (`xearthlayer publish coverage`)
+  - Static PNG maps with light/dark themes (`--dark`)
+  - Interactive GeoJSON maps for GitHub rendering (`--geojson`)
+  - Configurable dimensions for PNG output
+
+- **Zoom Level Deduplication**: Remove overlapping tiles to eliminate Z-fighting
+  - `xearthlayer publish dedupe` command
+  - Priority modes: highest, lowest, or specific zoom level
+  - Dry-run and tile filtering support
+  - Gap protection prevents creating coverage holes
+
+- **Coverage Gap Analysis**: Identify missing tiles in packages
+  - `xearthlayer publish gaps` command
+  - JSON and text output formats
+  - Filter by specific tile coordinates
+
+- **GitHub Releases Publishing Runbook**: Step-by-step documentation
+  - Complete workflow for package publishing via GitHub Releases
+  - Website sync integration with automatic update triggers
+
+### Changed
+
+- **Default Library URL**: Now points to `https://xearthlayer.app/packages/`
+  - No configuration required for new installations
+  - Existing configs can use `xearthlayer config upgrade` to update
+
+- **System Detection**: Moved from CLI to core library
+  - Hardware detection now reusable by future GTK4 UI
+  - Same SystemInfo struct for all frontends
+
+### Documentation
+
+- Updated getting started guide with setup wizard instructions
+- Added configuration reference for new settings
+- Improved command documentation with examples
+- Added website sync automation documentation
+
 ## [0.2.9] - 2025-12-28
 
 ### Added
@@ -323,7 +374,8 @@ Run `xearthlayer config upgrade` to automatically add new settings with defaults
 - Linux support only (Windows and macOS planned for future releases)
 - Requires FUSE3 for filesystem mounting
 
-[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/samsoir/xearthlayer/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/samsoir/xearthlayer/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/samsoir/xearthlayer/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/samsoir/xearthlayer/compare/v0.2.6...v0.2.7
