@@ -34,14 +34,22 @@ use commands::scenery_index::SceneryIndexAction;
 #[command(version = xearthlayer::VERSION)]
 #[command(about = "Satellite imagery streaming for X-Plane", long_about = None)]
 struct Cli {
+    /// Subcommand to run. If omitted, defaults to 'run'.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize configuration file at ~/.xearthlayer/config.ini
     Init,
+
+    /// Interactive setup wizard for first-time configuration
+    ///
+    /// Guides you through configuring XEarthLayer for your system.
+    /// Detects X-Plane installation, system hardware, and recommends
+    /// optimal settings based on your CPU, memory, and storage.
+    Setup,
 
     /// Get or set configuration values
     Config {
@@ -210,14 +218,18 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Init => commands::init::run(),
-        Commands::Config { command } => commands::config::run(command),
-        Commands::Cache { action } => commands::cache::run(action),
-        Commands::SceneryIndex { action } => commands::scenery_index::run(action),
-        Commands::Diagnostics => commands::diagnostics::run(),
-        Commands::Publish { command } => commands::publish::run(command),
-        Commands::Packages { command } => commands::packages::run(command),
-        Commands::Start {
+        // Default to 'run' when no subcommand is provided
+        None => commands::run::run(commands::run::RunArgs::default()),
+
+        Some(Commands::Init) => commands::init::run(),
+        Some(Commands::Setup) => commands::setup::run(),
+        Some(Commands::Config { command }) => commands::config::run(command),
+        Some(Commands::Cache { action }) => commands::cache::run(action),
+        Some(Commands::SceneryIndex { action }) => commands::scenery_index::run(action),
+        Some(Commands::Diagnostics) => commands::diagnostics::run(),
+        Some(Commands::Publish { command }) => commands::publish::run(command),
+        Some(Commands::Packages { command }) => commands::packages::run(command),
+        Some(Commands::Start {
             source,
             mountpoint,
             provider,
@@ -227,7 +239,7 @@ fn main() {
             timeout,
             parallel,
             no_cache,
-        } => commands::start::run(commands::start::StartArgs {
+        }) => commands::start::run(commands::start::StartArgs {
             source,
             mountpoint,
             provider,
@@ -238,7 +250,7 @@ fn main() {
             parallel,
             no_cache,
         }),
-        Commands::Download {
+        Some(Commands::Download {
             lat,
             lon,
             zoom,
@@ -247,7 +259,7 @@ fn main() {
             provider,
             google_api_key,
             mapbox_token,
-        } => commands::download::run(commands::download::DownloadArgs {
+        }) => commands::download::run(commands::download::DownloadArgs {
             lat,
             lon,
             zoom,
@@ -257,7 +269,7 @@ fn main() {
             google_api_key,
             mapbox_token,
         }),
-        Commands::Run {
+        Some(Commands::Run {
             provider,
             google_api_key,
             mapbox_token,
@@ -268,7 +280,7 @@ fn main() {
             debug,
             no_prefetch,
             airport,
-        } => commands::run::run(commands::run::RunArgs {
+        }) => commands::run::run(commands::run::RunArgs {
             provider,
             google_api_key,
             mapbox_token,

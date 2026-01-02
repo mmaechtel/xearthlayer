@@ -38,6 +38,8 @@ pub enum CliError {
     NoPackages { install_location: PathBuf },
     /// SceneryIndex cache error
     SceneryIndex(String),
+    /// XEarthLayer needs initial setup
+    NeedsSetup,
 }
 
 impl CliError {
@@ -96,6 +98,22 @@ impl CliError {
                 eprintln!();
                 eprintln!("Run 'xearthlayer scenery-index --help' for usage information.");
             }
+            CliError::NeedsSetup => {
+                // NeedsSetup is informational, not an error - print welcome message
+                println!();
+                println!("Welcome to XEarthLayer!");
+                println!();
+                println!("To get started, run the setup wizard:");
+                println!("  xearthlayer setup");
+                println!();
+                println!("Or manually initialize and install packages:");
+                println!("  1. xearthlayer init              # Create config file");
+                println!("  2. xearthlayer packages list     # View available packages");
+                println!("  3. xearthlayer packages install <region>");
+                println!();
+                // Exit with code 0 since this is not an error
+                process::exit(0);
+            }
             _ => {}
         }
 
@@ -121,6 +139,7 @@ impl fmt::Display for CliError {
             CliError::Packages(msg) => write!(f, "Package manager error: {}", msg),
             CliError::NoPackages { .. } => write!(f, "No ortho packages installed"),
             CliError::SceneryIndex(msg) => write!(f, "Scenery index error: {}", msg),
+            CliError::NeedsSetup => write!(f, "XEarthLayer needs initial setup"),
         }
     }
 }

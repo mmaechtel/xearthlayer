@@ -55,13 +55,20 @@ However, you may notice more tile pop-ins when flying into new areas, especially
 
 ```bash
 # Clone the repository
-git clone https://github.com/youruser/xearthlayer.git
+git clone https://github.com/samsoir/xearthlayer.git
 cd xearthlayer
 
-# Build the release binary
+# Build and install
 make release
+make install  # Installs to ~/.local/bin (no sudo required)
 
-# The binary is at target/release/xearthlayer
+# Verify installation
+xearthlayer --version
+```
+
+**Custom install location:**
+```bash
+make install PREFIX=/usr/local  # Requires sudo for /usr/local/bin
 ```
 
 ### From Binary Release
@@ -70,33 +77,43 @@ Download the latest release from the releases page and extract to a location of 
 
 ## Initial Setup
 
-### 1. Create Configuration File
+### Run the Setup Wizard (Recommended)
 
-Run the init command to create your configuration file:
+The easiest way to configure XEarthLayer is with the interactive setup wizard:
 
 ```bash
-xearthlayer init
+xearthlayer setup
 ```
 
-This creates `~/.xearthlayer/config.ini` with sensible defaults. The command will attempt to auto-detect your X-Plane installation.
+The wizard will guide you through:
 
-### 2. Configure Your Settings
+1. **X-Plane Custom Scenery** - Auto-detects your X-Plane 12 installation or lets you specify the path
+2. **Package Location** - Where to store scenery packages (default: `~/.xearthlayer/packages`)
+3. **Cache Location** - Where to store cached tiles with storage type detection (NVMe/SSD/HDD)
+4. **System Configuration** - Recommends optimal memory and disk cache sizes based on your hardware
 
-Edit `~/.xearthlayer/config.ini`:
+The wizard detects your system's CPU, memory, and storage type to recommend the best settings.
+
+### Alternative: Manual Configuration
+
+If you prefer manual setup:
+
+```bash
+xearthlayer init  # Creates ~/.xearthlayer/config.ini with defaults
+```
+
+Then edit `~/.xearthlayer/config.ini`:
 
 ```ini
 [xplane]
-# Path to your X-Plane Custom Scenery folder
 scenery_dir = /path/to/X-Plane 12/Custom Scenery
 
 [packages]
-# URL to a package library (get this from your scenery provider)
-library_url = https://raw.githubusercontent.com/samsoir/xearthlayer-regional-scenery/main/xearthlayer_package_library.txt
+# library_url defaults to https://xearthlayer.app/packages/xearthlayer_package_library.txt
 auto_install_overlays = true
 
 [provider]
-# Satellite imagery source: bing, go2, or google
-type = apple
+type = bing  # Options: bing, go2, google, apple, arcgis, mapbox, usgs
 ```
 
 See the [Configuration Guide](configuration.md) for all available options.
@@ -139,6 +156,12 @@ Success: Installed EU (ortho) v0.1.0 to Custom Scenery/zzXEL_eu-paris_ortho
 ## Step 2: Start XEarthLayer
 
 Now start XEarthLayer to mount your packages and provide the textures:
+
+```bash
+xearthlayer  # Defaults to 'run' when no command specified
+```
+
+Or explicitly:
 
 ```bash
 xearthlayer run
@@ -228,7 +251,8 @@ xearthlayer packages update --all
 
 ```bash
 # Setup
-xearthlayer init                      # Create config file
+xearthlayer setup                     # Interactive setup wizard (recommended)
+xearthlayer init                      # Create config file with defaults
 
 # Packages
 xearthlayer packages check            # See available packages
@@ -236,7 +260,9 @@ xearthlayer packages install <region> # Install a package
 xearthlayer packages list             # List installed packages
 
 # Running
-xearthlayer run                       # Mount all packages and start streaming
+xearthlayer                           # Start streaming (defaults to 'run')
+xearthlayer run                       # Mount all packages with dashboard
+xearthlayer run --airport KJFK        # Pre-warm cache around airport
 
 # Cache
 xearthlayer cache stats               # View cache usage

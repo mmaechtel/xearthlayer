@@ -272,7 +272,7 @@ impl Default for ConfigFile {
             },
             xplane: XPlaneSettings { scenery_dir: None },
             packages: PackagesSettings {
-                library_url: None,
+                library_url: Some(DEFAULT_LIBRARY_URL.to_string()),
                 install_location: None,
                 custom_scenery_path: None,
                 auto_install_overlays: false,
@@ -459,6 +459,14 @@ pub fn default_max_concurrent_jobs() -> usize {
 
 /// Default mipmap count (5 levels: 4096 → 2048 → 1024 → 512 → 256).
 pub const DEFAULT_MIPMAP_COUNT: usize = 5;
+
+// =============================================================================
+// Package manager defaults
+// =============================================================================
+
+/// Default package library URL (XEarthLayer official package library).
+pub const DEFAULT_LIBRARY_URL: &str =
+    "https://xearthlayer.app/packages/xearthlayer_package_library.txt";
 
 // =============================================================================
 // Download config defaults (for DownloadConfig struct)
@@ -1365,7 +1373,11 @@ temp_dir = /tmp/xearthlayer
     #[test]
     fn test_packages_config_defaults() {
         let config = ConfigFile::default();
-        assert!(config.packages.library_url.is_none());
+        // Default library URL is the official XEarthLayer package library
+        assert_eq!(
+            config.packages.library_url,
+            Some(DEFAULT_LIBRARY_URL.to_string())
+        );
         assert!(config.packages.temp_dir.is_none());
     }
 
