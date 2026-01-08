@@ -42,9 +42,100 @@ use crate::pipeline::control_plane::PipelineControlPlane;
 use crate::pipeline::{
     create_dds_handler_with_control_plane, PipelineConfig, StorageConcurrencyLimiter, TokioExecutor,
 };
+use crate::prefetch::FuseLoadMonitor;
 use crate::provider::{AsyncProviderType, Provider};
 use crate::telemetry::PipelineMetrics;
 use crate::texture::DdsTextureEncoder;
+
+// ============================================================================
+// Config Structs - Group related builder fields for cleaner API
+// ============================================================================
+
+/// Pipeline concurrency and capacity limits.
+///
+/// Groups all settings that control how many operations can run in parallel
+/// at various stages of the pipeline.
+#[derive(Debug, Clone)]
+pub struct PipelineLimits {
+    /// Maximum concurrent chunk downloads per tile (default: 256).
+    pub max_concurrent_downloads: usize,
+    /// Global maximum concurrent HTTP requests across all tiles (default: CPU-based).
+    pub max_global_http_requests: usize,
+    /// Maximum concurrent prefetch jobs in flight (default: 32).
+    pub max_prefetch_in_flight: usize,
+    /// Maximum concurrent CPU-bound operations (assemble + encode).
+    pub max_cpu_concurrent: usize,
+    /// Broadcast channel capacity for request coalescing (default: 8).
+    pub coalesce_channel_capacity: usize,
+}
+
+impl Default for PipelineLimits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+            max_global_http_requests: default_http_concurrent(),
+            max_prefetch_in_flight: default_prefetch_in_flight(),
+            max_cpu_concurrent: default_cpu_concurrent(),
+            coalesce_channel_capacity: DEFAULT_COALESCE_CHANNEL_CAPACITY,
+        }
+    }
+}
+
+/// Request timeout and retry configuration.
+///
+/// Controls how the pipeline handles slow or failed requests.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Timeout for individual tile requests.
+    pub timeout: Duration,
+    /// Maximum retry attempts for failed requests.
+    pub max_retries: u32,
+    /// Base delay in milliseconds for exponential backoff.
+    pub retry_base_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            max_retries: DEFAULT_MAX_RETRIES,
+            retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
+        }
+    }
+}
+
+/// Monitoring and observability configuration.
+///
+/// Groups settings related to metrics, health monitoring, and circuit breaker integration.
+#[derive(Clone, Default)]
+pub struct MonitoringConfig {
+    /// Pipeline telemetry metrics.
+    pub metrics: Option<Arc<PipelineMetrics>>,
+    /// Control plane for job management and health monitoring.
+    pub control_plane: Option<Arc<PipelineControlPlane>>,
+    /// Load monitor for circuit breaker integration.
+    pub load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
+}
+
+impl std::fmt::Debug for MonitoringConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MonitoringConfig")
+            .field("metrics", &self.metrics.as_ref().map(|_| "<metrics>"))
+            .field(
+                "control_plane",
+                &self.control_plane.as_ref().map(|_| "<control_plane>"),
+            )
+            .field(
+                "load_monitor",
+                &self.load_monitor.as_ref().map(|_| "<load_monitor>"),
+            )
+            .finish()
+    }
+}
+
+// ============================================================================
+// DdsHandlerBuilder
+// ============================================================================
 
 /// Builder for creating DDS handlers.
 ///
@@ -66,12 +157,15 @@ use crate::texture::DdsTextureEncoder;
 ///     .build(runtime_handle);
 /// ```
 pub struct DdsHandlerBuilder {
+    // Provider configuration
     /// Async provider (preferred - non-blocking I/O)
     async_provider: Option<Arc<AsyncProviderType>>,
     /// Sync provider (fallback - uses spawn_blocking)
     sync_provider: Option<Arc<dyn Provider>>,
     /// Provider name for cache paths
     provider_name: String,
+
+    // Cache configuration
     /// Disk cache directory (None = no disk cache)
     cache_dir: Option<PathBuf>,
     /// Shared memory cache (raw cache for size queries)
@@ -80,32 +174,20 @@ pub struct DdsHandlerBuilder {
     memory_cache_adapter: Option<Arc<MemoryCacheAdapter>>,
     /// Shared disk I/O limiter (None = local limiter per cache)
     disk_io_limiter: Option<Arc<StorageConcurrencyLimiter>>,
+
+    // Texture configuration
     /// DDS compression format
     dds_format: DdsFormat,
     /// Number of mipmap levels
     mipmap_count: usize,
-    /// Request timeout
-    timeout: Duration,
-    /// Max retries for failed requests
-    max_retries: u32,
-    /// Max concurrent downloads per tile
-    max_concurrent_downloads: usize,
-    /// Global maximum concurrent HTTP requests
-    max_global_http_requests: usize,
-    /// Maximum concurrent prefetch jobs in flight
-    max_prefetch_in_flight: usize,
-    /// Base delay in milliseconds for retry backoff
-    retry_base_delay_ms: u64,
-    /// Broadcast channel capacity for request coalescing
-    coalesce_channel_capacity: usize,
-    /// Maximum concurrent CPU-bound operations
-    max_cpu_concurrent: usize,
-    /// Pipeline telemetry metrics
-    metrics: Option<Arc<PipelineMetrics>>,
-    /// Pipeline control plane for job management and health monitoring
-    control_plane: Option<Arc<PipelineControlPlane>>,
-    /// Shared FUSE jobs counter for circuit breaker.
-    shared_fuse_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
+
+    // Grouped configurations
+    /// Pipeline concurrency limits
+    limits: PipelineLimits,
+    /// Request timeout and retry settings
+    retry: RetryConfig,
+    /// Monitoring and observability
+    monitoring: MonitoringConfig,
 }
 
 impl DdsHandlerBuilder {
@@ -121,19 +203,44 @@ impl DdsHandlerBuilder {
             disk_io_limiter: None,
             dds_format: DdsFormat::BC1,
             mipmap_count: 5,
-            timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
-            max_retries: DEFAULT_MAX_RETRIES,
-            max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-            max_global_http_requests: default_http_concurrent(),
-            max_prefetch_in_flight: default_prefetch_in_flight(),
-            retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
-            coalesce_channel_capacity: DEFAULT_COALESCE_CHANNEL_CAPACITY,
-            max_cpu_concurrent: default_cpu_concurrent(),
-            metrics: None,
-            control_plane: None,
-            shared_fuse_counter: None,
+            limits: PipelineLimits::default(),
+            retry: RetryConfig::default(),
+            monitoring: MonitoringConfig::default(),
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Grouped configuration methods (PREFERRED - cleaner API)
+    // -------------------------------------------------------------------------
+
+    /// Set all pipeline concurrency limits at once.
+    ///
+    /// This is the preferred way to configure limits. Use individual setters
+    /// only when you need to override a single value.
+    pub fn with_limits(mut self, limits: PipelineLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Set all retry configuration at once.
+    ///
+    /// This is the preferred way to configure retry behavior.
+    pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
+        self.retry = config;
+        self
+    }
+
+    /// Set all monitoring configuration at once.
+    ///
+    /// This is the preferred way to configure monitoring.
+    pub fn with_monitoring(mut self, config: MonitoringConfig) -> Self {
+        self.monitoring = config;
+        self
+    }
+
+    // -------------------------------------------------------------------------
+    // Individual setters (for backward compatibility and fine-tuning)
+    // -------------------------------------------------------------------------
 
     /// Set the async provider (preferred - non-blocking I/O).
     ///
@@ -226,55 +333,55 @@ impl DdsHandlerBuilder {
 
     /// Set the request timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.retry.timeout = timeout;
         self
     }
 
     /// Set the maximum retries for failed requests.
     pub fn with_max_retries(mut self, retries: u32) -> Self {
-        self.max_retries = retries;
+        self.retry.max_retries = retries;
         self
     }
 
     /// Set the maximum concurrent downloads per tile.
     pub fn with_max_concurrent_downloads(mut self, count: usize) -> Self {
-        self.max_concurrent_downloads = count;
+        self.limits.max_concurrent_downloads = count;
         self
     }
 
     /// Set the pipeline metrics for telemetry.
     pub fn with_metrics(mut self, metrics: Arc<PipelineMetrics>) -> Self {
-        self.metrics = Some(metrics);
+        self.monitoring.metrics = Some(metrics);
         self
     }
 
     /// Set the global maximum concurrent HTTP requests.
     pub fn with_max_global_http_requests(mut self, count: usize) -> Self {
-        self.max_global_http_requests = count;
+        self.limits.max_global_http_requests = count;
         self
     }
 
     /// Set the maximum concurrent prefetch jobs in flight.
     pub fn with_max_prefetch_in_flight(mut self, count: usize) -> Self {
-        self.max_prefetch_in_flight = count;
+        self.limits.max_prefetch_in_flight = count;
         self
     }
 
     /// Set the base delay for retry backoff in milliseconds.
     pub fn with_retry_base_delay_ms(mut self, ms: u64) -> Self {
-        self.retry_base_delay_ms = ms;
+        self.retry.retry_base_delay_ms = ms;
         self
     }
 
     /// Set the coalesce channel capacity.
     pub fn with_coalesce_channel_capacity(mut self, capacity: usize) -> Self {
-        self.coalesce_channel_capacity = capacity;
+        self.limits.coalesce_channel_capacity = capacity;
         self
     }
 
     /// Set the maximum concurrent CPU-bound operations.
     pub fn with_max_cpu_concurrent(mut self, count: usize) -> Self {
-        self.max_cpu_concurrent = count;
+        self.limits.max_cpu_concurrent = count;
         self
     }
 
@@ -288,18 +395,18 @@ impl DdsHandlerBuilder {
     ///
     /// This is the recommended configuration for production use.
     pub fn with_control_plane(mut self, control_plane: Arc<PipelineControlPlane>) -> Self {
-        self.control_plane = Some(control_plane);
+        self.monitoring.control_plane = Some(control_plane);
         self
     }
 
-    /// Set a shared FUSE jobs counter for circuit breaker integration.
+    /// Set a load monitor for circuit breaker integration.
     ///
-    /// When multiple packages are mounted, sharing a single counter across all
-    /// services allows the circuit breaker to see the aggregate FUSE job rate.
+    /// When multiple packages are mounted, sharing a single load monitor across
+    /// all services allows the circuit breaker to see the aggregate FUSE job rate.
     /// This prevents the circuit breaker from missing load spikes that occur
     /// on services it isn't directly monitoring.
-    pub fn with_shared_fuse_counter(mut self, counter: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        self.shared_fuse_counter = Some(counter);
+    pub fn with_load_monitor(mut self, monitor: Arc<dyn FuseLoadMonitor>) -> Self {
+        self.monitoring.load_monitor = Some(monitor);
         self
     }
 
@@ -342,18 +449,18 @@ impl DdsHandlerBuilder {
         // Create executor
         let executor = Arc::new(TokioExecutor::new());
 
-        // Create pipeline config
+        // Create pipeline config from grouped configurations
         let pipeline_config = PipelineConfig {
-            request_timeout: self.timeout,
-            max_retries: self.max_retries,
+            request_timeout: self.retry.timeout,
+            max_retries: self.retry.max_retries,
             dds_format: self.dds_format,
             mipmap_count: self.mipmap_count,
-            max_concurrent_downloads: self.max_concurrent_downloads,
-            max_global_http_requests: self.max_global_http_requests,
-            max_prefetch_in_flight: self.max_prefetch_in_flight,
-            retry_base_delay_ms: self.retry_base_delay_ms,
-            coalesce_channel_capacity: self.coalesce_channel_capacity,
-            max_cpu_concurrent: self.max_cpu_concurrent,
+            max_concurrent_downloads: self.limits.max_concurrent_downloads,
+            max_global_http_requests: self.limits.max_global_http_requests,
+            max_prefetch_in_flight: self.limits.max_prefetch_in_flight,
+            retry_base_delay_ms: self.retry.retry_base_delay_ms,
+            coalesce_channel_capacity: self.limits.coalesce_channel_capacity,
+            max_cpu_concurrent: self.limits.max_cpu_concurrent,
         };
 
         // Clone fields before the match to avoid partial move
@@ -472,10 +579,10 @@ impl DdsHandlerBuilder {
         D: crate::pipeline::DiskCache + 'static,
         X: crate::pipeline::BlockingExecutor + 'static,
     {
-        let control_plane = self
-            .control_plane
-            .as_ref()
-            .expect("DdsHandlerBuilder requires control_plane to be set via with_control_plane()");
+        let control_plane =
+            self.monitoring.control_plane.as_ref().expect(
+                "DdsHandlerBuilder requires control_plane to be set via with_control_plane()",
+            );
 
         tracing::info!(
             description = description,
@@ -492,8 +599,8 @@ impl DdsHandlerBuilder {
             executor,
             config,
             runtime_handle,
-            self.metrics.clone(),
-            self.shared_fuse_counter.clone(),
+            self.monitoring.metrics.clone(),
+            self.monitoring.load_monitor.clone(),
         )
     }
 }
@@ -508,28 +615,41 @@ mod tests {
         assert_eq!(builder.provider_name, "bing");
         assert_eq!(builder.dds_format, DdsFormat::BC1);
         assert_eq!(builder.mipmap_count, 5);
+        // Retry config
         assert_eq!(
-            builder.timeout,
+            builder.retry.timeout,
             Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
         );
-        assert_eq!(builder.max_retries, DEFAULT_MAX_RETRIES);
+        assert_eq!(builder.retry.max_retries, DEFAULT_MAX_RETRIES);
         assert_eq!(
-            builder.max_concurrent_downloads,
+            builder.retry.retry_base_delay_ms,
+            DEFAULT_RETRY_BASE_DELAY_MS
+        );
+        // Pipeline limits
+        assert_eq!(
+            builder.limits.max_concurrent_downloads,
             DEFAULT_MAX_CONCURRENT_DOWNLOADS
         );
-        assert_eq!(builder.max_global_http_requests, default_http_concurrent());
-        assert_eq!(builder.max_prefetch_in_flight, default_prefetch_in_flight());
-        assert_eq!(builder.retry_base_delay_ms, DEFAULT_RETRY_BASE_DELAY_MS);
         assert_eq!(
-            builder.coalesce_channel_capacity,
+            builder.limits.max_global_http_requests,
+            default_http_concurrent()
+        );
+        assert_eq!(
+            builder.limits.max_prefetch_in_flight,
+            default_prefetch_in_flight()
+        );
+        assert_eq!(
+            builder.limits.coalesce_channel_capacity,
             DEFAULT_COALESCE_CHANNEL_CAPACITY
         );
-        assert_eq!(builder.max_cpu_concurrent, default_cpu_concurrent());
+        assert_eq!(builder.limits.max_cpu_concurrent, default_cpu_concurrent());
+        // Providers and caches
         assert!(builder.async_provider.is_none());
         assert!(builder.sync_provider.is_none());
         assert!(builder.cache_dir.is_none());
         assert!(builder.memory_cache.is_none());
-        assert!(builder.metrics.is_none());
+        // Monitoring
+        assert!(builder.monitoring.metrics.is_none());
     }
 
     #[test]
@@ -547,13 +667,13 @@ mod tests {
     #[test]
     fn test_builder_with_timeout() {
         let builder = DdsHandlerBuilder::new("bing").with_timeout(Duration::from_secs(60));
-        assert_eq!(builder.timeout, Duration::from_secs(60));
+        assert_eq!(builder.retry.timeout, Duration::from_secs(60));
     }
 
     #[test]
     fn test_builder_with_max_retries() {
         let builder = DdsHandlerBuilder::new("bing").with_max_retries(5);
-        assert_eq!(builder.max_retries, 5);
+        assert_eq!(builder.retry.max_retries, 5);
     }
 
     #[test]
@@ -573,7 +693,7 @@ mod tests {
     fn test_builder_with_metrics() {
         let metrics = Arc::new(PipelineMetrics::new());
         let builder = DdsHandlerBuilder::new("bing").with_metrics(metrics);
-        assert!(builder.metrics.is_some());
+        assert!(builder.monitoring.metrics.is_some());
     }
 
     #[test]
@@ -591,11 +711,11 @@ mod tests {
         assert_eq!(builder.provider_name, "google");
         assert_eq!(builder.dds_format, DdsFormat::BC3);
         assert_eq!(builder.mipmap_count, 4);
-        assert_eq!(builder.timeout, Duration::from_secs(45));
-        assert_eq!(builder.max_retries, 2);
-        assert_eq!(builder.max_concurrent_downloads, 128);
+        assert_eq!(builder.retry.timeout, Duration::from_secs(45));
+        assert_eq!(builder.retry.max_retries, 2);
+        assert_eq!(builder.limits.max_concurrent_downloads, 128);
         assert_eq!(builder.cache_dir, Some(PathBuf::from("/cache")));
-        assert!(builder.metrics.is_some());
+        assert!(builder.monitoring.metrics.is_some());
     }
 
     #[test]

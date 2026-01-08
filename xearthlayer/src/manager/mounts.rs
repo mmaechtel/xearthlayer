@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +15,7 @@ use crate::package::PackageType;
 use crate::panic as panic_handler;
 use crate::pipeline::adapters::MemoryCacheAdapter;
 use crate::pipeline::{DiskIoProfile, StorageConcurrencyLimiter};
-use crate::prefetch::TileRequestCallback;
+use crate::prefetch::{FuseLoadMonitor, SharedFuseLoadMonitor, TileRequestCallback};
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
 use crate::telemetry::TelemetrySnapshot;
 
@@ -98,9 +97,9 @@ pub struct MountManager {
     /// Target scenery directory for mounts (e.g., X-Plane Custom Scenery).
     /// If None, packages are mounted in-place.
     scenery_path: Option<PathBuf>,
-    /// Shared counter for FUSE-originated jobs across all services.
+    /// Shared load monitor for tracking FUSE-originated requests.
     /// Used by the circuit breaker to detect when X-Plane is loading scenery.
-    shared_fuse_counter: Arc<AtomicU64>,
+    load_monitor: Arc<SharedFuseLoadMonitor>,
 }
 
 impl MountManager {
@@ -111,7 +110,7 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: None,
-            shared_fuse_counter: Arc::new(AtomicU64::new(0)),
+            load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
         }
     }
 
@@ -125,7 +124,7 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: Some(scenery_path.to_path_buf()),
-            shared_fuse_counter: Arc::new(AtomicU64::new(0)),
+            load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
         }
     }
 
@@ -366,18 +365,18 @@ impl MountManager {
         self.services.values().next()
     }
 
-    /// Get the shared FUSE jobs counter.
+    /// Get the shared load monitor for circuit breaker integration.
     ///
-    /// This counter is incremented by all DDS handlers across all services
-    /// when they receive a FUSE-originated request (not prefetch).
+    /// All DDS handlers across all services call `record_request()` on this
+    /// monitor when they receive a FUSE-originated request (not prefetch).
     /// Used by the circuit breaker to detect when X-Plane is loading scenery.
-    pub fn shared_fuse_counter(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.shared_fuse_counter)
+    pub fn load_monitor(&self) -> Arc<dyn FuseLoadMonitor> {
+        Arc::clone(&self.load_monitor) as Arc<dyn FuseLoadMonitor>
     }
 
-    /// Get the current count of FUSE-originated jobs across all services.
+    /// Get the current count of FUSE-originated requests across all services.
     pub fn fuse_jobs_submitted(&self) -> u64 {
-        self.shared_fuse_counter.load(Ordering::Relaxed)
+        self.load_monitor.total_requests()
     }
 
     /// Get aggregated telemetry from all mounted services.
@@ -533,9 +532,9 @@ pub struct ServiceBuilder {
     /// Shared tile request callback for FUSE-based position inference.
     /// When set, all services forward tile requests to this callback.
     tile_request_callback: Option<TileRequestCallback>,
-    /// Shared FUSE jobs counter for circuit breaker.
-    /// All services increment this counter for FUSE-originated requests.
-    shared_fuse_counter: Arc<AtomicU64>,
+    /// Shared load monitor for circuit breaker integration.
+    /// All services call `record_request()` for FUSE-originated requests.
+    load_monitor: Arc<dyn FuseLoadMonitor>,
 }
 
 impl ServiceBuilder {
@@ -628,17 +627,17 @@ impl ServiceBuilder {
             shared_memory_cache,
             shared_memory_cache_adapter,
             tile_request_callback: None,
-            shared_fuse_counter: Arc::new(AtomicU64::new(0)), // Default, can be overridden
+            load_monitor: Arc::new(SharedFuseLoadMonitor::new()), // Default, can be overridden
         }
     }
 
-    /// Set the shared FUSE jobs counter for circuit breaker.
+    /// Set the shared load monitor for circuit breaker integration.
     ///
-    /// When set, all services built by this builder will increment this counter
-    /// for FUSE-originated requests. This enables the circuit breaker to track
-    /// aggregate load across all mounted packages.
-    pub fn with_shared_fuse_counter(mut self, counter: Arc<AtomicU64>) -> Self {
-        self.shared_fuse_counter = counter;
+    /// When set, all services built by this builder will call `record_request()`
+    /// on this monitor for FUSE-originated requests. This enables the circuit
+    /// breaker to track aggregate load across all mounted packages.
+    pub fn with_load_monitor(mut self, monitor: Arc<dyn FuseLoadMonitor>) -> Self {
+        self.load_monitor = monitor;
         self
     }
 
@@ -684,8 +683,8 @@ impl ServiceBuilder {
             service.set_tile_request_callback(callback.clone());
         }
 
-        // Wire shared FUSE counter for circuit breaker
-        service.set_shared_fuse_counter(Arc::clone(&self.shared_fuse_counter));
+        // Wire load monitor for circuit breaker integration
+        service.set_load_monitor(Arc::clone(&self.load_monitor));
 
         Ok(service)
     }

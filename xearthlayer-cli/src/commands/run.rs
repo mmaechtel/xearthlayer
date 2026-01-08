@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -19,8 +19,8 @@ use xearthlayer::manager::{InstalledPackage, LocalPackageStore, MountManager, Se
 use xearthlayer::package::PackageType;
 use xearthlayer::panic as panic_handler;
 use xearthlayer::prefetch::{
-    load_cache, save_cache, CacheLoadResult, FuseInferenceConfig, FuseRequestAnalyzer,
-    IndexingProgress, PrefetcherBuilder, PrewarmConfig, PrewarmPrefetcher,
+    load_cache, save_cache, CacheLoadResult, CircuitBreakerConfig, FuseInferenceConfig,
+    FuseRequestAnalyzer, IndexingProgress, PrefetcherBuilder, PrewarmConfig, PrewarmPrefetcher,
     PrewarmProgress as LibPrewarmProgress, SceneryIndex, SceneryIndexConfig, SharedPrefetchStatus,
     TelemetryListener,
 };
@@ -235,9 +235,10 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         service_builder = service_builder.with_tile_request_callback(analyzer.callback());
     }
 
-    // Wire shared FUSE counter for circuit breaker
+    // Wire load monitor for circuit breaker integration
     // This allows the circuit breaker to see aggregate load across all mounted packages
-    service_builder = service_builder.with_shared_fuse_counter(mount_manager.shared_fuse_counter());
+    let load_monitor = mount_manager.load_monitor();
+    service_builder = service_builder.with_load_monitor(Arc::clone(&load_monitor));
 
     // Mount all packages
     if !use_tui {
@@ -405,13 +406,19 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                     .outer_radius_nm(config.prefetch.outer_radius_nm)
                     .max_tiles_per_cycle(config.prefetch.max_tiles_per_cycle)
                     .cycle_interval_ms(config.prefetch.cycle_interval_ms)
-                    // Wire circuit breaker to pause prefetch during high X-Plane load
-                    // Uses shared counter to aggregate FUSE jobs across all mounted packages
-                    .with_metrics(Arc::clone(service.metrics()))
-                    .with_fuse_counter(mount_manager.shared_fuse_counter())
-                    .circuit_breaker_threshold(config.prefetch.circuit_breaker_threshold)
-                    .circuit_breaker_open_ms(config.prefetch.circuit_breaker_open_ms)
-                    .circuit_breaker_half_open_secs(config.prefetch.circuit_breaker_half_open_secs);
+                    // Wire circuit breaker throttler to pause prefetch during high X-Plane load
+                    .with_circuit_breaker_throttler(
+                        Arc::clone(&load_monitor),
+                        CircuitBreakerConfig {
+                            threshold_jobs_per_sec: config.prefetch.circuit_breaker_threshold,
+                            open_duration: Duration::from_millis(
+                                config.prefetch.circuit_breaker_open_ms,
+                            ),
+                            half_open_duration: Duration::from_secs(
+                                config.prefetch.circuit_breaker_half_open_secs,
+                            ),
+                        },
+                    );
 
                 // Wire FUSE analyzer for heading-aware/auto strategies
                 // This enables FUSE-based position inference when telemetry is unavailable
@@ -936,13 +943,17 @@ fn start_prefetcher(
         .outer_radius_nm(config.prefetch.outer_radius_nm)
         .max_tiles_per_cycle(config.prefetch.max_tiles_per_cycle)
         .cycle_interval_ms(config.prefetch.cycle_interval_ms)
-        // Wire circuit breaker to pause prefetch during high X-Plane load
-        // Uses shared counter to aggregate FUSE jobs across all mounted packages
-        .with_metrics(Arc::clone(service.metrics()))
-        .with_fuse_counter(mount_manager.shared_fuse_counter())
-        .circuit_breaker_threshold(config.prefetch.circuit_breaker_threshold)
-        .circuit_breaker_open_ms(config.prefetch.circuit_breaker_open_ms)
-        .circuit_breaker_half_open_secs(config.prefetch.circuit_breaker_half_open_secs);
+        // Wire circuit breaker throttler to pause prefetch during high X-Plane load
+        .with_circuit_breaker_throttler(
+            mount_manager.load_monitor(),
+            CircuitBreakerConfig {
+                threshold_jobs_per_sec: config.prefetch.circuit_breaker_threshold,
+                open_duration: Duration::from_millis(config.prefetch.circuit_breaker_open_ms),
+                half_open_duration: Duration::from_secs(
+                    config.prefetch.circuit_breaker_half_open_secs,
+                ),
+            },
+        );
 
     if let Some(analyzer) = fuse_analyzer {
         builder = builder.with_fuse_analyzer(analyzer);

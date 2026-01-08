@@ -15,7 +15,7 @@ use crate::pipeline::control_plane::{
     ControlPlaneConfig, ControlPlaneHealth, PipelineControlPlane,
 };
 use crate::pipeline::{DiskIoProfile, RequestCoalescer, StorageConcurrencyLimiter};
-use crate::prefetch::TileRequestCallback;
+use crate::prefetch::{FuseLoadMonitor, TileRequestCallback};
 use crate::provider::{AsyncProviderType, Provider, ProviderConfig};
 use crate::telemetry::{PipelineMetrics, TelemetrySnapshot};
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
@@ -102,9 +102,9 @@ pub struct XEarthLayerService {
     health_monitor_handle: Option<JoinHandle<()>>,
     /// Tile request callback for FUSE-based position inference
     tile_request_callback: Option<TileRequestCallback>,
-    /// Shared FUSE jobs counter for circuit breaker.
-    /// When set, this is incremented for FUSE-originated requests.
-    shared_fuse_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Load monitor for circuit breaker integration.
+    /// When set, records FUSE-originated requests for aggregate load tracking.
+    load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
 }
 
 impl XEarthLayerService {
@@ -303,7 +303,7 @@ impl XEarthLayerService {
             control_plane,
             health_monitor_handle: Some(health_monitor_handle),
             tile_request_callback: None,
-            shared_fuse_counter: None,
+            load_monitor: None,
         })
     }
 
@@ -462,13 +462,13 @@ impl XEarthLayerService {
         self.tile_request_callback = Some(callback);
     }
 
-    /// Set the shared FUSE jobs counter for circuit breaker.
+    /// Set the load monitor for circuit breaker integration.
     ///
-    /// When set, this counter is incremented for each FUSE-originated request.
-    /// This enables the circuit breaker to track aggregate load across all
-    /// mounted packages.
-    pub fn set_shared_fuse_counter(&mut self, counter: Arc<std::sync::atomic::AtomicU64>) {
-        self.shared_fuse_counter = Some(counter);
+    /// When set, the load monitor's `record_request()` is called for each
+    /// FUSE-originated request. This enables the circuit breaker to track
+    /// aggregate load across all mounted packages.
+    pub fn set_load_monitor(&mut self, monitor: Arc<dyn FuseLoadMonitor>) {
+        self.load_monitor = Some(monitor);
     }
 
     /// Set the shared memory cache.
@@ -595,9 +595,9 @@ impl XEarthLayerService {
         // Configure control plane for job management and health monitoring
         builder = builder.with_control_plane(Arc::clone(&self.control_plane));
 
-        // Configure shared FUSE counter for circuit breaker
-        if let Some(ref counter) = self.shared_fuse_counter {
-            builder = builder.with_shared_fuse_counter(Arc::clone(counter));
+        // Configure load monitor for circuit breaker integration
+        if let Some(ref monitor) = self.load_monitor {
+            builder = builder.with_load_monitor(Arc::clone(monitor));
         }
 
         builder.build(self.runtime_handle.clone())

@@ -58,10 +58,9 @@ use tracing::{debug, info, trace, warn};
 use crate::coord::{to_tile_coords, TileCoord};
 use crate::fuse::{DdsHandler, DdsRequest};
 use crate::pipeline::{JobId, MemoryCache};
-use crate::telemetry::PipelineMetrics;
 
 use super::buffer::BufferGenerator;
-use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use super::circuit_breaker::CircuitState;
 use super::cone::ConeGenerator;
 use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
 use super::inference::FuseRequestAnalyzer;
@@ -71,6 +70,7 @@ use super::state::{
     AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode, SharedPrefetchStatus,
 };
 use super::strategy::Prefetcher;
+use super::throttler::{PrefetchThrottler, ThrottleState};
 use super::types::{InputMode, PrefetchTile, PrefetchZone, TurnDirection, TurnState};
 
 /// Configuration for the heading-aware prefetcher.
@@ -208,14 +208,9 @@ pub struct HeadingAwarePrefetcher<M: MemoryCache> {
     /// Optional scenery index for exact tile lookup.
     scenery_index: Option<Arc<SceneryIndex>>,
 
-    // Circuit breaker (optional)
-    /// Circuit breaker for pausing prefetch during X-Plane scenery loading.
-    circuit_breaker: Option<CircuitBreaker>,
-    /// Pipeline metrics for monitoring FUSE job rate.
-    metrics: Option<Arc<PipelineMetrics>>,
-    /// Shared FUSE jobs counter (aggregated across all services).
-    /// Takes precedence over metrics when set.
-    fuse_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
+    // Throttler (optional)
+    /// Throttler for pausing prefetch during high load.
+    throttler: Option<Arc<dyn PrefetchThrottler>>,
 }
 
 impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
@@ -252,9 +247,7 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             stats: Arc::new(HeadingAwarePrefetchStats::default()),
             shared_status: None,
             scenery_index: None,
-            circuit_breaker: None,
-            metrics: None,
-            fuse_counter: None,
+            throttler: None,
         }
     }
 
@@ -276,31 +269,12 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         self
     }
 
-    /// Enable circuit breaker to pause prefetching during X-Plane scenery loading.
+    /// Set the throttler for pausing prefetch during high load.
     ///
-    /// The circuit breaker monitors FUSE-originated job rate and pauses prefetch
-    /// when X-Plane is actively loading scenery (detected by high job rate).
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Circuit breaker configuration (thresholds and durations)
-    /// * `metrics` - Pipeline metrics for monitoring FUSE job rate
-    pub fn with_circuit_breaker(
-        mut self,
-        config: CircuitBreakerConfig,
-        metrics: Arc<PipelineMetrics>,
-    ) -> Self {
-        self.circuit_breaker = Some(CircuitBreaker::new(config));
-        self.metrics = Some(metrics);
-        self
-    }
-
-    /// Set the shared FUSE jobs counter for circuit breaker.
-    ///
-    /// When set, this counter is used instead of the single-service metrics.
-    /// This is important when multiple packages are mounted.
-    pub fn with_fuse_counter(mut self, counter: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        self.fuse_counter = Some(counter);
+    /// The throttler (typically a circuit breaker) monitors system load
+    /// and pauses prefetching when X-Plane is actively loading scenery.
+    pub fn with_throttler(mut self, throttler: Arc<dyn PrefetchThrottler>) -> Self {
+        self.throttler = Some(throttler);
         self
     }
 
@@ -314,50 +288,15 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         Arc::clone(&self.fuse_analyzer)
     }
 
-    /// Check the circuit breaker and update shared status.
+    /// Check if prefetching should be throttled.
     ///
-    /// Returns true if the circuit is open (prefetch should be blocked).
-    fn check_circuit_breaker(&mut self) -> bool {
-        // Early return if circuit breaker is not configured
-        if self.circuit_breaker.is_none() {
+    /// Returns true if prefetch should be paused.
+    fn check_throttle(&self) -> bool {
+        let Some(ref throttler) = self.throttler else {
             return false;
-        }
-
-        // Get FUSE-only job count: prefer shared counter (aggregated across all services)
-        // over single-service metrics
-        let fuse_jobs_total = if let Some(ref counter) = self.fuse_counter {
-            counter.load(std::sync::atomic::Ordering::Relaxed)
-        } else if let Some(ref metrics) = self.metrics {
-            metrics.snapshot().fuse_jobs_submitted
-        } else {
-            return false; // No source for fuse jobs count
         };
 
-        // Update circuit breaker state
-        let circuit_breaker = self.circuit_breaker.as_mut().unwrap();
-        let was_open = circuit_breaker.is_open();
-        circuit_breaker.update(fuse_jobs_total);
-
-        // Try to close the circuit if in half-open state and cooloff has elapsed
-        circuit_breaker.try_close();
-
-        let is_open = circuit_breaker.is_open();
-        let circuit_state = circuit_breaker.state();
-
-        // Log state transitions
-        if is_open != was_open {
-            tracing::info!(
-                fuse_jobs = fuse_jobs_total,
-                state = ?circuit_state,
-                "Circuit breaker state changed"
-            );
-        } else if is_open {
-            tracing::debug!(
-                fuse_jobs = fuse_jobs_total,
-                state = ?circuit_state,
-                "Circuit breaker still open"
-            );
-        }
+        let should_throttle = throttler.should_throttle();
 
         // Gather values before borrowing shared_status
         let zoom_levels = self.active_zoom_levels();
@@ -368,10 +307,15 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
 
         // Update shared status for TUI display
         if let Some(ref status) = self.shared_status {
-            if is_open {
+            if should_throttle {
                 status.update_prefetch_mode(PrefetchMode::CircuitOpen);
             }
-            // Update detailed stats with circuit state
+            // Update detailed stats with throttle state
+            let circuit_state = match throttler.state() {
+                ThrottleState::Active => Some(CircuitState::Closed),
+                ThrottleState::Paused => Some(CircuitState::Open),
+                ThrottleState::Resuming => Some(CircuitState::HalfOpen),
+            };
             status.update_detailed_stats(DetailedPrefetchStats {
                 cycles,
                 tiles_submitted_last_cycle: 0,
@@ -379,12 +323,12 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                 cache_hits,
                 ttl_skipped,
                 active_zoom_levels: zoom_levels,
-                is_active: !is_open,
-                circuit_state: Some(circuit_state),
+                is_active: !should_throttle,
+                circuit_state,
             });
         }
 
-        is_open
+        should_throttle
     }
 
     /// Run the prefetcher, processing state updates.
@@ -424,9 +368,9 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                 }
 
                 _ = interval.tick() => {
-                    // Check circuit breaker (uses FUSE-only job rate)
-                    if self.check_circuit_breaker() {
-                        trace!("Prefetch cycle skipped - circuit breaker open");
+                    // Check throttler (e.g., circuit breaker)
+                    if self.check_throttle() {
+                        trace!("Prefetch cycle skipped - throttled");
                         continue;
                     }
                     self.run_prefetch_cycle().await;
@@ -527,7 +471,11 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             trace!(mode = %mode, "No tiles to prefetch this cycle");
             // Still report stats even when idle
             if let Some(ref status) = self.shared_status {
-                let circuit_state = self.circuit_breaker.as_ref().map(|cb| cb.state());
+                let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
+                    ThrottleState::Active => CircuitState::Closed,
+                    ThrottleState::Paused => CircuitState::Open,
+                    ThrottleState::Resuming => CircuitState::HalfOpen,
+                });
                 status.update_detailed_stats(DetailedPrefetchStats {
                     cycles: self.stats.cycles.load(Ordering::Relaxed),
                     tiles_submitted_last_cycle: 0,
@@ -582,7 +530,11 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             status.update_gps_status(gps_status);
 
             // Update detailed stats for dashboard visibility
-            let circuit_state = self.circuit_breaker.as_ref().map(|cb| cb.state());
+            let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
+                ThrottleState::Active => CircuitState::Closed,
+                ThrottleState::Paused => CircuitState::Open,
+                ThrottleState::Resuming => CircuitState::HalfOpen,
+            });
             status.update_detailed_stats(DetailedPrefetchStats {
                 cycles: self.stats.cycles.load(Ordering::Relaxed),
                 tiles_submitted_last_cycle: cycle_results.submitted,
