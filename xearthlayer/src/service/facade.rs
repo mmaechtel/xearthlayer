@@ -15,7 +15,7 @@ use crate::pipeline::control_plane::{
     ControlPlaneConfig, ControlPlaneHealth, PipelineControlPlane,
 };
 use crate::pipeline::{DiskIoProfile, RequestCoalescer, StorageConcurrencyLimiter};
-use crate::prefetch::TileRequestCallback;
+use crate::prefetch::{FuseLoadMonitor, TileRequestCallback};
 use crate::provider::{AsyncProviderType, Provider, ProviderConfig};
 use crate::telemetry::{PipelineMetrics, TelemetrySnapshot};
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
@@ -102,6 +102,9 @@ pub struct XEarthLayerService {
     health_monitor_handle: Option<JoinHandle<()>>,
     /// Tile request callback for FUSE-based position inference
     tile_request_callback: Option<TileRequestCallback>,
+    /// Load monitor for circuit breaker integration.
+    /// When set, records FUSE-originated requests for aggregate load tracking.
+    load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
 }
 
 impl XEarthLayerService {
@@ -300,6 +303,7 @@ impl XEarthLayerService {
             control_plane,
             health_monitor_handle: Some(health_monitor_handle),
             tile_request_callback: None,
+            load_monitor: None,
         })
     }
 
@@ -458,6 +462,15 @@ impl XEarthLayerService {
         self.tile_request_callback = Some(callback);
     }
 
+    /// Set the load monitor for circuit breaker integration.
+    ///
+    /// When set, the load monitor's `record_request()` is called for each
+    /// FUSE-originated request. This enables the circuit breaker to track
+    /// aggregate load across all mounted packages.
+    pub fn set_load_monitor(&mut self, monitor: Arc<dyn FuseLoadMonitor>) {
+        self.load_monitor = Some(monitor);
+    }
+
     /// Set the shared memory cache.
     ///
     /// When multiple packages are mounted, sharing a single memory cache across
@@ -581,6 +594,11 @@ impl XEarthLayerService {
 
         // Configure control plane for job management and health monitoring
         builder = builder.with_control_plane(Arc::clone(&self.control_plane));
+
+        // Configure load monitor for circuit breaker integration
+        if let Some(ref monitor) = self.load_monitor {
+            builder = builder.with_load_monitor(Arc::clone(monitor));
+        }
 
         builder.build(self.runtime_handle.clone())
     }

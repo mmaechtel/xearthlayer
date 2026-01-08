@@ -43,6 +43,7 @@
 
 mod buffer;
 mod builder;
+mod circuit_breaker;
 mod condition;
 pub mod cone;
 pub mod config;
@@ -52,6 +53,7 @@ mod heading_aware;
 pub mod inference;
 pub mod intersection;
 mod listener;
+mod load_monitor;
 mod predictor;
 mod prewarm;
 mod radial;
@@ -60,13 +62,16 @@ mod scenery_index;
 mod scheduler;
 mod state;
 mod strategy;
+mod throttler;
 pub mod types;
 
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use condition::{
     AlwaysActiveCondition, MinimumSpeedCondition, NeverActiveCondition, PrefetchCondition,
 };
 pub use error::PrefetchError;
 pub use listener::TelemetryListener;
+pub use load_monitor::{FuseLoadMonitor, SharedFuseLoadMonitor};
 pub use predictor::{PredictedTile, TilePredictor};
 pub use radial::{
     RadialPrefetchConfig, RadialPrefetchStats, RadialPrefetchStatsSnapshot, RadialPrefetcher,
@@ -77,6 +82,7 @@ pub use state::{
     PrefetchStatusSnapshot, SharedPrefetchStatus,
 };
 pub use strategy::Prefetcher;
+pub use throttler::{AlwaysThrottle, NeverThrottle, PrefetchThrottler, ThrottleState};
 
 // Heading-aware prefetch exports
 pub use buffer::{merge_prefetch_tiles, BufferGenerator};

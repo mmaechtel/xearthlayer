@@ -15,7 +15,7 @@ use crate::package::PackageType;
 use crate::panic as panic_handler;
 use crate::pipeline::adapters::MemoryCacheAdapter;
 use crate::pipeline::{DiskIoProfile, StorageConcurrencyLimiter};
-use crate::prefetch::TileRequestCallback;
+use crate::prefetch::{FuseLoadMonitor, SharedFuseLoadMonitor, TileRequestCallback};
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
 use crate::telemetry::TelemetrySnapshot;
 
@@ -97,6 +97,9 @@ pub struct MountManager {
     /// Target scenery directory for mounts (e.g., X-Plane Custom Scenery).
     /// If None, packages are mounted in-place.
     scenery_path: Option<PathBuf>,
+    /// Shared load monitor for tracking FUSE-originated requests.
+    /// Used by the circuit breaker to detect when X-Plane is loading scenery.
+    load_monitor: Arc<SharedFuseLoadMonitor>,
 }
 
 impl MountManager {
@@ -107,6 +110,7 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: None,
+            load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
         }
     }
 
@@ -120,6 +124,7 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: Some(scenery_path.to_path_buf()),
+            load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
         }
     }
 
@@ -360,6 +365,20 @@ impl MountManager {
         self.services.values().next()
     }
 
+    /// Get the shared load monitor for circuit breaker integration.
+    ///
+    /// All DDS handlers across all services call `record_request()` on this
+    /// monitor when they receive a FUSE-originated request (not prefetch).
+    /// Used by the circuit breaker to detect when X-Plane is loading scenery.
+    pub fn load_monitor(&self) -> Arc<dyn FuseLoadMonitor> {
+        Arc::clone(&self.load_monitor) as Arc<dyn FuseLoadMonitor>
+    }
+
+    /// Get the current count of FUSE-originated requests across all services.
+    pub fn fuse_jobs_submitted(&self) -> u64 {
+        self.load_monitor.total_requests()
+    }
+
     /// Get aggregated telemetry from all mounted services.
     ///
     /// This combines metrics from all active service instances into a single
@@ -370,6 +389,7 @@ impl MountManager {
             fuse_requests_active: 0,
             fuse_requests_waiting: 0,
             jobs_submitted: 0,
+            fuse_jobs_submitted: 0,
             jobs_completed: 0,
             jobs_failed: 0,
             jobs_timed_out: 0,
@@ -392,6 +412,7 @@ impl MountManager {
             encodes_active: 0,
             bytes_encoded: 0,
             jobs_per_second: 0.0,
+            fuse_jobs_per_second: 0.0,
             chunks_per_second: 0.0,
             bytes_per_second: 0.0,
             peak_bytes_per_second: 0.0,
@@ -412,6 +433,7 @@ impl MountManager {
             total.fuse_requests_active += snapshot.fuse_requests_active;
             total.fuse_requests_waiting += snapshot.fuse_requests_waiting;
             total.jobs_submitted += snapshot.jobs_submitted;
+            total.fuse_jobs_submitted += snapshot.fuse_jobs_submitted;
             total.jobs_completed += snapshot.jobs_completed;
             total.jobs_failed += snapshot.jobs_failed;
             total.jobs_timed_out += snapshot.jobs_timed_out;
@@ -451,6 +473,7 @@ impl MountManager {
         // Recalculate rates based on aggregated data
         let uptime_secs = total.uptime.as_secs_f64().max(0.001);
         total.jobs_per_second = total.jobs_completed as f64 / uptime_secs;
+        total.fuse_jobs_per_second = total.fuse_jobs_submitted as f64 / uptime_secs;
         total.chunks_per_second = total.chunks_downloaded as f64 / uptime_secs;
         total.bytes_per_second = total.bytes_downloaded as f64 / uptime_secs;
 
@@ -492,6 +515,7 @@ impl Drop for MountManager {
 /// When multiple packages are mounted, all services share:
 /// - A single disk I/O concurrency limiter to prevent I/O exhaustion
 /// - A single memory cache to respect the configured memory limit globally
+/// - A single FUSE jobs counter for circuit breaker
 pub struct ServiceBuilder {
     service_config: ServiceConfig,
     provider_config: crate::provider::ProviderConfig,
@@ -508,6 +532,9 @@ pub struct ServiceBuilder {
     /// Shared tile request callback for FUSE-based position inference.
     /// When set, all services forward tile requests to this callback.
     tile_request_callback: Option<TileRequestCallback>,
+    /// Shared load monitor for circuit breaker integration.
+    /// All services call `record_request()` for FUSE-originated requests.
+    load_monitor: Arc<dyn FuseLoadMonitor>,
 }
 
 impl ServiceBuilder {
@@ -600,7 +627,18 @@ impl ServiceBuilder {
             shared_memory_cache,
             shared_memory_cache_adapter,
             tile_request_callback: None,
+            load_monitor: Arc::new(SharedFuseLoadMonitor::new()), // Default, can be overridden
         }
+    }
+
+    /// Set the shared load monitor for circuit breaker integration.
+    ///
+    /// When set, all services built by this builder will call `record_request()`
+    /// on this monitor for FUSE-originated requests. This enables the circuit
+    /// breaker to track aggregate load across all mounted packages.
+    pub fn with_load_monitor(mut self, monitor: Arc<dyn FuseLoadMonitor>) -> Self {
+        self.load_monitor = monitor;
+        self
     }
 
     /// Set the tile request callback for FUSE-based position inference.
@@ -644,6 +682,9 @@ impl ServiceBuilder {
         if let Some(ref callback) = self.tile_request_callback {
             service.set_tile_request_callback(callback.clone());
         }
+
+        // Wire load monitor for circuit breaker integration
+        service.set_load_monitor(Arc::clone(&self.load_monitor));
 
         Ok(service)
     }

@@ -60,6 +60,7 @@ use crate::fuse::{DdsHandler, DdsRequest};
 use crate::pipeline::{JobId, MemoryCache};
 
 use super::buffer::BufferGenerator;
+use super::circuit_breaker::CircuitState;
 use super::cone::ConeGenerator;
 use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
 use super::inference::FuseRequestAnalyzer;
@@ -69,6 +70,7 @@ use super::state::{
     AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode, SharedPrefetchStatus,
 };
 use super::strategy::Prefetcher;
+use super::throttler::{PrefetchThrottler, ThrottleState};
 use super::types::{InputMode, PrefetchTile, PrefetchZone, TurnDirection, TurnState};
 
 /// Configuration for the heading-aware prefetcher.
@@ -205,6 +207,10 @@ pub struct HeadingAwarePrefetcher<M: MemoryCache> {
     // Scenery-aware prefetch (optional)
     /// Optional scenery index for exact tile lookup.
     scenery_index: Option<Arc<SceneryIndex>>,
+
+    // Throttler (optional)
+    /// Throttler for pausing prefetch during high load.
+    throttler: Option<Arc<dyn PrefetchThrottler>>,
 }
 
 impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
@@ -241,6 +247,7 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             stats: Arc::new(HeadingAwarePrefetchStats::default()),
             shared_status: None,
             scenery_index: None,
+            throttler: None,
         }
     }
 
@@ -262,6 +269,15 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
         self
     }
 
+    /// Set the throttler for pausing prefetch during high load.
+    ///
+    /// The throttler (typically a circuit breaker) monitors system load
+    /// and pauses prefetching when X-Plane is actively loading scenery.
+    pub fn with_throttler(mut self, throttler: Arc<dyn PrefetchThrottler>) -> Self {
+        self.throttler = Some(throttler);
+        self
+    }
+
     /// Get access to statistics.
     pub fn stats(&self) -> Arc<HeadingAwarePrefetchStats> {
         Arc::clone(&self.stats)
@@ -270,6 +286,49 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
     /// Get the FUSE analyzer for callback wiring.
     pub fn fuse_analyzer(&self) -> Arc<FuseRequestAnalyzer> {
         Arc::clone(&self.fuse_analyzer)
+    }
+
+    /// Check if prefetching should be throttled.
+    ///
+    /// Returns true if prefetch should be paused.
+    fn check_throttle(&self) -> bool {
+        let Some(ref throttler) = self.throttler else {
+            return false;
+        };
+
+        let should_throttle = throttler.should_throttle();
+
+        // Gather values before borrowing shared_status
+        let zoom_levels = self.active_zoom_levels();
+        let cycles = self.stats.cycles.load(Ordering::Relaxed);
+        let tiles_submitted_total = self.stats.tiles_submitted.load(Ordering::Relaxed);
+        let cache_hits = self.stats.cache_hits.load(Ordering::Relaxed);
+        let ttl_skipped = self.stats.ttl_skipped.load(Ordering::Relaxed);
+
+        // Update shared status for TUI display
+        if let Some(ref status) = self.shared_status {
+            if should_throttle {
+                status.update_prefetch_mode(PrefetchMode::CircuitOpen);
+            }
+            // Update detailed stats with throttle state
+            let circuit_state = match throttler.state() {
+                ThrottleState::Active => Some(CircuitState::Closed),
+                ThrottleState::Paused => Some(CircuitState::Open),
+                ThrottleState::Resuming => Some(CircuitState::HalfOpen),
+            };
+            status.update_detailed_stats(DetailedPrefetchStats {
+                cycles,
+                tiles_submitted_last_cycle: 0,
+                tiles_submitted_total,
+                cache_hits,
+                ttl_skipped,
+                active_zoom_levels: zoom_levels,
+                is_active: !should_throttle,
+                circuit_state,
+            });
+        }
+
+        should_throttle
     }
 
     /// Run the prefetcher, processing state updates.
@@ -309,6 +368,11 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                 }
 
                 _ = interval.tick() => {
+                    // Check throttler (e.g., circuit breaker)
+                    if self.check_throttle() {
+                        trace!("Prefetch cycle skipped - throttled");
+                        continue;
+                    }
                     self.run_prefetch_cycle().await;
                 }
             }
@@ -407,6 +471,11 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             trace!(mode = %mode, "No tiles to prefetch this cycle");
             // Still report stats even when idle
             if let Some(ref status) = self.shared_status {
+                let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
+                    ThrottleState::Active => CircuitState::Closed,
+                    ThrottleState::Paused => CircuitState::Open,
+                    ThrottleState::Resuming => CircuitState::HalfOpen,
+                });
                 status.update_detailed_stats(DetailedPrefetchStats {
                     cycles: self.stats.cycles.load(Ordering::Relaxed),
                     tiles_submitted_last_cycle: 0,
@@ -415,6 +484,7 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                     ttl_skipped: self.stats.ttl_skipped.load(Ordering::Relaxed),
                     active_zoom_levels: self.active_zoom_levels(),
                     is_active: false,
+                    circuit_state,
                 });
             }
             return;
@@ -460,6 +530,11 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             status.update_gps_status(gps_status);
 
             // Update detailed stats for dashboard visibility
+            let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
+                ThrottleState::Active => CircuitState::Closed,
+                ThrottleState::Paused => CircuitState::Open,
+                ThrottleState::Resuming => CircuitState::HalfOpen,
+            });
             status.update_detailed_stats(DetailedPrefetchStats {
                 cycles: self.stats.cycles.load(Ordering::Relaxed),
                 tiles_submitted_last_cycle: cycle_results.submitted,
@@ -468,6 +543,7 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
                 ttl_skipped: self.stats.ttl_skipped.load(Ordering::Relaxed),
                 active_zoom_levels: self.active_zoom_levels(),
                 is_active: cycle_results.submitted > 0,
+                circuit_state,
             });
         }
 
@@ -682,7 +758,8 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             })
             .collect();
 
-        info!(
+        // Log at debug level (high volume - every cycle)
+        debug!(
             lat = format!("{:.2}", lat),
             lon = format!("{:.2}", lon),
             heading = format!("{:.0}", heading),

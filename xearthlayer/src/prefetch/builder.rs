@@ -26,13 +26,16 @@ use std::time::Duration;
 use crate::fuse::DdsHandler;
 use crate::pipeline::MemoryCache;
 
+use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use super::config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
 use super::heading_aware::{HeadingAwarePrefetcher, HeadingAwarePrefetcherConfig};
 use super::inference::FuseRequestAnalyzer;
+use super::load_monitor::FuseLoadMonitor;
 use super::radial::{RadialPrefetchConfig, RadialPrefetcher};
 use super::scenery_index::SceneryIndex;
 use super::state::SharedPrefetchStatus;
 use super::strategy::Prefetcher;
+use super::throttler::PrefetchThrottler;
 
 /// Default telemetry staleness threshold in seconds.
 const DEFAULT_TELEMETRY_STALE_SECS: u64 = 5;
@@ -82,6 +85,10 @@ pub struct PrefetcherBuilder<M: MemoryCache> {
 
     // Scenery-aware prefetch (optional)
     scenery_index: Option<Arc<SceneryIndex>>,
+
+    // Throttler for circuit breaker integration (optional)
+    // When provided, the prefetcher checks this before each prefetch cycle
+    throttler: Option<Arc<dyn PrefetchThrottler>>,
 }
 
 /// Available prefetch strategies.
@@ -128,6 +135,7 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
             cycle_interval_ms: 2000, // Increased from 1000ms for less aggressive prefetch
             fuse_analyzer: None,
             scenery_index: None,
+            throttler: None,
         }
     }
 
@@ -267,6 +275,66 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
         self
     }
 
+    /// Set a custom throttler for controlling when prefetching pauses.
+    ///
+    /// Use this when you have a custom `PrefetchThrottler` implementation.
+    /// For the standard circuit breaker, use `with_circuit_breaker_throttler` instead.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::prefetch::NeverThrottle;
+    ///
+    /// let prefetcher = PrefetcherBuilder::new()
+    ///     .memory_cache(cache)
+    ///     .dds_handler(handler)
+    ///     .with_throttler(Arc::new(NeverThrottle)) // For testing
+    ///     .build();
+    /// ```
+    pub fn with_throttler(mut self, throttler: Arc<dyn PrefetchThrottler>) -> Self {
+        self.throttler = Some(throttler);
+        self
+    }
+
+    /// Create and set a circuit breaker throttler.
+    ///
+    /// This is the standard way to wire up prefetch throttling. The circuit
+    /// breaker monitors FUSE request rate via the load monitor and pauses
+    /// prefetching when X-Plane is under heavy load.
+    ///
+    /// # Arguments
+    ///
+    /// * `load_monitor` - Shared load monitor that tracks FUSE requests
+    /// * `config` - Circuit breaker configuration (threshold, durations)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::prefetch::CircuitBreakerConfig;
+    /// use std::time::Duration;
+    ///
+    /// let config = CircuitBreakerConfig {
+    ///     threshold_jobs_per_sec: 50.0,
+    ///     open_duration: Duration::from_millis(500),
+    ///     half_open_duration: Duration::from_secs(2),
+    /// };
+    ///
+    /// let prefetcher = PrefetcherBuilder::new()
+    ///     .memory_cache(cache)
+    ///     .dds_handler(handler)
+    ///     .with_circuit_breaker_throttler(load_monitor, config)
+    ///     .build();
+    /// ```
+    pub fn with_circuit_breaker_throttler(
+        mut self,
+        load_monitor: Arc<dyn FuseLoadMonitor>,
+        config: CircuitBreakerConfig,
+    ) -> Self {
+        let circuit_breaker = CircuitBreaker::new(config, load_monitor);
+        self.throttler = Some(Arc::new(circuit_breaker));
+        self
+    }
+
     /// Build the prefetcher instance.
     ///
     /// # Panics
@@ -282,9 +350,10 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
 
         match self.strategy {
             PrefetchStrategy::Radial => {
-                // Simple radial prefetcher
+                // Ring-based radial prefetcher (uses nautical mile annulus)
                 let config = RadialPrefetchConfig {
-                    radius: self.radial_radius,
+                    inner_radius_nm: self.inner_radius_nm,
+                    outer_radius_nm: self.outer_radius_nm,
                     zoom: self.zoom,
                     attempt_ttl: Duration::from_secs(self.attempt_ttl_secs),
                 };
@@ -293,6 +362,10 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
 
                 if let Some(status) = self.shared_status {
                     prefetcher = prefetcher.with_shared_status(status);
+                }
+
+                if let Some(throttler) = self.throttler {
+                    prefetcher = prefetcher.with_throttler(throttler);
                 }
 
                 Box::new(prefetcher)
@@ -334,6 +407,10 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
 
                 if let Some(index) = self.scenery_index {
                     prefetcher = prefetcher.with_scenery_index(index);
+                }
+
+                if let Some(throttler) = self.throttler {
+                    prefetcher = prefetcher.with_throttler(throttler);
                 }
 
                 Box::new(prefetcher)

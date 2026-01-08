@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -19,8 +19,8 @@ use xearthlayer::manager::{InstalledPackage, LocalPackageStore, MountManager, Se
 use xearthlayer::package::PackageType;
 use xearthlayer::panic as panic_handler;
 use xearthlayer::prefetch::{
-    load_cache, save_cache, CacheLoadResult, FuseInferenceConfig, FuseRequestAnalyzer,
-    IndexingProgress, PrefetcherBuilder, PrewarmConfig, PrewarmPrefetcher,
+    load_cache, save_cache, CacheLoadResult, CircuitBreakerConfig, FuseInferenceConfig,
+    FuseRequestAnalyzer, IndexingProgress, PrefetcherBuilder, PrewarmConfig, PrewarmPrefetcher,
     PrewarmProgress as LibPrewarmProgress, SceneryIndex, SceneryIndexConfig, SharedPrefetchStatus,
     TelemetryListener,
 };
@@ -235,6 +235,11 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         service_builder = service_builder.with_tile_request_callback(analyzer.callback());
     }
 
+    // Wire load monitor for circuit breaker integration
+    // This allows the circuit breaker to see aggregate load across all mounted packages
+    let load_monitor = mount_manager.load_monitor();
+    service_builder = service_builder.with_load_monitor(Arc::clone(&load_monitor));
+
     // Mount all packages
     if !use_tui {
         println!("Mounting packages to Custom Scenery...");
@@ -399,9 +404,22 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                     .cone_half_angle(config.prefetch.cone_angle)
                     .inner_radius_nm(config.prefetch.inner_radius_nm)
                     .outer_radius_nm(config.prefetch.outer_radius_nm)
+                    .radial_radius(config.prefetch.radial_radius)
                     .max_tiles_per_cycle(config.prefetch.max_tiles_per_cycle)
                     .cycle_interval_ms(config.prefetch.cycle_interval_ms)
-                    .radial_radius(config.prefetch.radial_radius);
+                    // Wire circuit breaker throttler to pause prefetch during high X-Plane load
+                    .with_circuit_breaker_throttler(
+                        Arc::clone(&load_monitor),
+                        CircuitBreakerConfig {
+                            threshold_jobs_per_sec: config.prefetch.circuit_breaker_threshold,
+                            open_duration: Duration::from_millis(
+                                config.prefetch.circuit_breaker_open_ms,
+                            ),
+                            half_open_duration: Duration::from_secs(
+                                config.prefetch.circuit_breaker_half_open_secs,
+                            ),
+                        },
+                    );
 
                 // Wire FUSE analyzer for heading-aware/auto strategies
                 // This enables FUSE-based position inference when telemetry is unavailable
@@ -924,9 +942,20 @@ fn start_prefetcher(
         .cone_half_angle(config.prefetch.cone_angle)
         .inner_radius_nm(config.prefetch.inner_radius_nm)
         .outer_radius_nm(config.prefetch.outer_radius_nm)
+        .radial_radius(config.prefetch.radial_radius)
         .max_tiles_per_cycle(config.prefetch.max_tiles_per_cycle)
         .cycle_interval_ms(config.prefetch.cycle_interval_ms)
-        .radial_radius(config.prefetch.radial_radius);
+        // Wire circuit breaker throttler to pause prefetch during high X-Plane load
+        .with_circuit_breaker_throttler(
+            mount_manager.load_monitor(),
+            CircuitBreakerConfig {
+                threshold_jobs_per_sec: config.prefetch.circuit_breaker_threshold,
+                open_duration: Duration::from_millis(config.prefetch.circuit_breaker_open_ms),
+                half_open_duration: Duration::from_secs(
+                    config.prefetch.circuit_breaker_half_open_secs,
+                ),
+            },
+        );
 
     if let Some(analyzer) = fuse_analyzer {
         builder = builder.with_fuse_analyzer(analyzer);

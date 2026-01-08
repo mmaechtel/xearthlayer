@@ -26,6 +26,7 @@ use crate::pipeline::{
     BlockingExecutor, CPUConcurrencyLimiter, ChunkProvider, DiskCache, MemoryCache, PipelineConfig,
     TextureEncoderAsync,
 };
+use crate::prefetch::FuseLoadMonitor;
 use crate::telemetry::PipelineMetrics;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -54,6 +55,7 @@ use tracing::{debug, error, info, instrument, warn};
 /// * `config` - Pipeline configuration
 /// * `runtime_handle` - Handle to the Tokio runtime
 /// * `metrics` - Optional telemetry metrics
+/// * `load_monitor` - Optional load monitor for tracking FUSE requests
 #[allow(clippy::too_many_arguments)]
 pub fn create_dds_handler_with_control_plane<P, E, M, D, X>(
     control_plane: Arc<PipelineControlPlane>,
@@ -65,6 +67,7 @@ pub fn create_dds_handler_with_control_plane<P, E, M, D, X>(
     config: PipelineConfig,
     runtime_handle: Handle,
     metrics: Option<Arc<PipelineMetrics>>,
+    load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
 ) -> DdsHandler
 where
     P: ChunkProvider + 'static,
@@ -82,6 +85,7 @@ where
 
     info!(
         metrics_enabled = metrics.is_some(),
+        load_monitor_enabled = load_monitor.is_some(),
         max_http_concurrent = config.max_global_http_requests,
         max_cpu_concurrent = cpu_limiter.total_permits(),
         max_concurrent_jobs = control_plane.max_concurrent_jobs(),
@@ -98,10 +102,24 @@ where
         let http_limiter = Arc::clone(&http_limiter);
         let cpu_limiter = Arc::clone(&cpu_limiter);
         let metrics = metrics.clone();
+        let load_monitor = load_monitor.clone();
         let config = config.clone();
         let job_id = request.job_id;
         let tile = request.tile;
         let is_prefetch = request.is_prefetch;
+
+        // Track FUSE-originated jobs for circuit breaker
+        // Only count non-prefetch jobs (X-Plane requests)
+        if !is_prefetch {
+            // Increment per-service metrics
+            if let Some(ref m) = metrics {
+                m.fuse_job_submitted();
+            }
+            // Record request via load monitor (for circuit breaker)
+            if let Some(ref monitor) = load_monitor {
+                monitor.record_request();
+            }
+        }
 
         debug!(
             job_id = %job_id,
