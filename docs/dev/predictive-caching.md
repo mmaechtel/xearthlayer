@@ -336,12 +336,27 @@ Cache file size: ~15-25 bytes per tile × 445,000 tiles ≈ **7-11 MB**
 
 The circuit breaker automatically pauses prefetching when X-Plane is loading scenery. This prevents prefetch jobs from competing with on-demand requests during high-load periods.
 
+**SOLID Architecture (v0.2.11):**
+
+The circuit breaker follows SOLID principles with trait-based abstractions:
+
+- **`FuseLoadMonitor`** (`load_monitor.rs`) - Interface for tracking FUSE request counts
+  - `record_request()` - Called for each non-prefetch FUSE request
+  - `total_requests()` - Returns total count for rate calculation
+- **`SharedFuseLoadMonitor`** - Thread-safe implementation using `AtomicU64`
+- **`PrefetchThrottler`** (`throttler.rs`) - Interface for throttle decisions
+  - `should_throttle()` - Returns true if prefetching should pause
+  - `state()` - Returns `ThrottleState` (Active, Paused, Resuming)
+- **`CircuitBreaker`** - Implements `PrefetchThrottler` with state machine
+
+This design eliminates ~127 lines of duplicated circuit breaker logic from prefetchers.
+
 **How it works:**
-1. The pipeline tracks FUSE-originated jobs (X-Plane requests, NOT prefetch requests)
-2. When FUSE jobs/second exceeds threshold (default: 5.0) for sustained duration (default: 5s), circuit opens
+1. The `FuseLoadMonitor` tracks FUSE-originated jobs (X-Plane requests, NOT prefetch requests)
+2. When FUSE jobs/second exceeds threshold (default: 50.0) for sustained duration (default: 500ms), circuit opens
 3. While open, prefetch cycles are skipped entirely
 4. After load drops below threshold, circuit enters half-open state
-5. If load stays low during cooloff period (default: 5s), circuit closes and prefetching resumes
+5. If load stays low during cooloff period (default: 2s), circuit closes and prefetching resumes
 
 **State Machine:**
 ```
@@ -355,13 +370,14 @@ HalfOpen --[fuse_rate > threshold]--> Open (reset)
 - Circuit breaker only monitors FUSE-originated jobs (`!is_prefetch`)
 - This prevents self-fulfilling lockup where prefetch jobs trigger the breaker
 - Only X-Plane's own scenery loading requests affect the circuit state
+- Prefetchers depend on `PrefetchThrottler` trait (not concrete `CircuitBreaker`)
 
 **TUI Display:**
-| Circuit State | TUI Shows |
+| ThrottleState | TUI Shows |
 |---------------|-----------|
-| Closed | "Active" (normal prefetching) |
-| Open | "Paused (high X-Plane load)" |
-| HalfOpen | "Resuming..." |
+| Active | "Active" (normal prefetching) |
+| Paused | "Paused (high X-Plane load)" |
+| Resuming | "Resuming..." |
 
 ### Timeout Mechanism
 
@@ -417,16 +433,14 @@ Configuration keys in `[prefetch]` section:
 | `strategy` | string | `auto` | Strategy: `auto`, `heading-aware`, or `radial` |
 | `udp_port` | u16 | `49002` | X-Plane UDP broadcast port |
 | `inner_radius_nm` | f32 | `85.0` | Inner edge of prefetch zone (nautical miles) |
-| `outer_radius_nm` | f32 | `120.0` | Outer edge of prefetch zone (nautical miles) |
+| `outer_radius_nm` | f32 | `180.0` | Outer edge of prefetch zone (nautical miles) |
 | `cone_angle` | f32 | `80.0` | Half-angle of heading cone (degrees) |
+| `radial_radius` | u8 | `120` | Radial prefetcher tile radius |
 | `max_tiles_per_cycle` | usize | `200` | Max tiles to submit per cycle |
 | `cycle_interval_ms` | u64 | `2000` | Interval between prefetch cycles (ms) |
-| `circuit_breaker_threshold` | f64 | `5.0` | FUSE jobs/second to trip circuit breaker |
-| `circuit_breaker_open_secs` | u64 | `5` | Sustained load duration to open circuit |
-| `circuit_breaker_half_open_secs` | u64 | `5` | Cooloff time before closing circuit |
-
-**Removed in v0.2.11:**
-- `radial_radius` - Replaced by nautical-mile ring (`inner_radius_nm`/`outer_radius_nm`)
+| `circuit_breaker_threshold` | f64 | `50.0` | FUSE jobs/second to trip circuit breaker |
+| `circuit_breaker_open_ms` | u64 | `500` | Sustained load duration (ms) to open circuit |
+| `circuit_breaker_half_open_secs` | u64 | `2` | Cooloff time before closing circuit |
 
 Example `config.ini`:
 ```ini
@@ -437,19 +451,22 @@ udp_port = 49002
 
 # Zone boundaries (nautical miles)
 inner_radius_nm = 85              # Start 5nm inside X-Plane's 90nm boundary
-outer_radius_nm = 120             # Extend 30nm beyond for lookahead
+outer_radius_nm = 180             # Extended look-ahead coverage
 
 # Heading-aware cone
 cone_angle = 80                   # 160° total cone width
+
+# Radial prefetcher (fallback when no telemetry)
+radial_radius = 120               # Tile radius for radial prefetching
 
 # Cycle limits
 max_tiles_per_cycle = 200
 cycle_interval_ms = 2000
 
 # Circuit breaker (pause prefetch during X-Plane scenery loading)
-circuit_breaker_threshold = 5.0   # FUSE jobs/sec to trip
-circuit_breaker_open_secs = 5     # How long high rate must be sustained
-circuit_breaker_half_open_secs = 5  # Cooloff before resume
+circuit_breaker_threshold = 50.0        # FUSE jobs/sec to trip
+circuit_breaker_open_ms = 500           # Duration to sustain before pause
+circuit_breaker_half_open_secs = 2      # Cooloff before resume
 ```
 
 ## X-Plane Setup
@@ -631,7 +648,9 @@ xearthlayer/src/prefetch/
 ├── inference.rs        # FUSE request analyzer
 ├── scenery_index.rs    # SceneryIndex for exact tile lookup
 ├── scenery_cache.rs    # Persistent cache for SceneryIndex
-├── circuit_breaker.rs  # Circuit breaker for X-Plane load detection
+├── load_monitor.rs     # FuseLoadMonitor trait + SharedFuseLoadMonitor
+├── throttler.rs        # PrefetchThrottler trait + ThrottleState
+├── circuit_breaker.rs  # CircuitBreaker implements PrefetchThrottler
 ├── prewarm.rs          # Cold-start cache warming
 ├── listener.rs         # UDP telemetry listener
 ├── config.rs           # Configuration types

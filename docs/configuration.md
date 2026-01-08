@@ -274,27 +274,29 @@ The TUI dashboard shows control plane health including:
 
 Controls predictive tile prefetching based on X-Plane telemetry. The prefetch system pre-loads tiles ahead of the aircraft to reduce FPS drops when new scenery loads.
 
-**Dual-Zone Architecture:**
+**Prefetch Architecture:**
 
-XEarthLayer uses a dual-zone prefetch system that targets the boundary around X-Plane's ~90nm loaded scenery:
+XEarthLayer uses a ring-based prefetch system that targets the boundary around X-Plane's ~90nm loaded scenery:
 
 ![Heading-Aware Prefetch Zones](images/heading-aware-prefetch.png)
 
-- **Radial Buffer (85-100nm, 360°)**: Catches unexpected turns in any direction
-- **Heading Cone (85-120nm, 60° forward)**: Deep lookahead along the flight path
+- **Prefetch Zone (85-180nm)**: Ring around aircraft where tiles are prefetched
+- **Heading Cone (80° half-angle)**: Forward-biased prefetching along flight path
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable/disable predictive tile prefetching |
 | `strategy` | string | `auto` | Prefetch strategy: `auto`, `heading-aware`, or `radial` |
 | `udp_port` | integer | `49002` | UDP port for X-Plane telemetry (ForeFlight protocol) |
-| `inner_radius_nm` | float | `85` | Inner edge of prefetch zone (both radial and cone) |
-| `radial_outer_radius_nm` | float | `100` | Outer edge of 360° radial buffer |
-| `cone_outer_radius_nm` | float | `120` | Outer edge of forward heading cone |
-| `cone_half_angle` | float | `30` | Half-angle of heading cone (30° = 60° total width) |
-| `max_tiles_per_cycle` | integer | `50` | Maximum tiles to submit per prefetch cycle |
+| `inner_radius_nm` | float | `85` | Inner edge of prefetch zone (5nm inside X-Plane's 90nm boundary) |
+| `outer_radius_nm` | float | `180` | Outer edge of prefetch zone |
+| `cone_angle` | float | `80` | Half-angle of heading cone (80° = 160° total width) |
+| `radial_radius` | integer | `120` | Radial prefetcher tile radius (tiles in each direction) |
+| `max_tiles_per_cycle` | integer | `200` | Maximum tiles to submit per prefetch cycle |
 | `cycle_interval_ms` | integer | `2000` | Interval between prefetch cycles (milliseconds) |
-| `radial_radius` | integer | `3` | Radial fallback tile radius (3 = 7×7 = 49 tiles) |
+| `circuit_breaker_threshold` | float | `50.0` | FUSE jobs/sec threshold to pause prefetching |
+| `circuit_breaker_open_ms` | integer | `500` | Duration (ms) high load must be sustained to pause |
+| `circuit_breaker_half_open_secs` | integer | `2` | Cooloff time (secs) before resuming prefetch |
 
 **Strategy Options:**
 
@@ -303,6 +305,14 @@ XEarthLayer uses a dual-zone prefetch system that targets the boundary around X-
 | `auto` | Heading-aware with graceful degradation to radial (recommended) |
 | `heading-aware` | Direction-aware cone prefetching, requires telemetry |
 | `radial` | Simple grid around current position, works without telemetry |
+
+**Circuit Breaker:**
+
+The circuit breaker automatically pauses prefetching when X-Plane is loading scenery (detected by high FUSE request rate). This prevents prefetch from competing with X-Plane's direct tile requests:
+
+- **Closed (Active)**: Normal prefetching, FUSE rate below threshold
+- **Open (Paused)**: Prefetching paused, FUSE rate exceeded threshold
+- **Half-Open (Resuming)**: Testing if safe to resume after cooloff
 
 **Zoom Level Handling:**
 
@@ -315,15 +325,24 @@ enabled = true
 strategy = auto
 udp_port = 49002
 
-; Dual-zone prefetch boundaries
+; Prefetch zone boundaries (nautical miles)
 inner_radius_nm = 85           ; Start prefetching 5nm inside X-Plane's 90nm boundary
-radial_outer_radius_nm = 100   ; 360° buffer extends 10nm beyond boundary
-cone_outer_radius_nm = 120     ; Forward cone extends 30nm beyond boundary
-cone_half_angle = 30           ; 60° total cone width
+outer_radius_nm = 180          ; Extended look-ahead coverage
+
+; Heading-aware cone
+cone_angle = 80                ; 160° total cone width for forward prefetching
+
+; Radial prefetcher (fallback when no telemetry)
+radial_radius = 120            ; Tile radius for radial prefetching
 
 ; Rate limiting
-max_tiles_per_cycle = 50
-cycle_interval_ms = 2000
+max_tiles_per_cycle = 200      ; Tiles per cycle
+cycle_interval_ms = 2000       ; Cycle interval (ms)
+
+; Circuit breaker (pause prefetch during scene loading)
+circuit_breaker_threshold = 50.0      ; FUSE jobs/sec to trigger pause
+circuit_breaker_open_ms = 500         ; Sustained load duration to open
+circuit_breaker_half_open_secs = 2    ; Cooloff before resuming
 ```
 
 **X-Plane Setup:**
@@ -485,18 +504,24 @@ enabled = true
 strategy = auto  ; auto, heading-aware, or radial
 ; udp_port = 49002
 
-; Dual-zone prefetch boundaries (see docs for diagram)
-; inner_radius_nm = 85              ; inner edge (5nm inside X-Plane's 90nm zone)
-; radial_outer_radius_nm = 100      ; 360° buffer (10nm beyond boundary)
-; cone_outer_radius_nm = 120        ; forward cone (30nm beyond boundary)
-; cone_half_angle = 30              ; half-angle of cone (60° total width)
+; Prefetch zone boundaries (nautical miles)
+; inner_radius_nm = 85         ; inner edge (5nm inside X-Plane's 90nm zone)
+; outer_radius_nm = 180        ; outer edge of prefetch zone
+
+; Heading-aware cone
+; cone_angle = 80              ; half-angle of cone (160° total width)
+
+; Radial prefetcher
+; radial_radius = 120          ; tile radius for radial prefetching
 
 ; Rate limiting
-; max_tiles_per_cycle = 50     ; tiles per cycle (lower = less bandwidth)
+; max_tiles_per_cycle = 200    ; tiles per cycle (lower = less bandwidth)
 ; cycle_interval_ms = 2000     ; cycle interval (higher = less aggressive)
 
-; Radial fallback (when telemetry unavailable)
-; radial_radius = 3            ; 7×7 tile grid
+; Circuit breaker (pause prefetch during scene loading)
+; circuit_breaker_threshold = 50.0      ; FUSE jobs/sec to trigger
+; circuit_breaker_open_ms = 500         ; duration to sustain before pause
+; circuit_breaker_half_open_secs = 2    ; cooloff before resuming
 
 [prewarm]
 ; Cold-start cache pre-warming (use with --airport ICAO)
@@ -614,12 +639,14 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `prefetch.strategy` | `auto`, `heading-aware`, `radial` | Prefetch strategy |
 | `prefetch.udp_port` | positive integer | X-Plane telemetry UDP port |
 | `prefetch.inner_radius_nm` | positive number | Inner edge of prefetch zone (nm) |
-| `prefetch.radial_outer_radius_nm` | positive number | Outer edge of 360° radial buffer (nm) |
-| `prefetch.cone_outer_radius_nm` | positive number | Outer edge of forward heading cone (nm) |
-| `prefetch.cone_half_angle` | positive number | Half-angle of heading cone (degrees) |
+| `prefetch.outer_radius_nm` | positive number | Outer edge of prefetch zone (nm) |
+| `prefetch.cone_angle` | positive number | Half-angle of heading cone (degrees) |
+| `prefetch.radial_radius` | positive integer | Radial prefetcher tile radius |
 | `prefetch.max_tiles_per_cycle` | positive integer | Max tiles per prefetch cycle |
 | `prefetch.cycle_interval_ms` | positive integer | Prefetch cycle interval (ms) |
-| `prefetch.radial_radius` | positive integer | Radial fallback tile radius |
+| `prefetch.circuit_breaker_threshold` | positive number | FUSE jobs/sec to pause prefetch |
+| `prefetch.circuit_breaker_open_ms` | positive integer | Sustained load duration (ms) |
+| `prefetch.circuit_breaker_half_open_secs` | positive integer | Cooloff time (secs) |
 | `prewarm.radius_nm` | positive number | Pre-warm radius around airport (nm) |
 | `xplane.scenery_dir` | path | X-Plane Custom Scenery directory |
 | `packages.library_url` | URL | Package library index URL |
