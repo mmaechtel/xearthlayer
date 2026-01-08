@@ -94,6 +94,10 @@ pub enum ConfigKey {
 
     // Prewarm settings
     PrewarmRadiusNm,
+
+    // Patches settings
+    PatchesEnabled,
+    PatchesDirectory,
 }
 
 impl FromStr for ConfigKey {
@@ -162,6 +166,10 @@ impl FromStr for ConfigKey {
             // Prewarm settings
             "prewarm.radius_nm" => Ok(ConfigKey::PrewarmRadiusNm),
 
+            // Patches settings
+            "patches.enabled" => Ok(ConfigKey::PatchesEnabled),
+            "patches.directory" => Ok(ConfigKey::PatchesDirectory),
+
             _ => Err(ConfigKeyError::UnknownKey(s.to_string())),
         }
     }
@@ -219,6 +227,10 @@ impl ConfigKey {
 
             // Prewarm settings
             ConfigKey::PrewarmRadiusNm => "prewarm.radius_nm",
+
+            // Patches settings
+            ConfigKey::PatchesEnabled => "patches.enabled",
+            ConfigKey::PatchesDirectory => "patches.directory",
         }
     }
 
@@ -329,6 +341,15 @@ impl ConfigKey {
 
             // Prewarm settings
             ConfigKey::PrewarmRadiusNm => config.prewarm.radius_nm.to_string(),
+
+            // Patches settings
+            ConfigKey::PatchesEnabled => config.patches.enabled.to_string(),
+            ConfigKey::PatchesDirectory => config
+                .patches
+                .directory
+                .as_ref()
+                .map(|p| path_to_display(p))
+                .unwrap_or_default(),
         }
     }
 
@@ -480,6 +501,15 @@ impl ConfigKey {
             ConfigKey::PrewarmRadiusNm => {
                 config.prewarm.radius_nm = value.parse().unwrap();
             }
+
+            // Patches settings
+            ConfigKey::PatchesEnabled => {
+                let v = value.to_lowercase();
+                config.patches.enabled = v == "true" || v == "1" || v == "yes" || v == "on";
+            }
+            ConfigKey::PatchesDirectory => {
+                config.patches.directory = optional_path(value);
+            }
         }
     }
 
@@ -546,6 +576,10 @@ impl ConfigKey {
 
             // Prewarm settings
             ConfigKey::PrewarmRadiusNm => Box::new(PositiveNumberSpec),
+
+            // Patches settings
+            ConfigKey::PatchesEnabled => Box::new(BooleanSpec),
+            ConfigKey::PatchesDirectory => Box::new(OptionalPathSpec),
         }
     }
 
@@ -595,6 +629,9 @@ impl ConfigKey {
             ConfigKey::ControlPlaneSemaphoreTimeoutSecs,
             // Prewarm settings
             ConfigKey::PrewarmRadiusNm,
+            // Patches settings
+            ConfigKey::PatchesEnabled,
+            ConfigKey::PatchesDirectory,
         ]
     }
 }

@@ -604,7 +604,10 @@ impl XEarthLayerService {
     }
 
     /// Calculate the expected DDS file size based on encoder configuration.
-    fn expected_dds_size(&self) -> usize {
+    ///
+    /// Returns the expected file size for a standard 4096×4096 DDS texture
+    /// with the configured format and mipmap levels.
+    pub fn expected_dds_size(&self) -> usize {
         self.dds_encoder.expected_size(4096, 4096)
     }
 

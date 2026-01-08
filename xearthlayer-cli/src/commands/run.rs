@@ -240,6 +240,39 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     let load_monitor = mount_manager.load_monitor();
     service_builder = service_builder.with_load_monitor(Arc::clone(&load_monitor));
 
+    // Mount patches first (higher priority than regional packages)
+    // Patches provide custom mesh/elevation from airport addons while XEL generates textures
+    if config.patches.enabled {
+        let patches_dir = config.patches.directory.clone().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".xearthlayer")
+                .join("patches")
+        });
+
+        let patches_result = mount_manager.mount_patches(&patches_dir, &service_builder);
+
+        if patches_result.success && patches_result.patch_count > 0 {
+            if !use_tui {
+                println!(
+                    "Patches: {} patch(es) mounted ({} files)",
+                    patches_result.patch_count, patches_result.file_count
+                );
+                for name in &patches_result.patch_names {
+                    println!("  • {}", name);
+                }
+                println!();
+            }
+        } else if let Some(ref error) = patches_result.error {
+            tracing::warn!(error = %error, "Failed to mount patches");
+            if !use_tui {
+                println!("Warning: Failed to mount patches: {}", error);
+                println!();
+            }
+        }
+        // Note: patches_result.no_patches() case is silently skipped (normal when no patches exist)
+    }
+
     // Mount all packages
     if !use_tui {
         println!("Mounting packages to Custom Scenery...");

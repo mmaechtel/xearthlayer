@@ -85,6 +85,15 @@ enum Commands {
         command: commands::packages::PackagesCommands,
     },
 
+    /// Tile patches management commands (custom mesh/elevation tiles)
+    ///
+    /// Patches are pre-built Ortho4XP tiles with custom mesh/elevation data
+    /// from airport addons. XEL generates textures dynamically for these tiles.
+    Patches {
+        #[command(subcommand)]
+        command: commands::patches::PatchesCommands,
+    },
+
     /// Start XEarthLayer with a scenery pack (passthrough for real files, on-demand DDS generation)
     Start {
         /// Source scenery pack directory to overlay
@@ -229,6 +238,7 @@ fn main() {
         Some(Commands::Diagnostics) => commands::diagnostics::run(),
         Some(Commands::Publish { command }) => commands::publish::run(command),
         Some(Commands::Packages { command }) => commands::packages::run(command),
+        Some(Commands::Patches { command }) => commands::patches::run(command),
         Some(Commands::Start {
             source,
             mountpoint,

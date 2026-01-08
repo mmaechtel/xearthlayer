@@ -61,6 +61,8 @@ pub struct ConfigFile {
     pub control_plane: ControlPlaneSettings,
     /// Prewarm settings for cold-start cache warming
     pub prewarm: PrewarmSettings,
+    /// Patches settings for custom Ortho4XP tile patches
+    pub patches: PatchesSettings,
 }
 
 /// Provider configuration.
@@ -242,6 +244,19 @@ pub struct PrewarmSettings {
     pub radius_nm: f32,
 }
 
+/// Patches configuration for custom Ortho4XP tile patches.
+#[derive(Debug, Clone)]
+pub struct PatchesSettings {
+    /// Enable/disable patches functionality.
+    /// When enabled, XEL will mount patch tiles from the patches directory.
+    /// Default: true
+    pub enabled: bool,
+    /// Directory containing patch tiles.
+    /// Each subdirectory should be a complete Ortho4XP tile with Earth nav data/, terrain/, etc.
+    /// Default: ~/.xearthlayer/patches
+    pub directory: Option<PathBuf>,
+}
+
 impl Default for ConfigFile {
     fn default() -> Self {
         let config_dir = config_directory();
@@ -312,6 +327,10 @@ impl Default for ConfigFile {
                 semaphore_timeout_secs: DEFAULT_CONTROL_PLANE_SEMAPHORE_TIMEOUT_SECS,
             },
             prewarm: PrewarmSettings { radius_nm: 100.0 },
+            patches: PatchesSettings {
+                enabled: true,
+                directory: Some(config_dir.join("patches")),
+            },
         }
     }
 }
@@ -765,8 +784,7 @@ impl ConfigFile {
                 }
             }
             if let Some(v) = section.get("auto_install_overlays") {
-                let v = v.trim().to_lowercase();
-                config.packages.auto_install_overlays = v == "true" || v == "1" || v == "yes";
+                config.packages.auto_install_overlays = parse_bool(v);
             }
             if let Some(v) = section.get("temp_dir") {
                 let v = v.trim();
@@ -789,8 +807,7 @@ impl ConfigFile {
         // [prefetch] section
         if let Some(section) = ini.section(Some("prefetch")) {
             if let Some(v) = section.get("enabled") {
-                let v = v.trim().to_lowercase();
-                config.prefetch.enabled = v == "true" || v == "1" || v == "yes" || v == "on";
+                config.prefetch.enabled = parse_bool(v);
             }
             if let Some(v) = section.get("strategy") {
                 let v = v.trim().to_lowercase();
@@ -954,6 +971,21 @@ impl ConfigFile {
                         value: v.to_string(),
                         reason: "must be a positive number (nautical miles)".to_string(),
                     })?;
+            }
+        }
+
+        // [patches] section
+        if let Some(section) = ini.section(Some("patches")) {
+            if let Some(v) = section.get("enabled") {
+                config.patches.enabled = parse_bool(v);
+            }
+            if let Some(v) = section.get("directory") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    config.patches.directory = Some(expand_tilde(v));
+                } else {
+                    config.patches.directory = None;
+                }
             }
         }
 
@@ -1164,6 +1196,21 @@ semaphore_timeout_secs = {}
 
 ; Radius in nautical miles around the airport to prewarm (default: 100)
 radius_nm = {}
+
+[patches]
+; Settings for custom Ortho4XP tile patches (airport addon mesh/elevation support).
+; Patches provide custom elevation/mesh data while XEL generates textures dynamically.
+
+; Enable/disable patches functionality (default: true)
+; When enabled, XEL will mount patch tiles from the patches directory.
+enabled = {}
+; Directory containing patch tiles (default: ~/.xearthlayer/patches)
+; Each subdirectory should be a complete Ortho4XP tile with:
+;   - Earth nav data/*.dsf (custom mesh/elevation)
+;   - terrain/*.ter (terrain definition files)
+;   - textures/ (optional - XEL generates these on-demand)
+; Priority is determined by alphabetical folder naming (A < B < Z)
+directory = {}
 "#,
             self.provider.provider_type,
             google_api_key,
@@ -1207,6 +1254,12 @@ radius_nm = {}
             self.control_plane.health_check_interval_secs,
             self.control_plane.semaphore_timeout_secs,
             self.prewarm.radius_nm,
+            self.patches.enabled,
+            self.patches
+                .directory
+                .as_ref()
+                .map(|p| path_to_string(p))
+                .unwrap_or_default(),
         )
     }
 
@@ -1233,6 +1286,13 @@ pub fn config_directory() -> PathBuf {
 /// Get the path to the config file (~/.xearthlayer/config.ini).
 pub fn config_file_path() -> PathBuf {
     config_directory().join("config.ini")
+}
+
+/// Parse a boolean value from a config string.
+/// Accepts: true/false, yes/no, 1/0, on/off (case-insensitive)
+fn parse_bool(value: &str) -> bool {
+    let v = value.trim().to_lowercase();
+    v == "true" || v == "1" || v == "yes" || v == "on"
 }
 
 /// Expand ~ to home directory in paths.
@@ -1509,5 +1569,97 @@ max_http_concurrent = 128
 
         let config = ConfigFile::load_from(&config_path).unwrap();
         assert_eq!(config.pipeline.max_http_concurrent, 128);
+    }
+
+    #[test]
+    fn test_parse_bool_true_values() {
+        // Test all accepted "true" values
+        assert!(parse_bool("true"));
+        assert!(parse_bool("TRUE"));
+        assert!(parse_bool("True"));
+        assert!(parse_bool("yes"));
+        assert!(parse_bool("YES"));
+        assert!(parse_bool("Yes"));
+        assert!(parse_bool("1"));
+        assert!(parse_bool("on"));
+        assert!(parse_bool("ON"));
+        assert!(parse_bool("On"));
+    }
+
+    #[test]
+    fn test_parse_bool_false_values() {
+        // Test values that should be false
+        assert!(!parse_bool("false"));
+        assert!(!parse_bool("FALSE"));
+        assert!(!parse_bool("no"));
+        assert!(!parse_bool("NO"));
+        assert!(!parse_bool("0"));
+        assert!(!parse_bool("off"));
+        assert!(!parse_bool("OFF"));
+        // Invalid values also return false
+        assert!(!parse_bool("invalid"));
+        assert!(!parse_bool(""));
+        assert!(!parse_bool("maybe"));
+    }
+
+    #[test]
+    fn test_parse_bool_with_whitespace() {
+        // Test that whitespace is trimmed
+        assert!(parse_bool("  true  "));
+        assert!(parse_bool("\ttrue\n"));
+        assert!(parse_bool("  yes "));
+        assert!(!parse_bool("  false  "));
+        assert!(!parse_bool("  no  "));
+    }
+
+    #[test]
+    fn test_patches_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.ini");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[patches]
+enabled = true
+directory = /custom/patches/dir
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigFile::load_from(&config_path).unwrap();
+        assert!(config.patches.enabled);
+        assert_eq!(
+            config.patches.directory,
+            Some(PathBuf::from("/custom/patches/dir"))
+        );
+    }
+
+    #[test]
+    fn test_patches_config_defaults() {
+        let config = ConfigFile::default();
+        assert!(config.patches.enabled);
+        // Default directory is ~/.xearthlayer/patches
+        assert!(config.patches.directory.is_some());
+        let dir = config.patches.directory.unwrap();
+        assert!(dir.ends_with("patches"));
+    }
+
+    #[test]
+    fn test_patches_config_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.ini");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[patches]
+enabled = false
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigFile::load_from(&config_path).unwrap();
+        assert!(!config.patches.enabled);
     }
 }

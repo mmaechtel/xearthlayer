@@ -59,7 +59,7 @@ pub use error::{ManagerError, ManagerResult};
 pub use extractor::{check_required_tools, ShellExtractor};
 pub use installer::{InstallProgressCallback, InstallResult, InstallStage, PackageInstaller};
 pub use local::{InstalledPackage, LocalPackageStore, MountStatus};
-pub use mounts::{ActiveMount, MountManager, MountResult, ServiceBuilder};
+pub use mounts::{ActiveMount, MountManager, MountResult, PatchesMountResult, ServiceBuilder};
 pub use symlinks::{
     create_overlay_symlink, overlay_symlink_exists, overlay_symlink_path, remove_overlay_symlink,
 };
