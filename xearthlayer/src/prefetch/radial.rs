@@ -376,8 +376,8 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
             .ttl_skipped
             .fetch_add(ttl_skipped, Ordering::Relaxed);
 
-        // Log summary
-        info!(
+        // Log summary at debug level (high volume - every cycle)
+        debug!(
             lat = format!("{:.4}", state.latitude),
             lon = format!("{:.4}", state.longitude),
             tile_row = current_tile.row,

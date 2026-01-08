@@ -758,7 +758,8 @@ impl<M: MemoryCache> HeadingAwarePrefetcher<M> {
             })
             .collect();
 
-        info!(
+        // Log at debug level (high volume - every cycle)
+        debug!(
             lat = format!("{:.2}", lat),
             lon = format!("{:.2}", lon),
             heading = format!("{:.0}", heading),

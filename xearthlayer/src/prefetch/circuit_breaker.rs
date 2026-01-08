@@ -181,8 +181,8 @@ impl CircuitBreaker {
 
         let is_high_load = fuse_jobs_per_second > self.config.threshold_jobs_per_sec;
 
-        // Log rate calculation for debugging (INFO temporarily for diagnosis)
-        tracing::info!(
+        // Log rate calculation at debug level (high volume - every update)
+        tracing::debug!(
             jobs_total = fuse_jobs_total,
             jobs_delta = jobs_delta,
             elapsed_ms = elapsed.as_millis(),
