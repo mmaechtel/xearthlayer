@@ -1322,6 +1322,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_mount_result_success() {
         let result = MountResult::success(
             "na".to_string(),
@@ -1334,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_mount_result_failure() {
         let result = MountResult::failure(
             "eu".to_string(),
