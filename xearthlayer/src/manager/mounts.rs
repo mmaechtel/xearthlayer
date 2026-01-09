@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cache::MemoryCache;
+use crate::fuse::fuse3::Fuse3UnionFS;
 use crate::fuse::SpawnedMountHandle;
 use crate::package::PackageType;
 use crate::panic as panic_handler;
+use crate::patches::{PatchDiscovery, PatchUnionIndex};
 use crate::pipeline::adapters::MemoryCacheAdapter;
 use crate::pipeline::{DiskIoProfile, StorageConcurrencyLimiter};
 use crate::prefetch::{FuseLoadMonitor, SharedFuseLoadMonitor, TileRequestCallback};
@@ -77,6 +79,66 @@ pub struct ActiveMount {
     pub mountpoint: PathBuf,
 }
 
+/// Result of mounting the patches union filesystem.
+#[derive(Debug)]
+pub struct PatchesMountResult {
+    /// Path where patches are mounted.
+    pub mountpoint: PathBuf,
+    /// Number of valid patches discovered.
+    pub patch_count: usize,
+    /// Total files in the union index.
+    pub file_count: usize,
+    /// Names of patches included (in priority order).
+    pub patch_names: Vec<String>,
+    /// Whether the mount succeeded.
+    pub success: bool,
+    /// Error message if mount failed.
+    pub error: Option<String>,
+}
+
+impl PatchesMountResult {
+    /// Create a successful patches mount result.
+    pub fn success(
+        mountpoint: PathBuf,
+        patch_count: usize,
+        file_count: usize,
+        patch_names: Vec<String>,
+    ) -> Self {
+        Self {
+            mountpoint,
+            patch_count,
+            file_count,
+            patch_names,
+            success: true,
+            error: None,
+        }
+    }
+
+    /// Create a failed patches mount result.
+    pub fn failure(mountpoint: PathBuf, error: String) -> Self {
+        Self {
+            mountpoint,
+            patch_count: 0,
+            file_count: 0,
+            patch_names: Vec::new(),
+            success: false,
+            error: Some(error),
+        }
+    }
+
+    /// Create a result indicating no patches were found (not an error).
+    pub fn no_patches() -> Self {
+        Self {
+            mountpoint: PathBuf::new(),
+            patch_count: 0,
+            file_count: 0,
+            patch_names: Vec::new(),
+            success: true,
+            error: None,
+        }
+    }
+}
+
 /// Manager for multiple FUSE mounts.
 ///
 /// Coordinates mounting and unmounting of ortho packages. Each ortho
@@ -100,6 +162,12 @@ pub struct MountManager {
     /// Shared load monitor for tracking FUSE-originated requests.
     /// Used by the circuit breaker to detect when X-Plane is loading scenery.
     load_monitor: Arc<SharedFuseLoadMonitor>,
+    /// Active patches union filesystem mount (if any).
+    patches_session: Option<SpawnedMountHandle>,
+    /// Patches mount info for display.
+    patches_mount: Option<ActiveMount>,
+    /// Service for patches (owns the runtime for DDS generation).
+    patches_service: Option<XEarthLayerService>,
 }
 
 impl MountManager {
@@ -111,6 +179,9 @@ impl MountManager {
             mounts: HashMap::new(),
             scenery_path: None,
             load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
+            patches_session: None,
+            patches_mount: None,
+            patches_service: None,
         }
     }
 
@@ -125,6 +196,9 @@ impl MountManager {
             mounts: HashMap::new(),
             scenery_path: Some(scenery_path.to_path_buf()),
             load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
+            patches_session: None,
+            patches_mount: None,
+            patches_service: None,
         }
     }
 
@@ -307,6 +381,165 @@ impl MountManager {
         }
     }
 
+    /// Mount the patches union filesystem.
+    ///
+    /// Discovers valid patches from the patches directory, builds a union index,
+    /// and mounts it as a single scenery folder at `zzyXEL_patches_ortho`.
+    ///
+    /// This should be called BEFORE `mount_all` to ensure patches have higher
+    /// priority than regional ortho packages.
+    ///
+    /// # Arguments
+    ///
+    /// * `patches_dir` - Directory containing patch folders
+    /// * `service_builder` - Builder for creating the DDS service
+    ///
+    /// # Returns
+    ///
+    /// `PatchesMountResult` indicating success/failure and patch counts.
+    pub fn mount_patches(
+        &mut self,
+        patches_dir: &std::path::Path,
+        service_builder: &ServiceBuilder,
+    ) -> PatchesMountResult {
+        // Skip if already mounted
+        if self.patches_session.is_some() {
+            return PatchesMountResult::failure(
+                PathBuf::new(),
+                "Patches already mounted".to_string(),
+            );
+        }
+
+        // Discover valid patches
+        let discovery = PatchDiscovery::new(patches_dir);
+        if !discovery.exists() {
+            tracing::debug!(
+                patches_dir = %patches_dir.display(),
+                "Patches directory does not exist, skipping"
+            );
+            return PatchesMountResult::no_patches();
+        }
+
+        let patches = match discovery.find_valid_patches() {
+            Ok(p) => p,
+            Err(e) => {
+                return PatchesMountResult::failure(
+                    PathBuf::new(),
+                    format!("Failed to discover patches: {}", e),
+                );
+            }
+        };
+
+        if patches.is_empty() {
+            tracing::debug!(
+                patches_dir = %patches_dir.display(),
+                "No valid patches found, skipping"
+            );
+            return PatchesMountResult::no_patches();
+        }
+
+        // Build union index
+        let index = match PatchUnionIndex::build(&patches) {
+            Ok(i) => i,
+            Err(e) => {
+                return PatchesMountResult::failure(
+                    PathBuf::new(),
+                    format!("Failed to build patch index: {}", e),
+                );
+            }
+        };
+
+        let patch_count = index.patch_names().len();
+        let file_count = index.file_count();
+        let patch_names = index.patch_names().to_vec();
+
+        tracing::info!(
+            patches = patch_count,
+            files = file_count,
+            "Built patches union index"
+        );
+
+        // Determine mountpoint
+        let mountpoint = if let Some(ref scenery_path) = self.scenery_path {
+            scenery_path.join("zzyXEL_patches_ortho")
+        } else {
+            return PatchesMountResult::failure(
+                PathBuf::new(),
+                "No scenery path configured for patches mount".to_string(),
+            );
+        };
+
+        // Create mountpoint directory
+        if !mountpoint.exists() {
+            if let Err(e) = std::fs::create_dir_all(&mountpoint) {
+                return PatchesMountResult::failure(
+                    mountpoint,
+                    format!("Failed to create mountpoint directory: {}", e),
+                );
+            }
+        }
+
+        // Create the patches service (owns the Tokio runtime for DDS generation)
+        let service = match service_builder.build_patches_service() {
+            Ok(s) => s,
+            Err(e) => {
+                return PatchesMountResult::failure(
+                    mountpoint,
+                    format!("Failed to create patches service: {}", e),
+                );
+            }
+        };
+
+        // Get DdsHandler and runtime from the service
+        let dds_handler = service.create_prefetch_handler();
+        let expected_dds_size = service.expected_dds_size();
+        let runtime_handle = service.runtime_handle().clone();
+
+        // Create and mount the union filesystem
+        let union_fs = Fuse3UnionFS::new(index, dds_handler, expected_dds_size);
+        let mountpoint_str = mountpoint.to_string_lossy();
+
+        let mount_result = runtime_handle.block_on(union_fs.mount_spawned(&mountpoint_str));
+
+        match mount_result {
+            Ok(session) => {
+                let mount_info = ActiveMount {
+                    region: "patches".to_string(),
+                    package_type: PackageType::Ortho, // Patches are ortho-like
+                    mountpoint: mountpoint.clone(),
+                };
+
+                // Register mount point with panic handler for cleanup on crash
+                panic_handler::register_mount(mountpoint.clone());
+
+                // Store service to keep runtime alive, then store session and mount info
+                self.patches_service = Some(service);
+                self.patches_session = Some(session);
+                self.patches_mount = Some(mount_info);
+
+                tracing::info!(
+                    mountpoint = %mountpoint.display(),
+                    patches = patch_count,
+                    files = file_count,
+                    "Patches union filesystem mounted"
+                );
+
+                PatchesMountResult::success(mountpoint, patch_count, file_count, patch_names)
+            }
+            Err(e) => PatchesMountResult::failure(mountpoint, format!("Failed to mount: {}", e)),
+        }
+    }
+
+    /// Check if patches are mounted.
+    pub fn has_patches(&self) -> bool {
+        self.patches_session.is_some()
+    }
+
+    /// Get patches mount info (if mounted).
+    pub fn patches_mount(&self) -> Option<&ActiveMount> {
+        self.patches_mount.as_ref()
+    }
+
     /// Unmount a specific region.
     ///
     /// # Arguments
@@ -339,6 +572,7 @@ impl MountManager {
     /// Unmount all packages.
     ///
     /// Sessions are unmounted in reverse order of mounting.
+    /// Patches are unmounted last (they were mounted first).
     pub fn unmount_all(&mut self) {
         // Collect keys to unmount (reverse order for clean shutdown)
         let keys: Vec<String> = self.sessions.keys().cloned().collect();
@@ -355,6 +589,13 @@ impl MountManager {
             self.services.remove(&key);
             self.mounts.remove(&key);
         }
+
+        // Unmount patches last (they were mounted first, highest priority)
+        if let Some(ref mount) = self.patches_mount {
+            panic_handler::unregister_mount(&mount.mountpoint);
+        }
+        self.patches_session = None;
+        self.patches_mount = None;
     }
 
     /// Get a reference to a mounted service (if any).
@@ -672,6 +913,39 @@ impl ServiceBuilder {
         // Set shared memory cache to ensure global memory limit is respected
         // Without this, each package would have its own cache potentially using
         // N times the configured memory limit
+        if let (Some(ref cache), Some(ref adapter)) =
+            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
+        {
+            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
+        }
+
+        // Wire tile request callback for FUSE-based position inference
+        if let Some(ref callback) = self.tile_request_callback {
+            service.set_tile_request_callback(callback.clone());
+        }
+
+        // Wire load monitor for circuit breaker integration
+        service.set_load_monitor(Arc::clone(&self.load_monitor));
+
+        Ok(service)
+    }
+
+    /// Build a service for patches (no package required).
+    ///
+    /// This creates a service that can generate DDS textures for the patches
+    /// union filesystem. The service shares the same resources (disk I/O limiter,
+    /// memory cache, etc.) as services built for regional packages.
+    pub fn build_patches_service(&self) -> Result<XEarthLayerService, ServiceError> {
+        let mut service = XEarthLayerService::new(
+            self.service_config.clone(),
+            self.provider_config.clone(),
+            self.logger.clone(),
+        )?;
+
+        // Set shared disk I/O limiter to prevent I/O exhaustion across packages
+        service.set_disk_io_limiter(Arc::clone(&self.disk_io_limiter));
+
+        // Set shared memory cache to ensure global memory limit is respected
         if let (Some(ref cache), Some(ref adapter)) =
             (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
         {

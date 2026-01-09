@@ -458,6 +458,30 @@ temp_dir = ~/Downloads/xearthlayer-temp
 - When `auto_install_overlays` is enabled, installing an ortho package will automatically install the matching overlay package for the same region (if available)
 - If `custom_scenery_path` is not set, it falls back to `[xplane] scenery_dir` or auto-detects from X-Plane installation
 
+---
+
+### `[patches]` - Tile Patches
+
+Settings for tile patches - pre-built Ortho4XP tiles with custom mesh/elevation from airport addons.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Enable/disable patches functionality |
+| `directory` | path | `~/.xearthlayer/patches` | Directory containing patch tiles |
+
+**Example:**
+```ini
+[patches]
+enabled = true
+directory = ~/.xearthlayer/patches
+```
+
+**Notes:**
+- Patches allow using custom elevation/mesh from airport addons (like SFD KLAX) while XEL generates textures
+- Each patch folder must contain `Earth nav data/` with DSF files
+- Patches are merged using a union filesystem; alphabetically-first folder wins on collision
+- See [docs/patches.md](patches.md) for detailed usage instructions
+
 ## Complete Example
 
 ```ini
@@ -539,6 +563,11 @@ file = ~/.xearthlayer/xearthlayer.log
 ; custom_scenery_path = /path/to/X-Plane 12/Custom Scenery
 ; auto_install_overlays = true
 ; temp_dir = ~/Downloads/xearthlayer-temp
+
+[patches]
+; Tile patches for custom mesh/elevation from airport addons
+enabled = true
+; directory = ~/.xearthlayer/patches
 ```
 
 ## Config CLI Commands
