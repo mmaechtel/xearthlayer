@@ -28,9 +28,11 @@
 
 mod filesystem;
 mod inode;
+mod ortho_union_fs;
 mod types;
 mod union_fs;
 
 pub use filesystem::Fuse3PassthroughFS;
+pub use ortho_union_fs::Fuse3OrthoUnionFS;
 pub use types::{Fuse3Error, Fuse3Result, MountHandle, SpawnedMountHandle};
 pub use union_fs::Fuse3UnionFS;

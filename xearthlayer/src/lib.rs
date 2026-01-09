@@ -27,6 +27,7 @@ pub mod log;
 pub mod logging;
 pub mod manager;
 pub mod orchestrator;
+pub mod ortho_union;
 pub mod package;
 pub mod panic;
 pub mod patches;

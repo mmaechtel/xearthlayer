@@ -59,9 +59,15 @@ pub use error::{ManagerError, ManagerResult};
 pub use extractor::{check_required_tools, ShellExtractor};
 pub use installer::{InstallProgressCallback, InstallResult, InstallStage, PackageInstaller};
 pub use local::{InstalledPackage, LocalPackageStore, MountStatus};
-pub use mounts::{ActiveMount, MountManager, MountResult, PatchesMountResult, ServiceBuilder};
+#[allow(deprecated)]
+pub use mounts::{
+    ActiveMount, ConsolidatedOrthoMountResult, MountManager, MountResult, PatchesMountResult,
+    ServiceBuilder,
+};
 pub use symlinks::{
-    create_overlay_symlink, overlay_symlink_exists, overlay_symlink_path, remove_overlay_symlink,
+    consolidated_overlay_exists, create_consolidated_overlay, create_overlay_symlink,
+    overlay_symlink_exists, overlay_symlink_path, remove_consolidated_overlay,
+    remove_overlay_symlink, ConsolidatedOverlayResult, CONSOLIDATED_OVERLAY_NAME,
 };
 pub use traits::{ArchiveExtractor, LibraryClient, PackageDownloader, ProgressCallback};
 pub use updates::{PackageInfo, PackageStatus, UpdateChecker};

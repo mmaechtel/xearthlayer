@@ -15,7 +15,9 @@ use xearthlayer::config::{
     analyze_config, config_file_path, format_size, ConfigFile, DownloadConfig, TextureConfig,
 };
 use xearthlayer::log::TracingLogger;
-use xearthlayer::manager::{InstalledPackage, LocalPackageStore, MountManager, ServiceBuilder};
+use xearthlayer::manager::{
+    create_consolidated_overlay, InstalledPackage, LocalPackageStore, MountManager, ServiceBuilder,
+};
 use xearthlayer::package::PackageType;
 use xearthlayer::panic as panic_handler;
 use xearthlayer::prefetch::{
@@ -240,93 +242,96 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     let load_monitor = mount_manager.load_monitor();
     service_builder = service_builder.with_load_monitor(Arc::clone(&load_monitor));
 
-    // Mount patches first (higher priority than regional packages)
-    // Patches provide custom mesh/elevation from airport addons while XEL generates textures
-    if config.patches.enabled {
-        let patches_dir = config.patches.directory.clone().unwrap_or_else(|| {
+    // Mount consolidated ortho (patches + all ortho packages in a single FUSE mount)
+    // This replaces the separate patches mount and per-package mounts with a unified view
+    let patches_dir = if config.patches.enabled {
+        config.patches.directory.clone().unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".xearthlayer")
                 .join("patches")
-        });
+        })
+    } else {
+        // Use a non-existent path when patches are disabled
+        PathBuf::from("/nonexistent")
+    };
 
-        let patches_result = mount_manager.mount_patches(&patches_dir, &service_builder);
+    if !use_tui {
+        println!("Mounting consolidated ortho scenery...");
+    }
 
-        if patches_result.success && patches_result.patch_count > 0 {
-            if !use_tui {
-                println!(
-                    "Patches: {} patch(es) mounted ({} files)",
-                    patches_result.patch_count, patches_result.file_count
-                );
-                for name in &patches_result.patch_names {
-                    println!("  • {}", name);
-                }
-                println!();
-            }
-        } else if let Some(ref error) = patches_result.error {
-            tracing::warn!(error = %error, "Failed to mount patches");
-            if !use_tui {
-                println!("Warning: Failed to mount patches: {}", error);
-                println!();
+    let consolidated_result =
+        mount_manager.mount_consolidated_ortho(&patches_dir, &store, &service_builder);
+
+    if !consolidated_result.success {
+        let error_msg = consolidated_result
+            .error
+            .as_deref()
+            .unwrap_or("Unknown error");
+        return Err(CliError::Serve(
+            xearthlayer::service::ServiceError::IoError(std::io::Error::other(format!(
+                "Failed to mount consolidated ortho: {}",
+                error_msg
+            ))),
+        ));
+    }
+
+    // Report consolidated mount results
+    if !use_tui {
+        println!(
+            "  ✓ zzXEL_ortho → {}",
+            consolidated_result.mountpoint.display()
+        );
+        println!(
+            "    Sources: {} ({} patches, {} packages)",
+            consolidated_result.source_count,
+            consolidated_result.patch_names.len(),
+            consolidated_result.package_regions.len()
+        );
+        println!("    Files: {}", consolidated_result.file_count);
+
+        // List patches if present
+        if !consolidated_result.patch_names.is_empty() {
+            println!("    Patches:");
+            for name in &consolidated_result.patch_names {
+                println!("      • {}", name);
             }
         }
-        // Note: patches_result.no_patches() case is silently skipped (normal when no patches exist)
-    }
 
-    // Mount all packages
-    if !use_tui {
-        println!("Mounting packages to Custom Scenery...");
-    }
-    let results = mount_manager
-        .mount_all(&store, |pkg| service_builder.build(pkg))
-        .map_err(|e| CliError::Packages(e.to_string()))?;
-
-    // Report results
-    let mut success_count = 0;
-    let mut failure_count = 0;
-
-    for result in &results {
-        if result.success {
-            if !use_tui {
-                println!(
-                    "  ✓ {} → {}",
-                    result.region.to_uppercase(),
-                    result.mountpoint.display()
-                );
+        // List packages
+        if !consolidated_result.package_regions.is_empty() {
+            println!("    Packages:");
+            for region in &consolidated_result.package_regions {
+                println!("      • {}", region.to_uppercase());
             }
-            success_count += 1;
-        } else {
-            if !use_tui {
-                println!(
-                    "  ✗ {}: {}",
-                    result.region.to_uppercase(),
-                    result.error.as_deref().unwrap_or("Unknown error")
-                );
-            }
-            failure_count += 1;
         }
-    }
-    if !use_tui {
         println!();
     }
 
-    if success_count == 0 {
-        return Err(CliError::Serve(
-            xearthlayer::service::ServiceError::IoError(std::io::Error::other(
-                "Failed to mount any packages",
-            )),
-        ));
+    // Create consolidated overlay symlinks
+    let overlay_result = create_consolidated_overlay(&store, &custom_scenery_path);
+    if overlay_result.success && overlay_result.package_count > 0 {
+        if !use_tui {
+            println!(
+                "  ✓ yzXEL_overlay → {} ({} DSF files from {} packages)",
+                overlay_result.path.display(),
+                overlay_result.file_count,
+                overlay_result.package_count
+            );
+            println!();
+        }
+    } else if let Some(ref error) = overlay_result.error {
+        tracing::warn!(error = %error, "Failed to create consolidated overlay");
+        if !use_tui {
+            println!("Warning: Failed to create consolidated overlay: {}", error);
+            println!();
+        }
     }
 
     if !use_tui {
         println!(
-            "Ready! {} package(s) mounted{}",
-            success_count,
-            if failure_count > 0 {
-                format!(", {} failed", failure_count)
-            } else {
-                String::new()
-            }
+            "Ready! Consolidated ortho mount active ({} sources)",
+            consolidated_result.source_count
         );
         println!();
     }

@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cache::MemoryCache;
-use crate::fuse::fuse3::Fuse3UnionFS;
+use crate::fuse::fuse3::{Fuse3OrthoUnionFS, Fuse3UnionFS};
 use crate::fuse::SpawnedMountHandle;
-use crate::package::PackageType;
+use crate::ortho_union::OrthoUnionIndexBuilder;
+use crate::package::{
+    InstalledPackage as PackageInstalledPackage, Package as PackageCore, PackageType,
+};
 use crate::panic as panic_handler;
 use crate::patches::{PatchDiscovery, PatchUnionIndex};
 use crate::pipeline::adapters::MemoryCacheAdapter;
@@ -25,6 +28,15 @@ use super::local::{InstalledPackage, LocalPackageStore};
 use super::{ManagerError, ManagerResult};
 
 /// Result of mounting a single package.
+///
+/// # Deprecated
+///
+/// This struct is deprecated in favor of [`ConsolidatedOrthoMountResult`].
+/// Use [`MountManager::mount_consolidated_ortho`] instead of per-package mounting.
+#[deprecated(
+    since = "0.2.11",
+    note = "Use ConsolidatedOrthoMountResult with mount_consolidated_ortho() instead"
+)]
 #[derive(Debug)]
 pub struct MountResult {
     /// The region code.
@@ -39,6 +51,7 @@ pub struct MountResult {
     pub error: Option<String>,
 }
 
+#[allow(deprecated)]
 impl MountResult {
     /// Create a successful mount result.
     pub fn success(region: String, package_type: PackageType, mountpoint: PathBuf) -> Self {
@@ -80,6 +93,15 @@ pub struct ActiveMount {
 }
 
 /// Result of mounting the patches union filesystem.
+///
+/// # Deprecated
+///
+/// This struct is deprecated in favor of [`ConsolidatedOrthoMountResult`].
+/// Patches are now included in the consolidated ortho mount.
+#[deprecated(
+    since = "0.2.11",
+    note = "Patches are now included in mount_consolidated_ortho()"
+)]
 #[derive(Debug)]
 pub struct PatchesMountResult {
     /// Path where patches are mounted.
@@ -96,6 +118,7 @@ pub struct PatchesMountResult {
     pub error: Option<String>,
 }
 
+#[allow(deprecated)]
 impl PatchesMountResult {
     /// Create a successful patches mount result.
     pub fn success(
@@ -139,6 +162,72 @@ impl PatchesMountResult {
     }
 }
 
+/// Result of mounting the consolidated ortho union filesystem.
+#[derive(Debug)]
+pub struct ConsolidatedOrthoMountResult {
+    /// Path where the consolidated ortho is mounted.
+    pub mountpoint: PathBuf,
+    /// Total number of sources (patches + packages).
+    pub source_count: usize,
+    /// Total files in the union index.
+    pub file_count: usize,
+    /// Names of patches included (if any).
+    pub patch_names: Vec<String>,
+    /// Regions of packages included.
+    pub package_regions: Vec<String>,
+    /// Whether the mount succeeded.
+    pub success: bool,
+    /// Error message if mount failed.
+    pub error: Option<String>,
+}
+
+impl ConsolidatedOrthoMountResult {
+    /// Create a successful consolidated mount result.
+    pub fn success(
+        mountpoint: PathBuf,
+        source_count: usize,
+        file_count: usize,
+        patch_names: Vec<String>,
+        package_regions: Vec<String>,
+    ) -> Self {
+        Self {
+            mountpoint,
+            source_count,
+            file_count,
+            patch_names,
+            package_regions,
+            success: true,
+            error: None,
+        }
+    }
+
+    /// Create a failed consolidated mount result.
+    pub fn failure(mountpoint: PathBuf, error: String) -> Self {
+        Self {
+            mountpoint,
+            source_count: 0,
+            file_count: 0,
+            patch_names: Vec::new(),
+            package_regions: Vec::new(),
+            success: false,
+            error: Some(error),
+        }
+    }
+
+    /// Create a result indicating no sources were found (not an error).
+    pub fn no_sources() -> Self {
+        Self {
+            mountpoint: PathBuf::new(),
+            source_count: 0,
+            file_count: 0,
+            patch_names: Vec::new(),
+            package_regions: Vec::new(),
+            success: true,
+            error: None,
+        }
+    }
+}
+
 /// Manager for multiple FUSE mounts.
 ///
 /// Coordinates mounting and unmounting of ortho packages. Each ortho
@@ -168,6 +257,12 @@ pub struct MountManager {
     patches_mount: Option<ActiveMount>,
     /// Service for patches (owns the runtime for DDS generation).
     patches_service: Option<XEarthLayerService>,
+    /// Consolidated ortho union filesystem mount (if any).
+    consolidated_session: Option<SpawnedMountHandle>,
+    /// Consolidated ortho mount info for display.
+    consolidated_mount: Option<ActiveMount>,
+    /// Service for consolidated ortho (owns the runtime for DDS generation).
+    consolidated_service: Option<XEarthLayerService>,
 }
 
 impl MountManager {
@@ -182,6 +277,9 @@ impl MountManager {
             patches_session: None,
             patches_mount: None,
             patches_service: None,
+            consolidated_session: None,
+            consolidated_mount: None,
+            consolidated_service: None,
         }
     }
 
@@ -199,6 +297,9 @@ impl MountManager {
             patches_session: None,
             patches_mount: None,
             patches_service: None,
+            consolidated_session: None,
+            consolidated_mount: None,
+            consolidated_service: None,
         }
     }
 
@@ -227,6 +328,11 @@ impl MountManager {
     /// Discovers installed ortho packages from the store and mounts each one.
     /// Returns results for all packages, including failures.
     ///
+    /// # Deprecated
+    ///
+    /// Use [`Self::mount_consolidated_ortho`] instead for a single unified mount
+    /// that combines patches and all ortho packages.
+    ///
     /// # Arguments
     ///
     /// * `store` - The local package store to discover packages from
@@ -241,6 +347,8 @@ impl MountManager {
     ///     create_service_for_package(pkg, &service_config, &provider_config)
     /// })?;
     /// ```
+    #[deprecated(since = "0.2.11", note = "Use mount_consolidated_ortho() instead")]
+    #[allow(deprecated)]
     pub fn mount_all<F>(
         &mut self,
         store: &LocalPackageStore,
@@ -267,10 +375,16 @@ impl MountManager {
 
     /// Mount a single package.
     ///
+    /// # Deprecated
+    ///
+    /// Use [`Self::mount_consolidated_ortho`] instead for a single unified mount.
+    ///
     /// # Arguments
     ///
     /// * `package` - The installed package to mount
     /// * `service_factory` - Factory function to create a service instance
+    #[deprecated(since = "0.2.11", note = "Use mount_consolidated_ortho() instead")]
+    #[allow(deprecated)]
     pub fn mount_package<F>(
         &mut self,
         package: &InstalledPackage,
@@ -386,8 +500,10 @@ impl MountManager {
     /// Discovers valid patches from the patches directory, builds a union index,
     /// and mounts it as a single scenery folder at `zzyXEL_patches_ortho`.
     ///
-    /// This should be called BEFORE `mount_all` to ensure patches have higher
-    /// priority than regional ortho packages.
+    /// # Deprecated
+    ///
+    /// Use [`Self::mount_consolidated_ortho`] instead. Patches are now integrated
+    /// into the single consolidated mount at `zzXEL_ortho`.
     ///
     /// # Arguments
     ///
@@ -397,6 +513,11 @@ impl MountManager {
     /// # Returns
     ///
     /// `PatchesMountResult` indicating success/failure and patch counts.
+    #[deprecated(
+        since = "0.2.11",
+        note = "Patches are now part of mount_consolidated_ortho()"
+    )]
+    #[allow(deprecated)]
     pub fn mount_patches(
         &mut self,
         patches_dir: &std::path::Path,
@@ -540,6 +661,204 @@ impl MountManager {
         self.patches_mount.as_ref()
     }
 
+    /// Mount all ortho sources as a single consolidated FUSE filesystem.
+    ///
+    /// This method creates a unified mount at `zzXEL_ortho` that includes:
+    /// - All patches from `patches_dir` (highest priority via `_patches/` prefix)
+    /// - All installed ortho packages from `store` (sorted alphabetically by region)
+    ///
+    /// This is the recommended mounting method as it provides:
+    /// - Single mount point for X-Plane scenery management
+    /// - Shared DDS generation resources
+    /// - Unified file resolution with clear precedence rules
+    ///
+    /// # Arguments
+    ///
+    /// * `patches_dir` - Directory containing patch folders
+    /// * `store` - Local package store for discovering installed packages
+    /// * `service_builder` - Builder for creating the shared DDS service
+    ///
+    /// # Returns
+    ///
+    /// `ConsolidatedOrthoMountResult` indicating success/failure and source counts.
+    pub fn mount_consolidated_ortho(
+        &mut self,
+        patches_dir: &std::path::Path,
+        store: &LocalPackageStore,
+        service_builder: &ServiceBuilder,
+    ) -> ConsolidatedOrthoMountResult {
+        // Skip if already mounted
+        if self.consolidated_session.is_some() {
+            return ConsolidatedOrthoMountResult::failure(
+                PathBuf::new(),
+                "Consolidated ortho already mounted".to_string(),
+            );
+        }
+
+        // Determine mountpoint
+        let mountpoint = if let Some(ref scenery_path) = self.scenery_path {
+            scenery_path.join("zzXEL_ortho")
+        } else {
+            return ConsolidatedOrthoMountResult::failure(
+                PathBuf::new(),
+                "No scenery path configured for consolidated mount".to_string(),
+            );
+        };
+
+        // Build the union index with patches and packages
+        let mut builder = OrthoUnionIndexBuilder::new();
+
+        // Add patches (if patches directory exists)
+        builder = builder.with_patches_dir(patches_dir);
+
+        // Collect patch names for result (before building index)
+        let patch_names: Vec<String> = {
+            let discovery = PatchDiscovery::new(patches_dir);
+            if discovery.exists() {
+                discovery
+                    .find_valid_patches()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        // Discover and add installed ortho packages
+        let packages = match store.list() {
+            Ok(p) => p,
+            Err(e) => {
+                return ConsolidatedOrthoMountResult::failure(
+                    mountpoint,
+                    format!("Failed to list packages: {}", e),
+                );
+            }
+        };
+
+        let mut package_regions = Vec::new();
+        for pkg in packages {
+            // Only include enabled ortho packages
+            if pkg.package_type() != PackageType::Ortho {
+                continue;
+            }
+
+            // Convert manager's InstalledPackage to package's InstalledPackage
+            let core_pkg =
+                PackageCore::new(pkg.region(), pkg.package_type(), pkg.version().clone());
+            let pkg_installed = PackageInstalledPackage::new(core_pkg, &pkg.path);
+            builder = builder.add_package(pkg_installed);
+            package_regions.push(pkg.region().to_string());
+        }
+
+        // Check if there are any sources
+        if patch_names.is_empty() && package_regions.is_empty() {
+            tracing::info!("No patches or packages found, skipping consolidated mount");
+            return ConsolidatedOrthoMountResult::no_sources();
+        }
+
+        // Build the index
+        let index = match builder.build() {
+            Ok(i) => i,
+            Err(e) => {
+                return ConsolidatedOrthoMountResult::failure(
+                    mountpoint,
+                    format!("Failed to build ortho union index: {}", e),
+                );
+            }
+        };
+
+        let source_count = index.source_count();
+        let file_count = index.file_count();
+
+        tracing::info!(
+            sources = source_count,
+            files = file_count,
+            patches = patch_names.len(),
+            packages = package_regions.len(),
+            "Built consolidated ortho union index"
+        );
+
+        // Create mountpoint directory
+        if !mountpoint.exists() {
+            if let Err(e) = std::fs::create_dir_all(&mountpoint) {
+                return ConsolidatedOrthoMountResult::failure(
+                    mountpoint,
+                    format!("Failed to create mountpoint directory: {}", e),
+                );
+            }
+        }
+
+        // Create the service (owns the Tokio runtime for DDS generation)
+        let service = match service_builder.build_patches_service() {
+            Ok(s) => s,
+            Err(e) => {
+                return ConsolidatedOrthoMountResult::failure(
+                    mountpoint,
+                    format!("Failed to create service: {}", e),
+                );
+            }
+        };
+
+        // Get DdsHandler and runtime from the service
+        let dds_handler = service.create_prefetch_handler();
+        let expected_dds_size = service.expected_dds_size();
+        let runtime_handle = service.runtime_handle().clone();
+
+        // Create and mount the consolidated ortho union filesystem
+        let ortho_union_fs = Fuse3OrthoUnionFS::new(index, dds_handler, expected_dds_size);
+        let mountpoint_str = mountpoint.to_string_lossy();
+
+        let mount_result = runtime_handle.block_on(ortho_union_fs.mount_spawned(&mountpoint_str));
+
+        match mount_result {
+            Ok(session) => {
+                let mount_info = ActiveMount {
+                    region: "consolidated".to_string(),
+                    package_type: PackageType::Ortho,
+                    mountpoint: mountpoint.clone(),
+                };
+
+                // Register mount point with panic handler for cleanup on crash
+                panic_handler::register_mount(mountpoint.clone());
+
+                // Store service to keep runtime alive, then store session and mount info
+                self.consolidated_service = Some(service);
+                self.consolidated_session = Some(session);
+                self.consolidated_mount = Some(mount_info);
+
+                tracing::info!(
+                    mountpoint = %mountpoint.display(),
+                    sources = source_count,
+                    files = file_count,
+                    "Consolidated ortho union filesystem mounted"
+                );
+
+                ConsolidatedOrthoMountResult::success(
+                    mountpoint,
+                    source_count,
+                    file_count,
+                    patch_names,
+                    package_regions,
+                )
+            }
+            Err(e) => {
+                ConsolidatedOrthoMountResult::failure(mountpoint, format!("Failed to mount: {}", e))
+            }
+        }
+    }
+
+    /// Check if consolidated ortho is mounted.
+    pub fn has_consolidated_ortho(&self) -> bool {
+        self.consolidated_session.is_some()
+    }
+
+    /// Get consolidated ortho mount info (if mounted).
+    pub fn consolidated_mount(&self) -> Option<&ActiveMount> {
+        self.consolidated_mount.as_ref()
+    }
+
     /// Unmount a specific region.
     ///
     /// # Arguments
@@ -590,12 +909,21 @@ impl MountManager {
             self.mounts.remove(&key);
         }
 
-        // Unmount patches last (they were mounted first, highest priority)
+        // Unmount patches (if mounted separately)
         if let Some(ref mount) = self.patches_mount {
             panic_handler::unregister_mount(&mount.mountpoint);
         }
         self.patches_session = None;
         self.patches_mount = None;
+        self.patches_service = None;
+
+        // Unmount consolidated ortho (if mounted)
+        if let Some(ref mount) = self.consolidated_mount {
+            panic_handler::unregister_mount(&mount.mountpoint);
+        }
+        self.consolidated_session = None;
+        self.consolidated_mount = None;
+        self.consolidated_service = None;
     }
 
     /// Get a reference to a mounted service (if any).
@@ -603,7 +931,11 @@ impl MountManager {
     /// This returns a reference to the first available service, useful for
     /// accessing shared components like the DdsHandler for prefetch.
     pub fn get_service(&self) -> Option<&XEarthLayerService> {
-        self.services.values().next()
+        // Prefer consolidated service, then patches, then per-region services
+        self.consolidated_service
+            .as_ref()
+            .or(self.patches_service.as_ref())
+            .or_else(|| self.services.values().next())
     }
 
     /// Get the shared load monitor for circuit breaker integration.
@@ -662,7 +994,15 @@ impl MountManager {
             total_encode_time_ms: 0,
         };
 
-        for service in self.services.values() {
+        // Collect all services: per-region + patches + consolidated
+        let all_services: Vec<&XEarthLayerService> = self
+            .services
+            .values()
+            .chain(self.patches_service.as_ref())
+            .chain(self.consolidated_service.as_ref())
+            .collect();
+
+        for service in all_services {
             let snapshot = service.telemetry_snapshot();
 
             // Use the longest uptime (first service started)
