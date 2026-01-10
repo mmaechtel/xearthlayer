@@ -1,6 +1,6 @@
 //! Run command - mount all installed ortho packages.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +15,9 @@ use xearthlayer::config::{
     analyze_config, config_file_path, format_size, ConfigFile, DownloadConfig, TextureConfig,
 };
 use xearthlayer::log::TracingLogger;
-use xearthlayer::manager::{InstalledPackage, LocalPackageStore, MountManager, ServiceBuilder};
+use xearthlayer::manager::{
+    create_consolidated_overlay, InstalledPackage, LocalPackageStore, MountManager, ServiceBuilder,
+};
 use xearthlayer::package::PackageType;
 use xearthlayer::panic as panic_handler;
 use xearthlayer::prefetch::{
@@ -240,93 +242,89 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     let load_monitor = mount_manager.load_monitor();
     service_builder = service_builder.with_load_monitor(Arc::clone(&load_monitor));
 
-    // Mount patches first (higher priority than regional packages)
-    // Patches provide custom mesh/elevation from airport addons while XEL generates textures
-    if config.patches.enabled {
-        let patches_dir = config.patches.directory.clone().unwrap_or_else(|| {
+    // Determine patches directory
+    let patches_dir = if config.patches.enabled {
+        config.patches.directory.clone().unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".xearthlayer")
                 .join("patches")
-        });
+        })
+    } else {
+        // Use a non-existent path when patches are disabled
+        PathBuf::from("/nonexistent")
+    };
 
-        let patches_result = mount_manager.mount_patches(&patches_dir, &service_builder);
+    // For TUI mode, mounting happens inside run_with_dashboard() with progress callback
+    // For non-TUI mode, mount here before continuing
+    if !use_tui {
+        println!("Mounting consolidated ortho scenery...");
 
-        if patches_result.success && patches_result.patch_count > 0 {
-            if !use_tui {
-                println!(
-                    "Patches: {} patch(es) mounted ({} files)",
-                    patches_result.patch_count, patches_result.file_count
-                );
-                for name in &patches_result.patch_names {
-                    println!("  • {}", name);
-                }
-                println!();
-            }
-        } else if let Some(ref error) = patches_result.error {
-            tracing::warn!(error = %error, "Failed to mount patches");
-            if !use_tui {
-                println!("Warning: Failed to mount patches: {}", error);
-                println!();
-            }
+        let consolidated_result =
+            mount_manager.mount_consolidated_ortho(&patches_dir, &store, &service_builder);
+
+        if !consolidated_result.success {
+            let error_msg = consolidated_result
+                .error
+                .as_deref()
+                .unwrap_or("Unknown error");
+            return Err(CliError::Serve(
+                xearthlayer::service::ServiceError::IoError(std::io::Error::other(format!(
+                    "Failed to mount consolidated ortho: {}",
+                    error_msg
+                ))),
+            ));
         }
-        // Note: patches_result.no_patches() case is silently skipped (normal when no patches exist)
-    }
 
-    // Mount all packages
-    if !use_tui {
-        println!("Mounting packages to Custom Scenery...");
-    }
-    let results = mount_manager
-        .mount_all(&store, |pkg| service_builder.build(pkg))
-        .map_err(|e| CliError::Packages(e.to_string()))?;
-
-    // Report results
-    let mut success_count = 0;
-    let mut failure_count = 0;
-
-    for result in &results {
-        if result.success {
-            if !use_tui {
-                println!(
-                    "  ✓ {} → {}",
-                    result.region.to_uppercase(),
-                    result.mountpoint.display()
-                );
-            }
-            success_count += 1;
-        } else {
-            if !use_tui {
-                println!(
-                    "  ✗ {}: {}",
-                    result.region.to_uppercase(),
-                    result.error.as_deref().unwrap_or("Unknown error")
-                );
-            }
-            failure_count += 1;
-        }
-    }
-    if !use_tui {
-        println!();
-    }
-
-    if success_count == 0 {
-        return Err(CliError::Serve(
-            xearthlayer::service::ServiceError::IoError(std::io::Error::other(
-                "Failed to mount any packages",
-            )),
-        ));
-    }
-
-    if !use_tui {
+        // Report consolidated mount results
         println!(
-            "Ready! {} package(s) mounted{}",
-            success_count,
-            if failure_count > 0 {
-                format!(", {} failed", failure_count)
-            } else {
-                String::new()
+            "  ✓ zzXEL_ortho → {}",
+            consolidated_result.mountpoint.display()
+        );
+        println!(
+            "    Sources: {} ({} patches, {} packages)",
+            consolidated_result.source_count,
+            consolidated_result.patch_names.len(),
+            consolidated_result.package_regions.len()
+        );
+        println!("    Files: {}", consolidated_result.file_count);
+
+        // List patches if present
+        if !consolidated_result.patch_names.is_empty() {
+            println!("    Patches:");
+            for name in &consolidated_result.patch_names {
+                println!("      • {}", name);
             }
+        }
+
+        // List packages
+        if !consolidated_result.package_regions.is_empty() {
+            println!("    Packages:");
+            for region in &consolidated_result.package_regions {
+                println!("      • {}", region.to_uppercase());
+            }
+        }
+        println!();
+
+        // Create consolidated overlay symlinks
+        let overlay_result = create_consolidated_overlay(&store, &custom_scenery_path);
+        if overlay_result.success && overlay_result.package_count > 0 {
+            println!(
+                "  ✓ yzXEL_overlay → {} ({} DSF files from {} packages)",
+                overlay_result.path.display(),
+                overlay_result.file_count,
+                overlay_result.package_count
+            );
+            println!();
+        } else if let Some(ref error) = overlay_result.error {
+            tracing::warn!(error = %error, "Failed to create consolidated overlay");
+            println!("Warning: Failed to create consolidated overlay: {}", error);
+            println!();
+        }
+
+        println!(
+            "Ready! Consolidated ortho mount active ({} sources)",
+            consolidated_result.source_count
         );
         println!();
     }
@@ -504,8 +502,8 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
 
     // Track which cancellation token to use for cleanup
     let cleanup_cancellation = if use_tui {
-        // TUI path: Start dashboard in Loading state, build index async, then start prefetcher
-        // This provides immediate visual feedback during the 30+ second index build
+        // TUI path: Start dashboard in Loading state, mount with progress, then start prefetcher
+        // This provides immediate visual feedback during the potentially long index build
         let ctx = TuiContext {
             mount_manager: &mut mount_manager,
             shutdown,
@@ -523,8 +521,14 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
                 .as_ref()
                 .or(config.xplane.scenery_dir.as_ref())
                 .and_then(|p| XPlaneEnvironment::from_custom_scenery_path(p).ok()),
+            // Mount params for mounting inside dashboard with progress
+            mount_params: MountParams {
+                patches_dir,
+                store: &store,
+                service_builder,
+            },
         };
-        run_with_dashboard(ctx)?
+        run_with_dashboard(ctx, &custom_scenery_path)?
     } else {
         // Fallback to simple text output for non-TTY
         run_with_simple_output(&mut mount_manager, shutdown)?;
@@ -573,25 +577,41 @@ struct TuiContext<'a> {
     airport_icao: Option<String>,
     /// X-Plane environment for apt.dat lookup and resource paths
     xplane_env: Option<XPlaneEnvironment>,
+    /// Parameters for mounting (moved here so TUI can show progress)
+    mount_params: MountParams<'a>,
+}
+
+/// Parameters for mounting consolidated ortho.
+struct MountParams<'a> {
+    patches_dir: PathBuf,
+    store: &'a LocalPackageStore,
+    service_builder: ServiceBuilder,
 }
 
 /// Run with TUI dashboard, starting in Loading state.
 ///
 /// This function:
-/// 1. Starts the TUI immediately in Loading state
-/// 2. Spawns async SceneryIndex building with progress updates
-/// 3. When indexing completes, optionally prewarm cache around airport
-/// 4. Starts the prefetcher and transitions to Running
-fn run_with_dashboard(ctx: TuiContext) -> Result<CancellationToken, CliError> {
+/// 1. Starts the TUI immediately in Loading state for OrthoUnionIndex building
+/// 2. Mounts consolidated ortho with progress updates
+/// 3. Creates overlay symlinks
+/// 4. Builds SceneryIndex for prefetching
+/// 5. When indexing completes, optionally prewarm cache around airport
+/// 6. Starts the prefetcher and transitions to Running
+fn run_with_dashboard(
+    ctx: TuiContext,
+    custom_scenery_path: &Path,
+) -> Result<CancellationToken, CliError> {
+    use std::sync::Mutex;
     use std::time::Duration;
-    use ui::{Dashboard, DashboardConfig, DashboardEvent};
+    use ui::{Dashboard, DashboardConfig, DashboardEvent, LoadingPhase};
+    use xearthlayer::ortho_union::{IndexBuildPhase, IndexBuildProgress};
 
     let dashboard_config = DashboardConfig {
         memory_cache_max: ctx.config.cache.memory_size,
         disk_cache_max: ctx.config.cache.disk_size,
     };
 
-    // Create initial loading progress
+    // Create initial loading progress for OrthoUnionIndex building
     let loading_progress = LoadingProgress::new(ctx.ortho_packages.len());
 
     // Start dashboard in Loading state
@@ -601,7 +621,106 @@ fn run_with_dashboard(ctx: TuiContext) -> Result<CancellationToken, CliError> {
             .map_err(|e| CliError::Config(format!("Failed to create dashboard: {}", e)))?
             .with_prefetch_status(Arc::clone(&ctx.prefetch_status));
 
-    // Wire in control plane health if available
+    // Draw initial loading screen immediately
+    dashboard
+        .draw_loading()
+        .map_err(|e| CliError::Config(format!("Dashboard draw error: {}", e)))?;
+
+    // Phase 1: Mount consolidated ortho with progress callback
+    // We use a shared state to communicate progress from the callback to the dashboard
+    let progress_state = Arc::new(Mutex::new(LoadingProgress::new(ctx.ortho_packages.len())));
+    let progress_state_clone = Arc::clone(&progress_state);
+
+    let progress_callback: xearthlayer::ortho_union::IndexBuildProgressCallback =
+        Arc::new(move |progress: IndexBuildProgress| {
+            let mut state = progress_state_clone.lock().unwrap();
+            state.phase = match progress.phase {
+                IndexBuildPhase::Discovering => LoadingPhase::Discovering,
+                IndexBuildPhase::CheckingCache => LoadingPhase::CheckingCache,
+                IndexBuildPhase::Scanning => LoadingPhase::Scanning,
+                IndexBuildPhase::Merging => LoadingPhase::Merging,
+                IndexBuildPhase::SavingCache => LoadingPhase::SavingCache,
+                IndexBuildPhase::Complete => LoadingPhase::Complete,
+            };
+            state.current_package = progress.current_source.clone().unwrap_or_default();
+            state.packages_scanned = progress.sources_complete;
+            state.total_packages = progress.sources_total;
+            state.tiles_indexed = progress.files_scanned;
+            state.using_cache = progress.using_cache;
+        });
+
+    // Mount with progress - run in a separate thread so we can update dashboard
+    // Use oneshot channel to get result back
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let patches_dir = &ctx.mount_params.patches_dir;
+    let service_builder = &ctx.mount_params.service_builder;
+    let progress_state_for_draw = Arc::clone(&progress_state);
+
+    // The store reference is borrowed, so we need to do the mount call here
+    // and spawn a thread that just signals completion
+    let mount_result = std::thread::scope(|s| {
+        // Spawn mount thread within scope
+        let mount_handle = s.spawn(|| {
+            let result = ctx.mount_manager.mount_consolidated_ortho_with_progress(
+                patches_dir,
+                ctx.mount_params.store,
+                service_builder,
+                Some(progress_callback),
+            );
+            let _ = result_tx.send(result);
+        });
+
+        // Update dashboard while mount is in progress
+        let tick_rate = Duration::from_millis(50);
+        let mount_result = loop {
+            // Check for result (non-blocking)
+            match result_rx.try_recv() {
+                Ok(result) => break result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Not ready yet - update dashboard and wait
+                    let current_progress = progress_state_for_draw.lock().unwrap().clone();
+                    dashboard.update_loading_progress(current_progress);
+                    if let Err(e) = dashboard.draw_loading() {
+                        tracing::warn!(error = %e, "Failed to draw loading screen");
+                    }
+                    std::thread::sleep(tick_rate);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Sender dropped without sending - wait for thread and check error
+                    mount_handle.join().expect("Mount thread panicked");
+                    panic!("Mount thread completed without sending result");
+                }
+            }
+        };
+
+        // Wait for mount thread to finish (should already be done)
+        mount_handle.join().expect("Mount thread panicked");
+        mount_result
+    });
+
+    if !mount_result.success {
+        let error_msg = mount_result.error.as_deref().unwrap_or("Unknown error");
+        return Err(CliError::Serve(
+            xearthlayer::service::ServiceError::IoError(std::io::Error::other(format!(
+                "Failed to mount consolidated ortho: {}",
+                error_msg
+            ))),
+        ));
+    }
+
+    tracing::info!(
+        sources = mount_result.source_count,
+        files = mount_result.file_count,
+        "Consolidated ortho mounted successfully"
+    );
+
+    // Create consolidated overlay symlinks
+    let overlay_result = create_consolidated_overlay(ctx.mount_params.store, custom_scenery_path);
+    if let Some(ref error) = overlay_result.error {
+        tracing::warn!(error = %error, "Failed to create consolidated overlay");
+    }
+
+    // Wire in control plane health now that service is available
     if let Some(service) = ctx.mount_manager.get_service() {
         let control_plane_health = service.control_plane_health();
         let max_concurrent_jobs = service.max_concurrent_jobs();
@@ -614,6 +733,8 @@ fn run_with_dashboard(ctx: TuiContext) -> Result<CancellationToken, CliError> {
         .get_service()
         .map(|s| s.runtime_handle().clone())
         .ok_or_else(|| CliError::Config("No runtime handle available".to_string()))?;
+
+    // Phase 2: Now build SceneryIndex for prefetching (update progress display)
 
     // Create channel for index progress updates
     let (progress_tx, mut progress_rx) = mpsc::channel::<IndexingProgress>(32);

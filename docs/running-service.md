@@ -47,25 +47,32 @@ xearthlayer run  # Explicit form
 
 Output:
 ```
-XEarthLayer v0.1.0
+XEarthLayer v0.2.11
 ========================================
 
 Packages:       /home/user/.xearthlayer/packages
 Custom Scenery: /home/user/X-Plane 12/Custom Scenery
 DDS Format:     BC1
 Provider:       Bing Maps
+FUSE Backend:   fuse3 (async multi-threaded)
 
 Installed ortho packages (2):
-  EU-PARIS v1.0.0
-  NA-SOCAL v2.1.0
+  EU v1.0.0
+  NA v2.1.0
 
 Cache: 2 GB memory, 20 GB disk
 
-Mounting packages to Custom Scenery...
-  ✓ EU-PARIS → /home/user/X-Plane 12/Custom Scenery/zzXEL_eu-paris_ortho
-  ✓ NA-SOCAL → /home/user/X-Plane 12/Custom Scenery/zzXEL_na-socal_ortho
+Mounting consolidated ortho scenery...
+  ✓ zzXEL_ortho → /home/user/X-Plane 12/Custom Scenery/zzXEL_ortho
+    Sources: 2 (0 patches, 2 packages)
+    Files: 15234
+    Packages:
+      • EU
+      • NA
 
-Ready! 2 package(s) mounted
+  ✓ yzXEL_overlay → /home/user/X-Plane 12/Custom Scenery/yzXEL_overlay (2456 DSF files from 2 packages)
+
+Ready! Consolidated ortho mount active (2 sources)
 
 Start X-Plane to use XEarthLayer scenery.
 Press Ctrl+C to stop.
@@ -75,9 +82,10 @@ Press Ctrl+C to stop.
 
 1. Reads your configuration from `~/.xearthlayer/config.ini`
 2. Discovers installed ortho packages from `install_location`
-3. Creates FUSE mounts for each package in `custom_scenery_path`
-4. Starts the texture streaming service
-5. Waits for Ctrl+C to cleanly unmount
+3. Creates a single consolidated FUSE mount (`zzXEL_ortho`) combining patches and all ortho packages
+4. Creates consolidated overlay symlinks (`yzXEL_overlay`) for all overlay packages
+5. Starts the texture streaming service with shared resources
+6. Waits for Ctrl+C to cleanly unmount
 
 ### Options
 
@@ -387,6 +395,53 @@ Add to your shell profile (`~/.bashrc` or `~/.zshrc`):
 # Start XEarthLayer if not already running
 pgrep -x xearthlayer > /dev/null || xearthlayer run &
 ```
+
+## Upgrading from v0.2.10 or Earlier
+
+Version 0.2.11 introduces **consolidated mounting**, which changes how scenery is presented to X-Plane.
+
+### What Changed
+
+| Before (≤0.2.10) | After (≥0.2.11) |
+|------------------|-----------------|
+| Multiple mounts: `zzXEL_na_ortho`, `zzXEL_eu_ortho`, etc. | Single mount: `zzXEL_ortho` |
+| Separate patches mount: `zzyXEL_patches_ortho` | Patches included in `zzXEL_ortho` |
+| Multiple overlay folders: `yzXEL_na_overlay`, `yzXEL_eu_overlay` | Single folder: `yzXEL_overlay` |
+
+### Benefits
+
+- **Reduced resource usage**: Single FUSE session instead of N sessions
+- **Simpler scenery_packs.ini**: Only two entries needed
+- **Unified caching**: Shared memory and disk cache across all regions
+- **Better patches integration**: Patches automatically have highest priority
+
+### Upgrade Steps
+
+1. **Stop XEarthLayer** if running:
+   ```bash
+   # Press Ctrl+C in the terminal running XEarthLayer
+   ```
+
+2. **Clean up old mount points** in X-Plane's Custom Scenery:
+   ```bash
+   cd "/path/to/X-Plane 12/Custom Scenery"
+   rm -rf zzXEL_*_ortho zzyXEL_patches_ortho yzXEL_*_overlay
+   ```
+
+3. **Update `scenery_packs.ini`**: Remove old XEL entries and add the new consolidated ones:
+   ```
+   SCENERY_PACK Custom Scenery/yzXEL_overlay/
+   SCENERY_PACK Custom Scenery/zzXEL_ortho/
+   ```
+
+4. **Run the new version**:
+   ```bash
+   xearthlayer run
+   ```
+
+### Automatic Cleanup
+
+The first time you run v0.2.11+, XEarthLayer will attempt to clean up old mount points automatically. If cleanup fails (e.g., permission issues), you may need to remove them manually as shown above.
 
 ## Logging
 

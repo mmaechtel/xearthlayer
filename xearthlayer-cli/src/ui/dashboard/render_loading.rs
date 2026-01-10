@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use super::render_sections::inner_rect;
-use super::state::LoadingProgress;
+use super::state::{LoadingPhase, LoadingProgress};
 
 /// Render the loading UI.
 pub fn render_loading_ui(frame: &mut Frame, progress: &LoadingProgress, spinner: char) {
@@ -19,7 +19,7 @@ pub fn render_loading_ui(frame: &mut Frame, progress: &LoadingProgress, spinner:
 
     // Calculate centered box dimensions
     let box_width = 60u16.min(size.width.saturating_sub(4));
-    let box_height = 11u16;
+    let box_height = 12u16; // Increased for phase indicator
     let x = (size.width.saturating_sub(box_width)) / 2;
     let y = (size.height.saturating_sub(box_height)) / 2;
 
@@ -47,9 +47,15 @@ pub fn render_loading_ui(frame: &mut Frame, progress: &LoadingProgress, spinner:
     let inner = inner_rect(area, 2, 1);
 
     // Build content lines
+    let title = if progress.using_cache {
+        "Loading Cached Index..."
+    } else {
+        "Building Scenery Index..."
+    };
+
     let mut lines = vec![
         Line::from(vec![Span::styled(
-            "Building Scenery Index...",
+            title,
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -57,30 +63,43 @@ pub fn render_loading_ui(frame: &mut Frame, progress: &LoadingProgress, spinner:
         Line::from(""),
     ];
 
-    // Spinner + current package line
-    if !progress.current_package.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
-            Span::styled("Scanning: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&progress.current_package, Style::default().fg(Color::Green)),
-        ]));
+    // Spinner + phase/current package line
+    let status_text = match progress.phase {
+        LoadingPhase::Discovering => "Discovering packages...".to_string(),
+        LoadingPhase::CheckingCache => "Checking cache...".to_string(),
+        LoadingPhase::Scanning => {
+            if !progress.current_package.is_empty() {
+                format!("Scanning: {}", progress.current_package)
+            } else {
+                "Scanning sources...".to_string()
+            }
+        }
+        LoadingPhase::Merging => "Merging index...".to_string(),
+        LoadingPhase::SavingCache => "Saving cache...".to_string(),
+        LoadingPhase::Complete => "Complete!".to_string(),
+    };
+
+    let status_color = if progress.using_cache {
+        Color::Magenta
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
-            Span::styled("Initializing...", Style::default().fg(Color::DarkGray)),
-        ]));
-    }
+        Color::Green
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
+        Span::styled(status_text, Style::default().fg(status_color)),
+    ]));
 
     lines.push(Line::from(""));
 
     // Progress bar
-    let progress_width = (inner.width.saturating_sub(14)) as usize; // "Packages: " + "XX/XX"
+    let progress_width = (inner.width.saturating_sub(14)) as usize; // "Sources:  " + "XX/XX"
     let filled = (progress.progress_fraction() * progress_width as f64) as usize;
     let empty = progress_width.saturating_sub(filled);
     let progress_bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
 
     lines.push(Line::from(vec![
-        Span::styled("Packages: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Sources:  ", Style::default().fg(Color::DarkGray)),
         Span::styled(progress_bar, Style::default().fg(Color::Cyan)),
         Span::styled(
             format!(" {}/{}", progress.packages_scanned, progress.total_packages),
@@ -88,27 +107,53 @@ pub fn render_loading_ui(frame: &mut Frame, progress: &LoadingProgress, spinner:
         ),
     ]));
 
-    // Tiles indexed line
+    // Files indexed line
     lines.push(Line::from(vec![
-        Span::styled("Tiles indexed: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Files indexed: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("{}", progress.tiles_indexed),
+            format_number(progress.tiles_indexed),
             Style::default().fg(Color::White),
         ),
     ]));
 
     lines.push(Line::from(""));
 
-    // Elapsed time
+    // Elapsed time and cache indicator
     let elapsed = progress.elapsed();
-    lines.push(Line::from(vec![
+    let mut time_spans = vec![
         Span::styled("Elapsed: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("{}s", elapsed.as_secs()),
             Style::default().fg(Color::White),
         ),
-    ]));
+    ];
+
+    if progress.using_cache {
+        time_spans.push(Span::styled("  ", Style::default()));
+        time_spans.push(Span::styled(
+            "✓ cached",
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+
+    lines.push(Line::from(time_spans));
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
+}
+
+/// Format a number with thousands separators.
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let chars: Vec<_> = s.chars().collect();
+
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(*ch);
+    }
+
+    result
 }

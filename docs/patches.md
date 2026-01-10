@@ -162,17 +162,23 @@ directory = ~/.xearthlayer/patches
 
 ## X-Plane Scenery Order
 
-XEL mount points are prefixed to control X-Plane's loading order:
+Starting with v0.2.11, XEL uses consolidated mounting:
 
-| Prefix | Type | Example | Priority |
-|--------|------|---------|----------|
-| `yz*` | Overlays | `yzXEL_na_overlay` | Highest (loaded first) |
-| `zzy*` | Patches | `zzyXEL_patches_ortho` | After overlays |
-| `zz*` | Orthos | `zzXEL_na_ortho` | Lowest (loaded last) |
+| Mount | Type | Description | Priority |
+|-------|------|-------------|----------|
+| `yzXEL_overlay` | Overlays | All overlay packages combined | Highest (loaded first) |
+| `zzXEL_ortho` | Orthos | Patches + all ortho packages combined | Lowest (loaded last) |
+
+Within `zzXEL_ortho`, files are resolved by **alphabetical folder name** priority:
+- `_patches/A_KLAX_Mesh/` - Patches have prefix `_` (sorts first)
+- `_patches/B_KDEN_Mesh/`
+- `eu/` - Regional packages use region code
+- `na/`
+- `sa/`
 
 This ensures:
 1. Overlays (trees, buildings) appear on top
-2. Patches override regional ortho tiles for their specific areas
+2. Patches automatically have highest priority within ortho layer
 3. Regional orthos fill in everywhere else
 
 ## Troubleshooting
@@ -201,13 +207,18 @@ Common issues:
 
 ### Patches Not Loading in X-Plane
 
-1. Verify patches are mounted:
+1. Verify consolidated mount includes your patches:
    ```bash
-   ls -la ~/X-Plane\ 12/Custom\ Scenery/zzyXEL_patches_ortho/
+   ls -la ~/X-Plane\ 12/Custom\ Scenery/zzXEL_ortho/
    ```
 
+   Look for your patch's `Earth nav data/` content in the mount.
+
 2. Check X-Plane scenery_packs.ini:
-   - `zzyXEL_patches_ortho` should appear before `zzXEL_*_ortho` entries
+   ```
+   SCENERY_PACK Custom Scenery/yzXEL_overlay/
+   SCENERY_PACK Custom Scenery/zzXEL_ortho/
+   ```
 
 3. Restart X-Plane after adding new patches
 

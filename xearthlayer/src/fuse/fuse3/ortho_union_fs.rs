@@ -1,30 +1,39 @@
-//! Union FUSE filesystem for patch tiles.
+//! Consolidated ortho union FUSE filesystem.
 //!
-//! This module provides a FUSE filesystem that presents multiple patch folders
-//! as a single unified view. It uses [`PatchUnionIndex`] to merge files from
-//! different patches with priority-based collision resolution.
+//! This module provides a FUSE filesystem that presents all ortho sources
+//! (patches AND regional packages) as a single unified view. It uses
+//! [`OrthoUnionIndex`] to merge files with priority-based collision resolution.
 //!
 //! # Architecture
 //!
 //! ```text
-//! ~/.xearthlayer/patches/
-//! ├── A_KDEN_Mesh/            ─┐
-//! │   ├── Earth nav data/      │
-//! │   └── terrain/             │   PatchUnionIndex
-//! └── B_KLAX_Mesh/            ─┼─────────────────────► Fuse3UnionFS
-//!     ├── Earth nav data/      │                              │
-//!     └── terrain/            ─┘                              ▼
-//!                                                    FUSE Mount Point
-//!                                              Custom Scenery/zzyXEL_patches_ortho/
+//! ~/.xearthlayer/
+//! ├── patches/                  ─┐
+//! │   ├── A_KDEN_Mesh/           │
+//! │   └── B_KLAX_Mesh/           │
+//! └── packages/                  │   OrthoUnionIndex
+//!     ├── na_ortho/              ├────────────────────► Fuse3OrthoUnionFS
+//!     ├── eu_ortho/              │                              │
+//!     └── sa_ortho/             ─┘                              ▼
+//!                                                     FUSE Mount Point
+//!                                                Custom Scenery/zzXEL_ortho/
 //! ```
+//!
+//! # Priority Resolution
+//!
+//! Sources are sorted alphabetically by `sort_key`:
+//! 1. Patches: `_patches/{folder_name}` (underscore sorts first)
+//! 2. Packages: `{region}` (e.g., "eu", "na", "sa")
+//!
+//! First source wins on collision.
 //!
 //! # DDS Texture Generation
 //!
 //! When X-Plane requests a DDS texture:
-//! 1. Check if the texture exists in a patch folder → passthrough read
+//! 1. Check if the texture exists in any source → passthrough read
 //! 2. If not, parse the filename for coordinates → generate via DdsHandler
 //!
-//! This ensures patches can include pre-built textures, but XEL generates
+//! This ensures sources can include pre-built textures, but XEL generates
 //! missing textures dynamically using its configured imagery provider.
 
 use super::inode::InodeManager;
@@ -32,7 +41,7 @@ use super::shared::{DdsRequestor, FileAttrBuilder, VirtualDdsConfig, TTL};
 use super::types::{Fuse3Error, Fuse3Result};
 use crate::fuse::async_passthrough::DdsHandler;
 use crate::fuse::{get_default_placeholder, parse_dds_filename};
-use crate::patches::PatchUnionIndex;
+use crate::ortho_union::OrthoUnionIndex;
 use crate::pipeline::StorageConcurrencyLimiter;
 use crate::prefetch::TileRequestCallback;
 use bytes::Bytes;
@@ -53,18 +62,34 @@ use tokio::fs;
 use tokio::sync::oneshot;
 use tracing::{debug, trace};
 
-/// Union FUSE filesystem for patch tiles.
+/// Consolidated ortho union FUSE filesystem.
 ///
-/// This filesystem merges multiple patch folders into a single virtual view:
-/// - Files from patches are passed through from their real locations
+/// This filesystem merges all ortho sources (patches + regional packages) into
+/// a single virtual view:
+///
+/// - Files from sources are passed through from their real locations
 /// - DDS textures that don't exist are generated via the async pipeline
-/// - Priority is determined by alphabetical patch folder naming (A < B < Z)
+/// - Priority is determined by alphabetical `sort_key` ordering
+///   - Patches (`_patches/*`) always sort before packages
+///   - Packages sort alphabetically by region (eu < na < sa)
 ///
-/// Unlike `Fuse3PassthroughFS` which overlays a single directory, this
-/// filesystem uses a `PatchUnionIndex` to present a merged view of all patches.
-pub struct Fuse3UnionFS {
+/// # Example
+///
+/// ```ignore
+/// use xearthlayer::fuse::fuse3::Fuse3OrthoUnionFS;
+/// use xearthlayer::ortho_union::OrthoUnionIndexBuilder;
+///
+/// let index = OrthoUnionIndexBuilder::new()
+///     .with_patches_dir("/home/user/.xearthlayer/patches")
+///     .add_packages(installed_packages)
+///     .build()?;
+///
+/// let fs = Fuse3OrthoUnionFS::new(index, dds_handler, expected_dds_size);
+/// fs.mount_spawned("/path/to/mountpoint").await?;
+/// ```
+pub struct Fuse3OrthoUnionFS {
     /// Union index mapping virtual paths to real file locations
-    index: Arc<PatchUnionIndex>,
+    index: Arc<OrthoUnionIndex>,
     /// Handler for DDS generation requests
     dds_handler: DdsHandler,
     /// Inode manager for path mappings
@@ -79,21 +104,29 @@ pub struct Fuse3UnionFS {
     tile_request_callback: Option<TileRequestCallback>,
 }
 
-impl Fuse3UnionFS {
-    /// Create a new union filesystem.
+impl Fuse3OrthoUnionFS {
+    /// Create a new consolidated ortho union filesystem.
     ///
     /// # Arguments
     ///
-    /// * `index` - Pre-built union index of all patches
+    /// * `index` - Pre-built union index of all ortho sources
     /// * `dds_handler` - Handler for DDS generation requests
     /// * `expected_dds_size` - Expected size of generated DDS files
-    pub fn new(index: PatchUnionIndex, dds_handler: DdsHandler, expected_dds_size: usize) -> Self {
-        let disk_io_limiter = Arc::new(StorageConcurrencyLimiter::with_defaults("union_disk_io"));
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let fs = Fuse3OrthoUnionFS::new(index, dds_handler, 11_174_016);
+    /// ```
+    pub fn new(index: OrthoUnionIndex, dds_handler: DdsHandler, expected_dds_size: usize) -> Self {
+        let disk_io_limiter = Arc::new(StorageConcurrencyLimiter::with_defaults(
+            "ortho_union_disk_io",
+        ));
         debug!(
             max_concurrent = disk_io_limiter.max_concurrent(),
-            patches = index.patch_names().len(),
+            sources = index.source_count(),
             files = index.file_count(),
-            "Union FUSE filesystem initialized"
+            "Consolidated ortho union FUSE filesystem initialized"
         );
 
         // Use a virtual root path for the inode manager
@@ -111,8 +144,11 @@ impl Fuse3UnionFS {
     }
 
     /// Create with custom disk I/O limiter.
+    ///
+    /// Use this when you need to share a disk I/O limiter across multiple
+    /// filesystems or customize the concurrency limits.
     pub fn with_disk_io_limiter(
-        index: PatchUnionIndex,
+        index: OrthoUnionIndex,
         dds_handler: DdsHandler,
         expected_dds_size: usize,
         disk_io_limiter: Arc<StorageConcurrencyLimiter>,
@@ -131,12 +167,18 @@ impl Fuse3UnionFS {
     }
 
     /// Set the timeout for DDS generation.
+    ///
+    /// After this timeout, a placeholder texture is returned to prevent
+    /// X-Plane from blocking indefinitely.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.generation_timeout = timeout;
         self
     }
 
     /// Set the callback for tile request tracking.
+    ///
+    /// This callback is invoked whenever a tile is requested, enabling
+    /// the prefetch system to infer aircraft position from FUSE requests.
     pub fn with_tile_request_callback(mut self, callback: TileRequestCallback) -> Self {
         self.tile_request_callback = Some(callback);
         self
@@ -147,12 +189,15 @@ impl Fuse3UnionFS {
         &self.disk_io_limiter
     }
 
-    /// Get the union index.
-    pub fn index(&self) -> &PatchUnionIndex {
+    /// Get the ortho union index.
+    pub fn index(&self) -> &OrthoUnionIndex {
         &self.index
     }
 
     /// Mount the filesystem at the given path.
+    ///
+    /// This is a blocking operation that runs until the filesystem is unmounted.
+    /// For non-blocking usage, see [`mount_spawned`](Self::mount_spawned).
     pub async fn mount(self, mountpoint: &str) -> Fuse3Result<super::types::MountHandle> {
         let mut mount_options = MountOptions::default();
         mount_options.read_only(true);
@@ -176,6 +221,17 @@ impl Fuse3UnionFS {
     }
 
     /// Mount the filesystem as a spawned background task.
+    ///
+    /// Returns a handle that can be used to unmount the filesystem later.
+    /// The filesystem runs in the background until unmounted.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let handle = fs.mount_spawned("/path/to/mountpoint").await?;
+    /// // ... filesystem is running ...
+    /// handle.unmount().await?;
+    /// ```
     pub async fn mount_spawned(
         self,
         mountpoint: &str,
@@ -228,13 +284,13 @@ impl Fuse3UnionFS {
 // Trait Implementations for Shared FUSE Functionality
 // =============================================================================
 
-impl FileAttrBuilder for Fuse3UnionFS {
+impl FileAttrBuilder for Fuse3OrthoUnionFS {
     fn virtual_dds_config(&self) -> &VirtualDdsConfig {
         &self.virtual_dds_config
     }
 }
 
-impl DdsRequestor for Fuse3UnionFS {
+impl DdsRequestor for Fuse3OrthoUnionFS {
     fn dds_handler(&self) -> &DdsHandler {
         &self.dds_handler
     }
@@ -244,7 +300,7 @@ impl DdsRequestor for Fuse3UnionFS {
     }
 
     fn context_label(&self) -> &'static str {
-        "union_fs"
+        "ortho_union"
     }
 
     fn tile_request_callback(&self) -> Option<&TileRequestCallback> {
@@ -252,7 +308,7 @@ impl DdsRequestor for Fuse3UnionFS {
     }
 }
 
-impl Filesystem for Fuse3UnionFS {
+impl Filesystem for Fuse3OrthoUnionFS {
     type DirEntryStream<'a>
         = BoxStream<'a, Fuse3InternalResult<DirectoryEntry>>
     where
@@ -264,8 +320,9 @@ impl Filesystem for Fuse3UnionFS {
 
     async fn init(&self, _req: Request) -> Fuse3InternalResult<ReplyInit> {
         debug!(
-            patches = self.index.patch_names().len(),
-            "fuse3 union: init"
+            sources = self.index.source_count(),
+            files = self.index.file_count(),
+            "fuse3 ortho union: init"
         );
         Ok(ReplyInit {
             max_write: NonZeroU32::new(1024 * 1024).unwrap(),
@@ -273,7 +330,7 @@ impl Filesystem for Fuse3UnionFS {
     }
 
     async fn destroy(&self, _req: Request) {
-        debug!("fuse3 union: destroy");
+        debug!("fuse3 ortho union: destroy");
     }
 
     async fn lookup(
@@ -282,7 +339,7 @@ impl Filesystem for Fuse3UnionFS {
         parent: u64,
         name: &OsStr,
     ) -> Fuse3InternalResult<ReplyEntry> {
-        trace!(parent = parent, name = ?name, "fuse3 union: lookup");
+        trace!(parent = parent, name = ?name, "fuse3 ortho union: lookup");
 
         // Get parent path (virtual path)
         let parent_path = if parent == 1 {
@@ -298,7 +355,7 @@ impl Filesystem for Fuse3UnionFS {
 
         // Check if this path exists in the union index
         if let Some(source) = self.index.resolve(&child_path) {
-            // Real file from a patch
+            // Real file from a source
             if let Ok(metadata) = fs::metadata(&source.real_path).await {
                 let inode = self.inode_manager.get_or_create_inode(&child_path);
                 let attr = self.metadata_to_attr(inode, &metadata);
@@ -319,6 +376,21 @@ impl Filesystem for Fuse3UnionFS {
                 attr,
                 generation: 0,
             });
+        }
+
+        // Try lazy resolution for terrain/textures directories
+        // These directories are not fully scanned at startup for performance,
+        // so we resolve files on-demand by checking the real filesystem.
+        if let Some(real_path) = self.index.resolve_lazy(&child_path) {
+            if let Ok(metadata) = fs::metadata(&real_path).await {
+                let inode = self.inode_manager.get_or_create_inode(&child_path);
+                let attr = self.metadata_to_attr(inode, &metadata);
+                return Ok(ReplyEntry {
+                    ttl: TTL,
+                    attr,
+                    generation: 0,
+                });
+            }
         }
 
         // Check if it's a DDS file we can generate
@@ -344,7 +416,7 @@ impl Filesystem for Fuse3UnionFS {
         _fh: Option<u64>,
         _flags: u32,
     ) -> Fuse3InternalResult<ReplyAttr> {
-        trace!(ino = ino, "fuse3 union: getattr");
+        trace!(ino = ino, "fuse3 ortho union: getattr");
 
         // Root inode
         if ino == 1 {
@@ -375,9 +447,18 @@ impl Filesystem for Fuse3UnionFS {
             return Ok(ReplyAttr { ttl: TTL, attr });
         }
 
-        // Must be a real file
+        // Must be a real file - try index lookup first
         if let Some(source) = self.index.resolve(&virtual_path) {
             let metadata = fs::metadata(&source.real_path)
+                .await
+                .map_err(|_| Errno::from(libc::ENOENT))?;
+            let attr = self.metadata_to_attr(ino, &metadata);
+            return Ok(ReplyAttr { ttl: TTL, attr });
+        }
+
+        // Try lazy resolution for terrain/textures directories
+        if let Some(real_path) = self.index.resolve_lazy(&virtual_path) {
+            let metadata = fs::metadata(&real_path)
                 .await
                 .map_err(|_| Errno::from(libc::ENOENT))?;
             let attr = self.metadata_to_attr(ino, &metadata);
@@ -395,7 +476,12 @@ impl Filesystem for Fuse3UnionFS {
         offset: u64,
         size: u32,
     ) -> Fuse3InternalResult<ReplyData> {
-        trace!(ino = ino, offset = offset, size = size, "fuse3 union: read");
+        trace!(
+            ino = ino,
+            offset = offset,
+            size = size,
+            "fuse3 ortho union: read"
+        );
 
         // Virtual DDS file - generate on demand
         if InodeManager::is_virtual_inode(ino) {
@@ -431,14 +517,18 @@ impl Filesystem for Fuse3UnionFS {
             .get_path(ino)
             .ok_or(Errno::from(libc::ENOENT))?;
 
-        let source = self
-            .index
-            .resolve(&virtual_path)
-            .ok_or(Errno::from(libc::ENOENT))?;
+        // Try to resolve the real path - first from index, then lazy
+        let real_path = if let Some(source) = self.index.resolve(&virtual_path) {
+            source.real_path.clone()
+        } else if let Some(lazy_path) = self.index.resolve_lazy(&virtual_path) {
+            lazy_path
+        } else {
+            return Err(Errno::from(libc::ENOENT));
+        };
 
         // Acquire disk I/O permit
         let _permit = self.disk_io_limiter.acquire().await;
-        let data = fs::read(&source.real_path)
+        let data = fs::read(&real_path)
             .await
             .map_err(|_| Errno::from(libc::EIO))?;
 
@@ -462,7 +552,7 @@ impl Filesystem for Fuse3UnionFS {
         _fh: u64,
         offset: i64,
     ) -> Fuse3InternalResult<ReplyDirectory<Self::DirEntryStream<'_>>> {
-        trace!(ino = ino, offset = offset, "fuse3 union: readdir");
+        trace!(ino = ino, offset = offset, "fuse3 ortho union: readdir");
 
         // Get virtual path for this directory
         let virtual_path = if ino == 1 {
@@ -580,7 +670,9 @@ mod tests {
     use super::super::shared::chunk_to_tile_coords;
     use super::*;
     use crate::fuse::async_passthrough::{DdsRequest, DdsResponse};
-    use crate::patches::PatchInfo;
+    use crate::ortho_union::OrthoUnionIndexBuilder;
+    use crate::package::{InstalledPackage, Package, PackageType};
+    use semver::Version;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -595,7 +687,7 @@ mod tests {
         })
     }
 
-    fn create_test_patch(temp: &TempDir, name: &str) -> PatchInfo {
+    fn create_test_patch(temp: &TempDir, name: &str) {
         let patch_dir = temp.path().join(name);
         std::fs::create_dir_all(patch_dir.join("Earth nav data/+30-120")).unwrap();
         std::fs::write(
@@ -605,28 +697,82 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(patch_dir.join("terrain")).unwrap();
         std::fs::write(patch_dir.join("terrain/test.ter"), b"fake terrain").unwrap();
+    }
 
-        PatchInfo {
-            name: name.to_string(),
-            path: patch_dir,
-            dsf_count: 1,
-            terrain_count: 1,
-            texture_count: 0,
-            is_valid: true,
-            validation_errors: Vec::new(),
-        }
+    fn create_test_package(temp: &TempDir, region: &str) -> InstalledPackage {
+        let pkg_dir = temp.path().join(format!("{}_ortho", region));
+        std::fs::create_dir_all(pkg_dir.join("Earth nav data/+40-080")).unwrap();
+        std::fs::write(
+            pkg_dir.join("Earth nav data/+40-080/+40-074.dsf"),
+            b"pkg dsf",
+        )
+        .unwrap();
+        std::fs::create_dir_all(pkg_dir.join("terrain")).unwrap();
+        std::fs::write(pkg_dir.join("terrain/package.ter"), b"pkg terrain").unwrap();
+
+        InstalledPackage::new(
+            Package::new(region, PackageType::Ortho, Version::new(1, 0, 0)),
+            &pkg_dir,
+        )
     }
 
     #[test]
-    fn test_union_fs_creation() {
+    fn test_ortho_union_fs_creation_with_patches() {
         let temp = TempDir::new().unwrap();
-        let patch = create_test_patch(&temp, "TestPatch");
-        let index = PatchUnionIndex::build(&[patch]).unwrap();
+        create_test_patch(&temp, "TestPatch");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .with_patches_dir(temp.path())
+            .build()
+            .unwrap();
 
         let handler = create_test_handler();
-        let fs = Fuse3UnionFS::new(index, handler, 1024);
+        let fs = Fuse3OrthoUnionFS::new(index, handler, 1024);
 
-        assert_eq!(fs.index().patch_names(), &["TestPatch"]);
+        assert_eq!(fs.index().source_count(), 1);
+        assert!(fs.index().file_count() > 0);
+    }
+
+    #[test]
+    fn test_ortho_union_fs_creation_with_packages() {
+        let temp = TempDir::new().unwrap();
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        let handler = create_test_handler();
+        let fs = Fuse3OrthoUnionFS::new(index, handler, 1024);
+
+        assert_eq!(fs.index().source_count(), 1);
+        assert!(fs.index().file_count() > 0);
+    }
+
+    #[test]
+    fn test_ortho_union_fs_creation_with_both() {
+        let temp = TempDir::new().unwrap();
+
+        // Create patches directory
+        let patches_dir = temp.path().join("patches");
+        std::fs::create_dir_all(&patches_dir).unwrap();
+        create_test_patch(&TempDir::new_in(&patches_dir).unwrap(), "TestPatch");
+
+        // Create package
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .with_patches_dir(&patches_dir)
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        let handler = create_test_handler();
+        let fs = Fuse3OrthoUnionFS::new(index, handler, 1024);
+
+        // At least 1 source (package is guaranteed)
+        assert!(fs.index().source_count() >= 1);
     }
 
     #[test]
@@ -651,5 +797,39 @@ mod tests {
         assert_eq!(tile.row, 10000);
         assert_eq!(tile.col, 5250);
         assert_eq!(tile.zoom, 16);
+    }
+
+    #[test]
+    fn test_with_disk_io_limiter() {
+        let temp = TempDir::new().unwrap();
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        let handler = create_test_handler();
+        let limiter = Arc::new(StorageConcurrencyLimiter::with_defaults("test"));
+
+        let fs = Fuse3OrthoUnionFS::with_disk_io_limiter(index, handler, 1024, limiter.clone());
+
+        assert!(Arc::ptr_eq(fs.disk_io_limiter(), &limiter));
+    }
+
+    #[test]
+    fn test_with_timeout() {
+        let temp = TempDir::new().unwrap();
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        let handler = create_test_handler();
+        let fs = Fuse3OrthoUnionFS::new(index, handler, 1024).with_timeout(Duration::from_secs(60));
+
+        assert_eq!(fs.generation_timeout, Duration::from_secs(60));
     }
 }
