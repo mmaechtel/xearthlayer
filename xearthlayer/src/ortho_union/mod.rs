@@ -62,9 +62,17 @@
 //! ```
 
 mod builder;
+mod cache;
 mod index;
+mod parallel;
+mod progress;
 mod source;
 
 pub use builder::OrthoUnionIndexBuilder;
+pub use cache::{
+    default_cache_path, save_index_cache, try_load_cached_index, IndexCache, IndexCacheKey,
+};
 pub use index::{DirEntry, FileSource, OrthoUnionIndex};
+pub use parallel::{merge_partial_indexes, scan_sources_parallel, PartialIndex};
+pub use progress::{IndexBuildPhase, IndexBuildProgress, IndexBuildProgressCallback};
 pub use source::{OrthoSource, SourceType};

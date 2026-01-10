@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::cache::MemoryCache;
 use crate::fuse::fuse3::{Fuse3OrthoUnionFS, Fuse3UnionFS};
 use crate::fuse::SpawnedMountHandle;
-use crate::ortho_union::OrthoUnionIndexBuilder;
+use crate::ortho_union::{default_cache_path, IndexBuildProgressCallback, OrthoUnionIndexBuilder};
 use crate::package::{
     InstalledPackage as PackageInstalledPackage, Package as PackageCore, PackageType,
 };
@@ -687,6 +687,28 @@ impl MountManager {
         store: &LocalPackageStore,
         service_builder: &ServiceBuilder,
     ) -> ConsolidatedOrthoMountResult {
+        self.mount_consolidated_ortho_with_progress(patches_dir, store, service_builder, None)
+    }
+
+    /// Mount consolidated ortho with progress callback.
+    ///
+    /// This variant allows tracking the index building progress for UI feedback.
+    /// The progress callback is called during index building with updates about
+    /// the current phase, sources being scanned, and files indexed.
+    ///
+    /// # Arguments
+    ///
+    /// * `patches_dir` - Path to patches directory
+    /// * `store` - Local package store
+    /// * `service_builder` - Service builder for FUSE mount
+    /// * `progress` - Optional callback for progress updates
+    pub fn mount_consolidated_ortho_with_progress(
+        &mut self,
+        patches_dir: &std::path::Path,
+        store: &LocalPackageStore,
+        service_builder: &ServiceBuilder,
+        progress: Option<IndexBuildProgressCallback>,
+    ) -> ConsolidatedOrthoMountResult {
         // Skip if already mounted
         if self.consolidated_session.is_some() {
             return ConsolidatedOrthoMountResult::failure(
@@ -758,8 +780,9 @@ impl MountManager {
             return ConsolidatedOrthoMountResult::no_sources();
         }
 
-        // Build the index
-        let index = match builder.build() {
+        // Build the index with optional progress reporting and caching
+        let cache_path = default_cache_path();
+        let index = match builder.build_with_progress(progress, cache_path.as_deref()) {
             Ok(i) => i,
             Err(e) => {
                 return ConsolidatedOrthoMountResult::failure(

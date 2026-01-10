@@ -537,6 +537,21 @@ impl Filesystem for Fuse3OrthoUnionFS {
             });
         }
 
+        // Try lazy resolution for terrain/textures directories
+        // These directories are not fully scanned at startup for performance,
+        // so we resolve files on-demand by checking the real filesystem.
+        if let Some(real_path) = self.index.resolve_lazy(&child_path) {
+            if let Ok(metadata) = fs::metadata(&real_path).await {
+                let inode = self.inode_manager.get_or_create_inode(&child_path);
+                let attr = self.metadata_to_attr(inode, &metadata);
+                return Ok(ReplyEntry {
+                    ttl: TTL,
+                    attr,
+                    generation: 0,
+                });
+            }
+        }
+
         // Check if it's a DDS file we can generate
         if name_str.ends_with(".dds") {
             if let Ok(coords) = parse_dds_filename(&name_str) {
@@ -591,9 +606,18 @@ impl Filesystem for Fuse3OrthoUnionFS {
             return Ok(ReplyAttr { ttl: TTL, attr });
         }
 
-        // Must be a real file
+        // Must be a real file - try index lookup first
         if let Some(source) = self.index.resolve(&virtual_path) {
             let metadata = fs::metadata(&source.real_path)
+                .await
+                .map_err(|_| Errno::from(libc::ENOENT))?;
+            let attr = self.metadata_to_attr(ino, &metadata);
+            return Ok(ReplyAttr { ttl: TTL, attr });
+        }
+
+        // Try lazy resolution for terrain/textures directories
+        if let Some(real_path) = self.index.resolve_lazy(&virtual_path) {
+            let metadata = fs::metadata(&real_path)
                 .await
                 .map_err(|_| Errno::from(libc::ENOENT))?;
             let attr = self.metadata_to_attr(ino, &metadata);
@@ -625,8 +649,8 @@ impl Filesystem for Fuse3OrthoUnionFS {
                 .get_virtual_dds(ino)
                 .ok_or(Errno::from(libc::ENOENT))?;
 
-            // Build filename for request_dds
-            let filename = format!("{}_{}_{}18.dds", coords.row, coords.col, coords.map_type);
+            // Build filename for request_dds (use Display impl which includes correct zoom)
+            let filename = format!("{}.dds", coords);
 
             let data = self
                 .request_dds(&filename)
@@ -652,14 +676,18 @@ impl Filesystem for Fuse3OrthoUnionFS {
             .get_path(ino)
             .ok_or(Errno::from(libc::ENOENT))?;
 
-        let source = self
-            .index
-            .resolve(&virtual_path)
-            .ok_or(Errno::from(libc::ENOENT))?;
+        // Try to resolve the real path - first from index, then lazy
+        let real_path = if let Some(source) = self.index.resolve(&virtual_path) {
+            source.real_path.clone()
+        } else if let Some(lazy_path) = self.index.resolve_lazy(&virtual_path) {
+            lazy_path
+        } else {
+            return Err(Errno::from(libc::ENOENT));
+        };
 
         // Acquire disk I/O permit
         let _permit = self.disk_io_limiter.acquire().await;
-        let data = fs::read(&source.real_path)
+        let data = fs::read(&real_path)
             .await
             .map_err(|_| Errno::from(libc::EIO))?;
 

@@ -5,12 +5,15 @@
 //! - `build()` performs validation and construction
 //! - Result is immutable after construction
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::package::{InstalledPackage, PackageType};
 use crate::patches::PatchDiscovery;
 
+use super::cache::{save_index_cache, try_load_cached_index, IndexCacheKey};
 use super::index::OrthoUnionIndex;
+use super::parallel::{merge_partial_indexes, scan_sources_parallel};
+use super::progress::{IndexBuildPhase, IndexBuildProgress, IndexBuildProgressCallback};
 use super::source::OrthoSource;
 
 /// Builder for constructing an [`OrthoUnionIndex`].
@@ -155,6 +158,165 @@ impl OrthoUnionIndexBuilder {
     /// assert!(index.is_empty()); // No sources configured
     /// ```
     pub fn build(self) -> std::io::Result<OrthoUnionIndex> {
+        self.build_with_progress(None, None)
+    }
+
+    /// Build the [`OrthoUnionIndex`] with progress reporting and caching.
+    ///
+    /// This is the optimized version that:
+    /// 1. Checks for a valid cached index (if `cache_path` is provided)
+    /// 2. Scans sources in parallel using rayon
+    /// 3. Skips terrain/textures directories (handled lazily at runtime)
+    /// 4. Reports progress via callback for TUI feedback
+    /// 5. Saves the result to cache for future use
+    ///
+    /// # Arguments
+    ///
+    /// * `progress` - Optional callback for progress updates
+    /// * `cache_path` - Optional path to store/load the index cache
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use xearthlayer::ortho_union::{OrthoUnionIndexBuilder, IndexBuildProgress};
+    ///
+    /// let progress = Arc::new(|p: IndexBuildProgress| {
+    ///     println!("{:?}: {}/{}", p.phase, p.sources_complete, p.sources_total);
+    /// });
+    ///
+    /// let index = OrthoUnionIndexBuilder::new()
+    ///     .add_packages(installed_packages)
+    ///     .build_with_progress(Some(progress), Some(cache_path.as_ref()))?;
+    /// ```
+    pub fn build_with_progress(
+        self,
+        progress: Option<IndexBuildProgressCallback>,
+        cache_path: Option<&Path>,
+    ) -> std::io::Result<OrthoUnionIndex> {
+        // Phase 1: Discover sources
+        if let Some(ref cb) = progress {
+            cb(IndexBuildProgress {
+                phase: IndexBuildPhase::Discovering,
+                current_source: None,
+                sources_complete: 0,
+                sources_total: 0,
+                files_scanned: 0,
+                directories_scanned: 0,
+                using_cache: false,
+            });
+        }
+
+        let sources = self.discover_sources()?;
+
+        // If no sources, return empty index
+        if sources.is_empty() {
+            if let Some(ref cb) = progress {
+                cb(IndexBuildProgress {
+                    phase: IndexBuildPhase::Complete,
+                    current_source: None,
+                    sources_complete: 0,
+                    sources_total: 0,
+                    files_scanned: 0,
+                    directories_scanned: 0,
+                    using_cache: false,
+                });
+            }
+            return Ok(OrthoUnionIndex::with_sources(sources));
+        }
+
+        // Phase 2: Check cache
+        let cache_key = IndexCacheKey::from_sources(&sources);
+
+        if let Some(cache_path) = cache_path {
+            if let Some(ref cb) = progress {
+                cb(IndexBuildProgress {
+                    phase: IndexBuildPhase::CheckingCache,
+                    current_source: None,
+                    sources_complete: 0,
+                    sources_total: sources.len(),
+                    files_scanned: 0,
+                    directories_scanned: 0,
+                    using_cache: false,
+                });
+            }
+
+            if let Some(cached_index) = try_load_cached_index(cache_path, &cache_key) {
+                tracing::info!(
+                    sources = sources.len(),
+                    files = cached_index.file_count(),
+                    "Loaded index from cache"
+                );
+
+                if let Some(ref cb) = progress {
+                    cb(IndexBuildProgress {
+                        phase: IndexBuildPhase::Complete,
+                        current_source: None,
+                        sources_complete: sources.len(),
+                        sources_total: sources.len(),
+                        files_scanned: cached_index.file_count(),
+                        directories_scanned: 0,
+                        using_cache: true,
+                    });
+                }
+
+                return Ok(cached_index);
+            }
+        }
+
+        // Phase 3: Parallel scan
+        tracing::info!(sources = sources.len(), "Scanning sources in parallel");
+
+        let partial_indexes = scan_sources_parallel(&sources, progress.as_ref());
+
+        // Phase 4: Merge results
+        let index = merge_partial_indexes(partial_indexes, sources, progress.as_ref());
+
+        tracing::info!(
+            files = index.file_count(),
+            sources = index.source_count(),
+            "Index built successfully"
+        );
+
+        // Phase 5: Save to cache
+        if let Some(cache_path) = cache_path {
+            if let Some(ref cb) = progress {
+                cb(IndexBuildProgress {
+                    phase: IndexBuildPhase::SavingCache,
+                    current_source: None,
+                    sources_complete: index.source_count(),
+                    sources_total: index.source_count(),
+                    files_scanned: index.file_count(),
+                    directories_scanned: 0,
+                    using_cache: false,
+                });
+            }
+
+            if let Err(e) = save_index_cache(cache_path, cache_key, &index) {
+                tracing::warn!(error = %e, "Failed to save index cache");
+            } else {
+                tracing::debug!(path = %cache_path.display(), "Saved index to cache");
+            }
+        }
+
+        // Phase 6: Complete
+        if let Some(ref cb) = progress {
+            cb(IndexBuildProgress {
+                phase: IndexBuildPhase::Complete,
+                current_source: None,
+                sources_complete: index.source_count(),
+                sources_total: index.source_count(),
+                files_scanned: index.file_count(),
+                directories_scanned: 0,
+                using_cache: false,
+            });
+        }
+
+        Ok(index)
+    }
+
+    /// Discover all sources (patches and packages) and return them sorted.
+    fn discover_sources(&self) -> std::io::Result<Vec<OrthoSource>> {
         let mut sources = Vec::new();
 
         // 1. Discover patches
@@ -168,9 +330,8 @@ impl OrthoUnionIndexBuilder {
             }
         }
 
-        // 2. Filter and add packages
-        for pkg in self.packages {
-            // Only include enabled ortho packages
+        // 2. Filter and add packages (only enabled ortho packages)
+        for pkg in &self.packages {
             if pkg.enabled && pkg.package_type == PackageType::Ortho {
                 sources.push(OrthoSource::new_package(&pkg.region, &pkg.path));
             }
@@ -179,18 +340,10 @@ impl OrthoUnionIndexBuilder {
         // 3. Sort sources alphabetically by sort_key
         sources.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
 
-        // 4. Build the index
-        let mut index = OrthoUnionIndex::with_sources(sources);
+        // 4. Filter to existing paths only
+        sources.retain(|s| s.source_path.exists());
 
-        // 5. Scan each source directory
-        for idx in 0..index.source_count() {
-            // Skip sources that don't exist on disk
-            if index.sources()[idx].source_path.exists() {
-                index.add_source(idx)?;
-            }
-        }
-
-        Ok(index)
+        Ok(sources)
     }
 }
 

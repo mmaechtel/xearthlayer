@@ -36,8 +36,8 @@ use crate::ui::widgets::{CacheConfig, NetworkHistory, PipelineHistory};
 
 // Re-export public types from state module
 pub use state::{
-    DashboardConfig, DashboardEvent, DashboardState, JobRates, LoadingProgress, PrewarmProgress,
-    QUIT_CONFIRM_TIMEOUT, SPINNER_FRAMES,
+    DashboardConfig, DashboardEvent, DashboardState, JobRates, LoadingPhase, LoadingProgress,
+    PrewarmProgress, QUIT_CONFIRM_TIMEOUT, SPINNER_FRAMES,
 };
 
 // Re-export utility functions

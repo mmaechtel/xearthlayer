@@ -42,6 +42,47 @@ pub struct LoadingProgress {
     pub tiles_indexed: usize,
     /// When loading started.
     pub start_time: Instant,
+    /// Current loading phase (for display).
+    pub phase: LoadingPhase,
+    /// Whether using a cached index.
+    pub using_cache: bool,
+}
+
+/// Phase of the loading process.
+///
+/// These variants are used to show detailed progress during index building.
+/// Currently prepared for future TUI integration with OrthoUnionIndex progress.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)] // Infrastructure for future TUI integration
+pub enum LoadingPhase {
+    /// Discovering packages and patches.
+    #[default]
+    Discovering,
+    /// Checking if cached index is valid.
+    CheckingCache,
+    /// Scanning source directories.
+    Scanning,
+    /// Merging partial indexes.
+    Merging,
+    /// Saving index to cache.
+    SavingCache,
+    /// Loading complete.
+    Complete,
+}
+
+#[allow(dead_code)] // Infrastructure for future TUI integration
+impl LoadingPhase {
+    /// Get a human-readable description of the phase.
+    pub fn description(&self) -> &'static str {
+        match self {
+            LoadingPhase::Discovering => "Discovering packages...",
+            LoadingPhase::CheckingCache => "Checking cache...",
+            LoadingPhase::Scanning => "Scanning sources...",
+            LoadingPhase::Merging => "Merging index...",
+            LoadingPhase::SavingCache => "Saving cache...",
+            LoadingPhase::Complete => "Complete",
+        }
+    }
 }
 
 impl Default for LoadingProgress {
@@ -52,6 +93,8 @@ impl Default for LoadingProgress {
             total_packages: 0,
             tiles_indexed: 0,
             start_time: Instant::now(),
+            phase: LoadingPhase::default(),
+            using_cache: false,
         }
     }
 }
@@ -65,6 +108,8 @@ impl LoadingProgress {
             total_packages,
             tiles_indexed: 0,
             start_time: Instant::now(),
+            phase: LoadingPhase::Discovering,
+            using_cache: false,
         }
     }
 
@@ -91,6 +136,31 @@ impl LoadingProgress {
         } else {
             self.packages_scanned as f64 / self.total_packages as f64
         }
+    }
+
+    /// Update the loading phase.
+    #[allow(dead_code)] // Infrastructure for future TUI integration
+    pub fn set_phase(&mut self, phase: LoadingPhase) {
+        self.phase = phase;
+    }
+
+    /// Update progress from index building.
+    #[allow(dead_code)] // Infrastructure for future TUI integration
+    pub fn update(
+        &mut self,
+        phase: LoadingPhase,
+        current_source: Option<&str>,
+        sources_complete: usize,
+        sources_total: usize,
+        files_scanned: usize,
+        using_cache: bool,
+    ) {
+        self.phase = phase;
+        self.current_package = current_source.unwrap_or_default().to_string();
+        self.packages_scanned = sources_complete;
+        self.total_packages = sources_total;
+        self.tiles_indexed = files_scanned;
+        self.using_cache = using_cache;
     }
 }
 

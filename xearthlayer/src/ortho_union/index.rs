@@ -9,12 +9,18 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use super::source::OrthoSource;
 
 /// A directory entry in the union filesystem.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirEntry {
-    /// File or directory name.
+    /// File or directory name (stored as String for serialization).
+    #[serde(
+        serialize_with = "serialize_os_string",
+        deserialize_with = "deserialize_os_string"
+    )]
     pub name: OsString,
 
     /// Whether this is a directory.
@@ -23,8 +29,46 @@ pub struct DirEntry {
     /// File size (0 for directories).
     pub size: u64,
 
-    /// Modification time.
+    /// Modification time (stored as secs since UNIX_EPOCH for serialization).
+    #[serde(
+        serialize_with = "serialize_system_time",
+        deserialize_with = "deserialize_system_time"
+    )]
     pub mtime: SystemTime,
+}
+
+fn serialize_os_string<S>(os: &OsString, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    s.serialize_str(&os.to_string_lossy())
+}
+
+fn deserialize_os_string<'de, D>(d: D) -> Result<OsString, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(d)?;
+    Ok(OsString::from(s))
+}
+
+fn serialize_system_time<S>(time: &SystemTime, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let secs = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    s.serialize_u64(secs)
+}
+
+fn deserialize_system_time<'de, D>(d: D) -> Result<SystemTime, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let secs: u64 = Deserialize::deserialize(d)?;
+    Ok(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 
 impl DirEntry {
@@ -56,7 +100,7 @@ impl DirEntry {
 }
 
 /// Source information for a file in the union index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSource {
     /// Index into `OrthoUnionIndex.sources`.
     pub source_idx: usize,
@@ -104,7 +148,7 @@ impl FileSource {
 ///     // ...
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrthoUnionIndex {
     /// All sources in priority order (sorted by sort_key).
     sources: Vec<OrthoSource>,
@@ -152,13 +196,16 @@ impl OrthoUnionIndex {
     /// Scans the source path and adds all files to the index.
     /// Existing entries are not overwritten (first source wins).
     ///
-    /// Used internally by the builder.
+    /// Note: This is the sequential scanning method used by tests.
+    /// For production, use `build_with_progress()` which does parallel scanning.
+    #[allow(dead_code)]
     pub(crate) fn add_source(&mut self, source_idx: usize) -> std::io::Result<()> {
         let source_path = self.sources[source_idx].source_path.clone();
         self.add_directory_recursive(source_idx, &source_path, &PathBuf::new())
     }
 
     /// Recursively add a directory and its contents to the index.
+    #[allow(dead_code)]
     fn add_directory_recursive(
         &mut self,
         source_idx: usize,
@@ -222,6 +269,72 @@ impl OrthoUnionIndex {
         self.resolve(virtual_path).map(|s| &s.real_path)
     }
 
+    /// Directories that are lazily resolved (not fully scanned at startup).
+    ///
+    /// These directories can contain millions of files (terrain, textures),
+    /// so we skip scanning them during index building. Instead, we resolve
+    /// files inside them on-demand by checking the real filesystem.
+    const LAZY_DIRECTORIES: &'static [&'static str] = &["terrain", "textures"];
+
+    /// Resolve a virtual path that may be inside a lazy directory.
+    ///
+    /// Lazy directories (`terrain/`, `textures/`) are not fully scanned at
+    /// startup to speed up index building. This method handles resolution
+    /// of files inside those directories by:
+    ///
+    /// 1. Checking if the path starts with a lazy directory prefix
+    /// 2. Searching ALL sources for the file (not just the first one)
+    /// 3. Checking if the file exists in the real filesystem
+    ///
+    /// This iterates through all sources in priority order because with
+    /// multiple packages (na, eu, sa), each has its own terrain/textures
+    /// directory with different files.
+    ///
+    /// Returns the real filesystem path if found, `None` otherwise.
+    pub fn resolve_lazy(&self, virtual_path: &Path) -> Option<PathBuf> {
+        // First try the normal index lookup
+        if let Some(source) = self.resolve(virtual_path) {
+            return Some(source.real_path.clone());
+        }
+
+        // Check if this path is inside a lazy directory
+        let mut components = virtual_path.components();
+        let first_component = components.next()?;
+        let first_str = first_component.as_os_str().to_string_lossy();
+
+        if !Self::LAZY_DIRECTORIES.contains(&first_str.as_ref()) {
+            // Not a lazy directory path
+            return None;
+        }
+
+        // Get the remaining path after the lazy directory (e.g., "18720_5056_BI16_sea.ter")
+        let remaining: PathBuf = components.collect();
+
+        // Search ALL sources for this file, since each package may have
+        // its own terrain/textures directory with different files
+        for source in &self.sources {
+            // Construct the real path: source_path/terrain/<remaining>
+            let real_path = source.source_path.join(&*first_str).join(&remaining);
+
+            if real_path.exists() {
+                return Some(real_path);
+            }
+        }
+
+        None
+    }
+
+    /// Check if a virtual path exists, including lazy directories.
+    ///
+    /// This is similar to `contains()` but also checks lazy directories
+    /// by probing the real filesystem.
+    pub fn exists_lazy(&self, virtual_path: &Path) -> bool {
+        if self.contains(virtual_path) || self.is_directory(virtual_path) {
+            return true;
+        }
+        self.resolve_lazy(virtual_path).is_some()
+    }
+
     /// Check if a virtual path exists in the index.
     pub fn contains(&self, virtual_path: &Path) -> bool {
         self.files.contains_key(virtual_path)
@@ -281,6 +394,21 @@ impl OrthoUnionIndex {
     /// Iterate over all files in the index.
     pub fn files(&self) -> impl Iterator<Item = (&PathBuf, &FileSource)> {
         self.files.iter()
+    }
+
+    /// Set the files map (used by parallel merge).
+    pub(crate) fn set_files(&mut self, files: HashMap<PathBuf, FileSource>) {
+        self.files = files;
+    }
+
+    /// Set the directories map (used by parallel merge).
+    pub(crate) fn set_directories(&mut self, directories: HashMap<PathBuf, Vec<DirEntry>>) {
+        self.directories = directories;
+    }
+
+    /// Set the total files count (used by parallel merge).
+    pub(crate) fn set_total_files(&mut self, count: usize) {
+        self.total_files = count;
     }
 }
 

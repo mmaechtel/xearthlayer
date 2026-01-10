@@ -563,8 +563,8 @@ impl Filesystem for Fuse3UnionFS {
                 .get_virtual_dds(ino)
                 .ok_or(Errno::from(libc::ENOENT))?;
 
-            // Build filename for request_dds
-            let filename = format!("{}_{}_{}18.dds", coords.row, coords.col, coords.map_type);
+            // Build filename for request_dds (use Display impl which includes correct zoom)
+            let filename = format!("{}.dds", coords);
 
             let data = self
                 .request_dds(&filename)

@@ -5,10 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// Type of ortho source.
 ///
 /// Distinguishes between user-provided patches and installed regional packages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SourceType {
     /// User-provided mesh from `~/.xearthlayer/patches/`.
     ///
@@ -73,7 +75,7 @@ impl std::fmt::Display for SourceType {
 /// // Patches sort before packages
 /// assert!(patch.sort_key < package.sort_key);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrthoSource {
     /// Sort key for priority ordering.
     ///
