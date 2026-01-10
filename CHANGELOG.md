@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.11] - 2026-01-09
+## [0.2.12] - 2026-01-10
+
+> **Note**: v0.2.11 was skipped due to a release infrastructure issue.
 
 ### Added
 
@@ -71,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade Notes
 
-**New `config.ini` settings for v0.2.11:**
+**New `config.ini` settings for v0.2.12:**
 
 ```ini
 [prefetch]
@@ -462,8 +464,8 @@ Run `xearthlayer config upgrade` to automatically add new settings with defaults
 - Linux support only (Windows and macOS planned for future releases)
 - Requires FUSE3 for filesystem mounting
 
-[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.2.11...HEAD
-[0.2.11]: https://github.com/samsoir/xearthlayer/compare/v0.2.10...v0.2.11
+[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.2.12...HEAD
+[0.2.12]: https://github.com/samsoir/xearthlayer/compare/v0.2.10...v0.2.12
 [0.2.10]: https://github.com/samsoir/xearthlayer/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/samsoir/xearthlayer/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/samsoir/xearthlayer/compare/v0.2.7...v0.2.8
