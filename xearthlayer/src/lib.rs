@@ -37,6 +37,7 @@ pub mod pipeline;
 pub mod prefetch;
 pub mod provider;
 pub mod publisher;
+pub mod runtime;
 pub mod service;
 pub mod system;
 pub mod tasks;

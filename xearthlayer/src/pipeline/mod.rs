@@ -58,7 +58,7 @@ pub mod stages;
 mod storage;
 mod storage_limiter;
 
-pub use coalesce::{CoalescerStats, RequestCoalescer};
+pub use coalesce::{CoalesceResult, CoalescedResult, CoalescerStats, RequestCoalescer};
 pub use context::{
     ChunkDownloadError, ChunkProvider, DiskCache, MemoryCache, PipelineConfig, PipelineContext,
     TextureEncodeError, TextureEncoderAsync,

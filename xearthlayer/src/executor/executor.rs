@@ -130,6 +130,14 @@ impl JobSubmitter {
     ///
     /// Returns `None` if the executor has been dropped.
     pub fn try_submit(&self, job: impl Job + 'static) -> Option<JobHandle> {
+        self.try_submit_boxed(Box::new(job))
+    }
+
+    /// Attempts to submit a boxed job for execution.
+    ///
+    /// This is useful when working with factory patterns that return `Box<dyn Job>`.
+    /// Returns `None` if the executor has been dropped.
+    pub fn try_submit_boxed(&self, job: Box<dyn Job>) -> Option<JobHandle> {
         let job_id = job.id();
         let priority = job.priority();
         let name = job.name().to_string();
@@ -141,7 +149,7 @@ impl JobSubmitter {
         let handle = JobHandle::new(job_id.clone(), status_rx, signal_tx);
 
         let submitted = SubmittedJob {
-            job: Box::new(job),
+            job,
             job_id,
             name,
             priority,

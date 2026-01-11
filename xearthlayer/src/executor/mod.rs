@@ -104,7 +104,9 @@
 //! - `kill()`: Cancel all tasks immediately
 
 // Module declarations
+mod client;
 mod context;
+mod daemon;
 #[allow(clippy::module_inception)]
 mod executor;
 mod handle;
@@ -154,4 +156,12 @@ pub use queue::{PriorityQueue, QueuedTask};
 pub use executor::{
     ExecutorConfig, JobExecutor, JobSubmitter, DEFAULT_JOB_CHANNEL_CAPACITY,
     DEFAULT_MAX_CONCURRENT_TASKS, DEFAULT_SIGNAL_CHANNEL_CAPACITY,
+};
+
+// Client (for daemon architecture)
+pub use client::{ChannelDdsClient, DdsClient, DdsClientError};
+
+// Daemon
+pub use daemon::{
+    DaemonMemoryCache, ExecutorDaemon, ExecutorDaemonConfig, DEFAULT_REQUEST_CHANNEL_CAPACITY,
 };

@@ -71,12 +71,17 @@ impl CoalescerStats {
     }
 }
 
-/// Result type for coalesced responses
+/// Result type for coalesced responses.
+///
+/// Contains the DDS data and metadata shared between coalesced requests.
 #[derive(Clone, Debug)]
-pub(crate) struct CoalescedResult {
-    pub(crate) data: Arc<Vec<u8>>,
-    pub(crate) cache_hit: bool,
-    pub(crate) duration: std::time::Duration,
+pub struct CoalescedResult {
+    /// The DDS data, wrapped in Arc for cheap cloning.
+    pub data: Arc<Vec<u8>>,
+    /// Whether this was a cache hit.
+    pub cache_hit: bool,
+    /// How long the request took.
+    pub duration: std::time::Duration,
 }
 
 impl From<CoalescedResult> for DdsResponse {
@@ -109,7 +114,7 @@ impl RequestCoalescer {
     /// in flight, meaning the caller should wait on the receiver for the result.
     ///
     /// This method is lock-free and can handle high-throughput concurrent registration.
-    pub(crate) fn register(&self, tile: TileCoord) -> CoalesceResult {
+    pub fn register(&self, tile: TileCoord) -> CoalesceResult {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
         // Use entry API for atomic check-and-insert
@@ -220,7 +225,7 @@ impl Default for RequestCoalescer {
 }
 
 /// Result of attempting to register a request.
-pub(crate) enum CoalesceResult {
+pub enum CoalesceResult {
     /// This is a new request - caller should process and call complete()
     NewRequest {
         tile: TileCoord,
