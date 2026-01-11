@@ -6,6 +6,8 @@ RUST_BACKTRACE := 1
 CARGO := cargo
 CARGO_FLAGS :=
 COVERAGE_MIN := 80
+# Match CI: treat warnings as errors for verification targets
+STRICT_RUSTFLAGS := -Dwarnings
 
 # Colors for output (using shell printf for proper escape sequence handling)
 RED := $(shell printf '\033[0;31m')
@@ -80,6 +82,11 @@ test: ## Run all tests
 	@echo "$(BLUE)Running all tests...$(NC)"
 	RUST_BACKTRACE=$(RUST_BACKTRACE) $(CARGO) test $(CARGO_FLAGS) -- --nocapture
 
+.PHONY: test-strict
+test-strict: ## Run all tests with warnings as errors (matches CI)
+	@echo "$(BLUE)Running all tests (strict mode)...$(NC)"
+	RUST_BACKTRACE=$(RUST_BACKTRACE) RUSTFLAGS="$(STRICT_RUSTFLAGS)" $(CARGO) test $(CARGO_FLAGS) -- --nocapture
+
 .PHONY: test-unit
 test-unit: ## Run unit tests only
 	@echo "$(BLUE)Running unit tests...$(NC)"
@@ -143,7 +150,7 @@ lint-fix: ## Run clippy and automatically fix issues
 	$(CARGO) clippy $(CARGO_FLAGS) --fix --allow-dirty --allow-staged
 
 .PHONY: verify
-verify: format-check lint test ## Run all verification checks (format, lint, test)
+verify: format-check lint test-strict ## Run all verification checks (format, lint, test)
 	@echo "$(GREEN)All verification checks passed!$(NC)"
 
 .PHONY: pre-commit

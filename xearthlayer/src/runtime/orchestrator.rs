@@ -230,9 +230,7 @@ mod tests {
     use super::*;
     use crate::coord::TileCoord;
     use crate::executor::{Job, JobId, Priority, Task};
-    use std::collections::HashMap;
     use std::time::Duration;
-    use tokio::sync::Mutex;
 
     /// Mock job factory for testing.
     struct MockJobFactory;
@@ -266,17 +264,8 @@ mod tests {
     }
 
     /// Mock memory cache for testing.
-    struct MockMemoryCache {
-        data: Mutex<HashMap<(u32, u32, u8), Vec<u8>>>,
-    }
-
-    impl MockMemoryCache {
-        fn new() -> Self {
-            Self {
-                data: Mutex::new(HashMap::new()),
-            }
-        }
-    }
+    /// Always returns cache miss - used for testing the runtime without real caching.
+    struct MockMemoryCache;
 
     impl DaemonMemoryCache for MockMemoryCache {
         fn get(
@@ -293,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_creation_and_shutdown() {
         let factory = Arc::new(MockJobFactory);
-        let memory_cache = Arc::new(MockMemoryCache::new());
+        let memory_cache = Arc::new(MockMemoryCache);
         let config = RuntimeConfig::default();
 
         // Use new() which creates its own coalescer
@@ -311,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_with_shared_coalescer() {
         let factory = Arc::new(MockJobFactory);
-        let memory_cache = Arc::new(MockMemoryCache::new());
+        let memory_cache = Arc::new(MockMemoryCache);
         let coalescer = Arc::new(RequestCoalescer::new());
         let config = RuntimeConfig::default();
 
@@ -327,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn test_dds_client_is_connected() {
         let factory = Arc::new(MockJobFactory);
-        let memory_cache = Arc::new(MockMemoryCache::new());
+        let memory_cache = Arc::new(MockMemoryCache);
         let config = RuntimeConfig::default();
 
         let runtime = XEarthLayerRuntime::new(factory, memory_cache, config);
