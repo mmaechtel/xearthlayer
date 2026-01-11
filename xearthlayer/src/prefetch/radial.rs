@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::coord::{to_tile_coords, TileCoord};
+use crate::executor::DdsClient;
 use crate::fuse::{DdsHandler, DdsRequest};
 use crate::pipeline::{JobId, MemoryCache};
 
@@ -123,8 +124,10 @@ pub struct RadialPrefetchStatsSnapshot {
 pub struct RadialPrefetcher<M: MemoryCache> {
     /// Memory cache for checking what's already cached.
     memory_cache: Arc<M>,
-    /// DDS handler for submitting prefetch requests.
+    /// DDS handler for submitting prefetch requests (legacy).
     dds_handler: DdsHandler,
+    /// DDS client for the new daemon architecture (preferred if set).
+    dds_client: Option<Arc<dyn DdsClient>>,
     /// Configuration.
     config: RadialPrefetchConfig,
     /// Recently-attempted tiles with timestamp (for TTL tracking).
@@ -155,6 +158,7 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
         Self {
             memory_cache,
             dds_handler,
+            dds_client: None,
             config,
             recently_attempted: HashMap::new(),
             stats: Arc::new(RadialPrefetchStats::default()),
@@ -176,6 +180,16 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
     /// and pauses prefetching when X-Plane is actively loading scenery.
     pub fn with_throttler(mut self, throttler: Arc<dyn PrefetchThrottler>) -> Self {
         self.throttler = Some(throttler);
+        self
+    }
+
+    /// Set the DDS client for the new daemon architecture.
+    ///
+    /// When set, the prefetcher will use the DdsClient for submitting
+    /// prefetch requests instead of the legacy DdsHandler callback.
+    /// This enables integration with the new channel-based daemon model.
+    pub fn with_dds_client(mut self, client: Arc<dyn DdsClient>) -> Self {
+        self.dds_client = Some(client);
         self
     }
 
@@ -334,33 +348,40 @@ impl<M: MemoryCache> RadialPrefetcher<M> {
                 }
             }
 
-            // Submit prefetch request with timeout
-            let cancellation_token = CancellationToken::new();
-            let timeout_token = cancellation_token.clone();
-
-            // Spawn timeout task to cancel the request if it takes too long
-            tokio::spawn(async move {
-                tokio::time::sleep(PREFETCH_REQUEST_TIMEOUT).await;
-                timeout_token.cancel();
-            });
-
-            let (tx, _rx) = tokio::sync::oneshot::channel();
-            let request = DdsRequest {
-                job_id: JobId::new(),
-                tile,
-                result_tx: tx,
-                cancellation_token,
-                is_prefetch: true,
-            };
-
             trace!(
                 row = tile.row,
                 col = tile.col,
                 zoom = tile.zoom,
+                using_daemon = self.dds_client.is_some(),
                 "Submitting prefetch request"
             );
 
-            (self.dds_handler)(request);
+            // Submit prefetch request via DdsClient or legacy DdsHandler
+            if let Some(ref client) = self.dds_client {
+                // New daemon architecture - fire-and-forget prefetch
+                client.prefetch(tile);
+            } else {
+                // Legacy architecture - DdsHandler callback with timeout
+                let cancellation_token = CancellationToken::new();
+                let timeout_token = cancellation_token.clone();
+
+                // Spawn timeout task to cancel the request if it takes too long
+                tokio::spawn(async move {
+                    tokio::time::sleep(PREFETCH_REQUEST_TIMEOUT).await;
+                    timeout_token.cancel();
+                });
+
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                let request = DdsRequest {
+                    job_id: JobId::new(),
+                    tile,
+                    result_tx: tx,
+                    cancellation_token,
+                    is_prefetch: true,
+                };
+
+                (self.dds_handler)(request);
+            }
             self.recently_attempted.insert(tile_key, Instant::now());
             submitted += 1;
         }

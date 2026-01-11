@@ -97,6 +97,8 @@
 //! }
 //! ```
 
+mod orchestrator;
 mod request;
 
+pub use orchestrator::{RuntimeConfig, XEarthLayerRuntime};
 pub use request::{DdsResponse, JobRequest, RequestOrigin};

@@ -21,7 +21,10 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+use std::sync::Arc;
+
 use crate::coord::TileCoord;
+use crate::executor::DdsClient;
 use crate::fuse::async_passthrough::{DdsHandler, DdsRequest};
 use crate::fuse::{get_default_placeholder, validate_dds_or_placeholder, DdsFilename};
 use crate::pipeline::JobId;
@@ -282,13 +285,29 @@ pub trait DdsRequestor: FileAttrBuilder {
     /// Get the optional tile request callback.
     fn tile_request_callback(&self) -> Option<&crate::prefetch::TileRequestCallback>;
 
+    /// Get the optional DdsClient for the new daemon architecture.
+    ///
+    /// When this returns `Some`, the new daemon-based architecture is used.
+    /// When `None` (default), the legacy `dds_handler()` callback is used.
+    ///
+    /// This allows gradual migration from the legacy architecture to the new
+    /// channel-based daemon model without breaking existing implementations.
+    fn dds_client(&self) -> Option<&Arc<dyn DdsClient>> {
+        None
+    }
+
     /// Request DDS generation from the async pipeline.
     ///
     /// This method handles the full request lifecycle:
     /// 1. Converts coordinates and notifies tile callback
-    /// 2. Submits request to DDS handler
+    /// 2. Submits request via DdsClient (new) or DdsHandler (legacy)
     /// 3. Awaits response with timeout
     /// 4. Validates DDS data before returning
+    ///
+    /// # Architecture Selection
+    ///
+    /// If `dds_client()` returns `Some`, the new daemon architecture is used.
+    /// Otherwise, the legacy `dds_handler()` callback is used.
     ///
     /// # Arguments
     ///
@@ -298,7 +317,6 @@ pub trait DdsRequestor: FileAttrBuilder {
     ///
     /// Generated DDS data, or placeholder on error/timeout
     async fn request_dds_impl(&self, coords: &DdsFilename) -> Vec<u8> {
-        let job_id = JobId::new();
         let tile = chunk_to_tile_coords(coords);
         let context_label = self.context_label();
         let timeout = self.generation_timeout();
@@ -309,7 +327,6 @@ pub trait DdsRequestor: FileAttrBuilder {
         }
 
         debug!(
-            job_id = %job_id,
             chunk_row = coords.row,
             chunk_col = coords.col,
             chunk_zoom = coords.zoom,
@@ -317,14 +334,88 @@ pub trait DdsRequestor: FileAttrBuilder {
             tile_col = tile.col,
             tile_zoom = tile.zoom,
             context = context_label,
+            using_daemon = self.dds_client().is_some(),
             "Requesting DDS generation"
         );
 
+        // Choose architecture: new daemon-based or legacy callback
+        let data = if let Some(client) = self.dds_client() {
+            // New daemon architecture via DdsClient
+            self.request_via_client(client, tile, timeout, context_label)
+                .await
+        } else {
+            // Legacy architecture via DdsHandler callback
+            self.request_via_handler(tile, timeout, context_label).await
+        };
+
+        // Critical: Validate DDS before returning to X-Plane
+        // Invalid DDS data causes X-Plane to crash
+        let validation_context =
+            format!("{}({},{},{})", context_label, tile.row, tile.col, tile.zoom);
+        validate_dds_or_placeholder(data, &validation_context)
+    }
+
+    /// Request DDS via the new DdsClient (daemon architecture).
+    async fn request_via_client(
+        &self,
+        client: &Arc<dyn DdsClient>,
+        tile: TileCoord,
+        timeout: Duration,
+        context_label: &'static str,
+    ) -> Vec<u8> {
+        let cancellation_token = CancellationToken::new();
+
+        // Submit request via DdsClient
+        let rx = client.request_dds(tile, cancellation_token.clone());
+
+        // Await response with timeout
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => {
+                debug!(
+                    tile_row = tile.row,
+                    tile_col = tile.col,
+                    tile_zoom = tile.zoom,
+                    cache_hit = response.cache_hit,
+                    duration_ms = response.duration.as_millis(),
+                    context = context_label,
+                    "DDS request completed (daemon)"
+                );
+                response.data
+            }
+            Ok(Err(_)) => {
+                // Channel closed - daemon shutdown
+                error!(
+                    context = context_label,
+                    "DDS daemon channel closed unexpectedly"
+                );
+                cancellation_token.cancel();
+                get_default_placeholder()
+            }
+            Err(_) => {
+                // Timeout - cancel the request
+                warn!(
+                    timeout_secs = timeout.as_secs(),
+                    context = context_label,
+                    "DDS generation timed out (daemon) - cancelling"
+                );
+                cancellation_token.cancel();
+                get_default_placeholder()
+            }
+        }
+    }
+
+    /// Request DDS via the legacy DdsHandler callback.
+    async fn request_via_handler(
+        &self,
+        tile: TileCoord,
+        timeout: Duration,
+        context_label: &'static str,
+    ) -> Vec<u8> {
+        let job_id = JobId::new();
+        let cancellation_token = CancellationToken::new();
+
         // Create oneshot channel for response
         let (tx, rx) = oneshot::channel();
-
-        // Create cancellation token to abort pipeline on timeout
-        let cancellation_token = CancellationToken::new();
 
         let request = DdsRequest {
             job_id,
@@ -338,7 +429,7 @@ pub trait DdsRequestor: FileAttrBuilder {
         (self.dds_handler())(request);
 
         // Await response with timeout (fully async - no blocking!)
-        let data = match tokio::time::timeout(timeout, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => {
                 debug!(
                     tile_row = tile.row,
@@ -347,7 +438,7 @@ pub trait DdsRequestor: FileAttrBuilder {
                     cache_hit = response.cache_hit,
                     duration_ms = response.duration.as_millis(),
                     context = context_label,
-                    "DDS request completed"
+                    "DDS request completed (legacy)"
                 );
                 response.data
             }
@@ -372,13 +463,7 @@ pub trait DdsRequestor: FileAttrBuilder {
                 cancellation_token.cancel();
                 get_default_placeholder()
             }
-        };
-
-        // Critical: Validate DDS before returning to X-Plane
-        // Invalid DDS data causes X-Plane to crash
-        let validation_context =
-            format!("{}({},{},{})", context_label, tile.row, tile.col, tile.zoom);
-        validate_dds_or_placeholder(data, &validation_context)
+        }
     }
 }
 
