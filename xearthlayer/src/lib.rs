@@ -22,6 +22,7 @@ pub mod config;
 pub mod coord;
 pub mod dds;
 pub mod diagnostics;
+pub mod executor;
 pub mod fuse;
 pub mod log;
 pub mod logging;

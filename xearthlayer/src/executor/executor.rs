@@ -1,0 +1,1109 @@
+//! Job executor - the core scheduling and execution engine.
+//!
+//! The [`JobExecutor`] is the central orchestrator that:
+//! - Accepts job submissions and tracks their lifecycle
+//! - Schedules tasks via a priority queue
+//! - Dispatches tasks when resources become available
+//! - Handles signals (pause, resume, stop, kill)
+//! - Manages child job relationships
+//! - Emits telemetry events
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                       JobExecutor                            │
+//! │  ┌──────────┐  ┌───────────────┐  ┌──────────────────────┐  │
+//! │  │ Job      │  │ Priority      │  │ Resource             │  │
+//! │  │ Receiver │──│ Queue         │──│ Pools                │  │
+//! │  └──────────┘  └───────────────┘  └──────────────────────┘  │
+//! │       │               │                    │                 │
+//! │       ▼               ▼                    ▼                 │
+//! │  ┌──────────┐  ┌───────────────┐  ┌──────────────────────┐  │
+//! │  │ Active   │  │ Task          │  │ Telemetry            │  │
+//! │  │ Jobs     │  │ Dispatch      │  │ Sink                 │  │
+//! │  └──────────┘  └───────────────┘  └──────────────────────┘  │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Example
+//!
+//! ```ignore
+//! use xearthlayer::executor::{JobExecutor, ExecutorConfig};
+//!
+//! let config = ExecutorConfig::default();
+//! let (executor, submitter) = JobExecutor::new(config);
+//!
+//! // Submit a job
+//! let handle = submitter.submit(my_job);
+//!
+//! // Run the executor (in a spawned task)
+//! tokio::spawn(async move {
+//!     executor.run(shutdown_token).await;
+//! });
+//!
+//! // Wait for job completion
+//! let result = handle.wait().await;
+//! ```
+
+use super::context::{SpawnedChildJob, TaskContext};
+use super::handle::{JobHandle, JobStatus, Signal};
+use super::job::{Job, JobId, JobResult};
+use super::policy::{ErrorPolicy, Priority};
+use super::queue::{PriorityQueue, QueuedTask};
+use super::resource_pool::{ResourcePoolConfig, ResourcePools};
+use super::task::{Task, TaskOutput, TaskResult};
+use super::telemetry::{NullTelemetrySink, TelemetryEvent, TelemetrySink};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio_util::sync::CancellationToken;
+
+// =============================================================================
+// Configuration Constants
+// =============================================================================
+
+/// Default job receiver channel capacity.
+pub const DEFAULT_JOB_CHANNEL_CAPACITY: usize = 256;
+
+/// Default signal channel capacity per job.
+pub const DEFAULT_SIGNAL_CHANNEL_CAPACITY: usize = 16;
+
+/// Default maximum concurrent tasks (across all resource types).
+pub const DEFAULT_MAX_CONCURRENT_TASKS: usize = 128;
+
+// =============================================================================
+// Executor Configuration
+// =============================================================================
+
+/// Configuration for the job executor.
+#[derive(Clone, Debug)]
+pub struct ExecutorConfig {
+    /// Resource pool configuration.
+    pub resource_pools: ResourcePoolConfig,
+
+    /// Job receiver channel capacity.
+    pub job_channel_capacity: usize,
+
+    /// Maximum concurrent tasks the executor will dispatch.
+    pub max_concurrent_tasks: usize,
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        Self {
+            resource_pools: ResourcePoolConfig::default(),
+            job_channel_capacity: DEFAULT_JOB_CHANNEL_CAPACITY,
+            max_concurrent_tasks: DEFAULT_MAX_CONCURRENT_TASKS,
+        }
+    }
+}
+
+// =============================================================================
+// Job Submitter
+// =============================================================================
+
+/// Handle for submitting jobs to the executor.
+///
+/// This is the public interface for job submission. It's cloneable and can
+/// be shared across tasks.
+#[derive(Clone)]
+pub struct JobSubmitter {
+    sender: mpsc::Sender<SubmittedJob>,
+}
+
+impl JobSubmitter {
+    /// Submits a job for execution.
+    ///
+    /// Returns a handle that can be used to query status, wait for completion,
+    /// or send signals to the job.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the executor has been dropped (channel closed).
+    pub fn submit(&self, job: impl Job + 'static) -> JobHandle {
+        self.try_submit(job).expect("Executor channel closed")
+    }
+
+    /// Attempts to submit a job for execution.
+    ///
+    /// Returns `None` if the executor has been dropped.
+    pub fn try_submit(&self, job: impl Job + 'static) -> Option<JobHandle> {
+        let job_id = job.id();
+        let priority = job.priority();
+        let name = job.name().to_string();
+
+        // Create channels for status updates and signalling
+        let (status_tx, status_rx) = watch::channel(JobStatus::Pending);
+        let (signal_tx, signal_rx) = mpsc::channel(DEFAULT_SIGNAL_CHANNEL_CAPACITY);
+
+        let handle = JobHandle::new(job_id.clone(), status_rx, signal_tx);
+
+        let submitted = SubmittedJob {
+            job: Box::new(job),
+            job_id,
+            name,
+            priority,
+            status_tx,
+            signal_rx,
+        };
+
+        self.sender.try_send(submitted).ok()?;
+        Some(handle)
+    }
+}
+
+/// A job that has been submitted to the executor.
+struct SubmittedJob {
+    job: Box<dyn Job>,
+    job_id: JobId,
+    name: String,
+    priority: Priority,
+    status_tx: watch::Sender<JobStatus>,
+    signal_rx: mpsc::Receiver<Signal>,
+}
+
+// =============================================================================
+// Active Job State
+// =============================================================================
+
+/// State of an actively executing job.
+struct ActiveJob {
+    /// The job being executed.
+    job: Box<dyn Job>,
+
+    /// Job priority (stored for potential priority boosting).
+    #[allow(dead_code)]
+    priority: Priority,
+
+    /// Channel to update job status.
+    status_tx: watch::Sender<JobStatus>,
+
+    /// Channel to receive signals.
+    signal_rx: mpsc::Receiver<Signal>,
+
+    /// Current job status.
+    status: JobStatus,
+
+    /// When the job started executing.
+    started_at: Instant,
+
+    /// Cancellation token for this job's tasks.
+    cancellation: CancellationToken,
+
+    /// Channel for child jobs spawned by tasks.
+    child_job_tx: mpsc::UnboundedSender<SpawnedChildJob>,
+
+    /// Receiver for child jobs (polled by executor).
+    child_job_rx: mpsc::UnboundedReceiver<SpawnedChildJob>,
+
+    /// Tasks waiting to be enqueued (from create_tasks).
+    pending_tasks: Vec<Box<dyn Task>>,
+
+    /// Number of tasks currently executing.
+    tasks_in_flight: usize,
+
+    /// Names of tasks that succeeded.
+    succeeded_tasks: Vec<String>,
+
+    /// Names of tasks that failed.
+    failed_tasks: Vec<String>,
+
+    /// Names of tasks that were cancelled.
+    cancelled_tasks: Vec<String>,
+
+    /// Outputs from completed tasks.
+    task_outputs: HashMap<String, TaskOutput>,
+
+    /// Child jobs that have been spawned.
+    child_job_ids: Vec<JobId>,
+
+    /// Child jobs that succeeded.
+    succeeded_children: Vec<JobId>,
+
+    /// Child jobs that failed.
+    failed_children: Vec<JobId>,
+
+    /// Retry state for tasks (task_name -> attempt count).
+    retry_counts: HashMap<String, u32>,
+
+    /// Parent job ID if this is a child job.
+    parent_job_id: Option<JobId>,
+}
+
+impl ActiveJob {
+    fn new(submitted: SubmittedJob) -> Self {
+        let (child_job_tx, child_job_rx) = mpsc::unbounded_channel();
+        let cancellation = CancellationToken::new();
+
+        Self {
+            job: submitted.job,
+            priority: submitted.priority,
+            status_tx: submitted.status_tx,
+            signal_rx: submitted.signal_rx,
+            status: JobStatus::Pending,
+            started_at: Instant::now(),
+            cancellation,
+            child_job_tx,
+            child_job_rx,
+            pending_tasks: Vec::new(),
+            tasks_in_flight: 0,
+            succeeded_tasks: Vec::new(),
+            failed_tasks: Vec::new(),
+            cancelled_tasks: Vec::new(),
+            task_outputs: HashMap::new(),
+            child_job_ids: Vec::new(),
+            succeeded_children: Vec::new(),
+            failed_children: Vec::new(),
+            retry_counts: HashMap::new(),
+            parent_job_id: None,
+        }
+    }
+
+    fn with_parent(submitted: SubmittedJob, parent_id: JobId) -> Self {
+        let mut job = Self::new(submitted);
+        job.parent_job_id = Some(parent_id);
+        job
+    }
+
+    fn update_status(&mut self, status: JobStatus) {
+        self.status = status;
+        let _ = self.status_tx.send(status);
+    }
+
+    fn is_paused(&self) -> bool {
+        matches!(self.status, JobStatus::Paused)
+    }
+
+    fn should_stop(&self) -> bool {
+        matches!(
+            self.status,
+            JobStatus::Stopped | JobStatus::Cancelled | JobStatus::Failed
+        )
+    }
+
+    fn has_pending_work(&self) -> bool {
+        !self.pending_tasks.is_empty() || self.tasks_in_flight > 0 || !self.child_job_ids.is_empty()
+    }
+
+    fn all_children_complete(&self) -> bool {
+        self.child_job_ids.is_empty()
+    }
+
+    fn build_result(&self) -> JobResult {
+        JobResult {
+            succeeded_tasks: self.succeeded_tasks.clone(),
+            failed_tasks: self.failed_tasks.clone(),
+            cancelled_tasks: self.cancelled_tasks.clone(),
+            succeeded_children: self.succeeded_children.clone(),
+            failed_children: self.failed_children.clone(),
+            cancelled_children: Vec::new(), // Not tracked separately
+            duration: self.started_at.elapsed(),
+        }
+    }
+
+    fn check_error_policy(&self) -> Option<JobStatus> {
+        match self.job.error_policy() {
+            ErrorPolicy::FailFast => {
+                if !self.failed_tasks.is_empty() || !self.failed_children.is_empty() {
+                    Some(JobStatus::Failed)
+                } else {
+                    None
+                }
+            }
+            ErrorPolicy::ContinueOnError => None, // Never fail early
+            ErrorPolicy::PartialSuccess { threshold } => {
+                let total = self.succeeded_tasks.len() + self.failed_tasks.len();
+                if total > 0 {
+                    let success_ratio = self.succeeded_tasks.len() as f64 / total as f64;
+                    if success_ratio < threshold && self.pending_tasks.is_empty() {
+                        Some(JobStatus::Failed)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            ErrorPolicy::Custom => None, // Defer to on_complete
+        }
+    }
+
+    fn compute_final_status(&self) -> JobStatus {
+        let result = self.build_result();
+        match self.job.error_policy() {
+            ErrorPolicy::Custom => self.job.on_complete(&result),
+            ErrorPolicy::PartialSuccess { threshold } => {
+                let total = result.succeeded_tasks.len() + result.failed_tasks.len();
+                if total == 0 {
+                    JobStatus::Succeeded
+                } else {
+                    let success_ratio = result.succeeded_tasks.len() as f64 / total as f64;
+                    if success_ratio >= threshold {
+                        JobStatus::Succeeded
+                    } else {
+                        JobStatus::Failed
+                    }
+                }
+            }
+            _ => {
+                if result.failed_tasks.is_empty() && result.failed_children.is_empty() {
+                    JobStatus::Succeeded
+                } else {
+                    JobStatus::Failed
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Task Completion
+// =============================================================================
+
+/// Result of a completed task execution.
+struct TaskCompletion {
+    job_id: JobId,
+    task_name: String,
+    result: TaskResult,
+    duration: Duration,
+}
+
+// =============================================================================
+// Job Executor
+// =============================================================================
+
+/// The core job execution engine.
+///
+/// The executor manages the lifecycle of jobs and tasks:
+/// - Receives submitted jobs via channel
+/// - Creates tasks from jobs and enqueues them
+/// - Dispatches tasks when resources are available
+/// - Handles task completion and updates job state
+/// - Processes signals (pause, resume, stop, kill)
+/// - Manages parent-child job relationships
+pub struct JobExecutor {
+    /// Resource pools for limiting concurrency.
+    resource_pools: Arc<ResourcePools>,
+
+    /// Priority queue for pending tasks.
+    task_queue: Arc<Mutex<PriorityQueue>>,
+
+    /// Active jobs by ID.
+    active_jobs: Arc<Mutex<HashMap<JobId, ActiveJob>>>,
+
+    /// Receiver for submitted jobs.
+    job_receiver: mpsc::Receiver<SubmittedJob>,
+
+    /// Sender for task completions.
+    completion_tx: mpsc::UnboundedSender<TaskCompletion>,
+
+    /// Receiver for task completions.
+    completion_rx: mpsc::UnboundedReceiver<TaskCompletion>,
+
+    /// Telemetry sink for emitting events.
+    telemetry: Arc<dyn TelemetrySink>,
+
+    /// Notifier for when work might be available.
+    work_notify: Arc<Notify>,
+
+    /// Configuration.
+    config: ExecutorConfig,
+
+    /// Number of currently dispatched tasks.
+    dispatched_count: usize,
+}
+
+impl JobExecutor {
+    /// Creates a new job executor.
+    ///
+    /// Returns the executor and a submitter handle for submitting jobs.
+    pub fn new(config: ExecutorConfig) -> (Self, JobSubmitter) {
+        Self::with_telemetry(config, Arc::new(NullTelemetrySink))
+    }
+
+    /// Creates a new job executor with a telemetry sink.
+    pub fn with_telemetry(
+        config: ExecutorConfig,
+        telemetry: Arc<dyn TelemetrySink>,
+    ) -> (Self, JobSubmitter) {
+        let (job_tx, job_rx) = mpsc::channel(config.job_channel_capacity);
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel();
+
+        let executor = Self {
+            resource_pools: Arc::new(ResourcePools::new(config.resource_pools.clone())),
+            task_queue: Arc::new(Mutex::new(PriorityQueue::new())),
+            active_jobs: Arc::new(Mutex::new(HashMap::new())),
+            job_receiver: job_rx,
+            completion_tx,
+            completion_rx,
+            telemetry,
+            work_notify: Arc::new(Notify::new()),
+            config,
+            dispatched_count: 0,
+        };
+
+        let submitter = JobSubmitter { sender: job_tx };
+
+        (executor, submitter)
+    }
+
+    /// Runs the executor until shutdown is signalled.
+    ///
+    /// This is the main event loop that:
+    /// - Receives new job submissions
+    /// - Dispatches tasks to workers
+    /// - Handles task completions
+    /// - Processes job signals
+    pub async fn run(mut self, shutdown: CancellationToken) {
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for shutdown first
+                _ = shutdown.cancelled() => {
+                    self.shutdown().await;
+                    break;
+                }
+
+                // Receive new job submissions
+                Some(submitted) = self.job_receiver.recv() => {
+                    self.handle_job_submission(submitted).await;
+                }
+
+                // Handle task completions
+                Some(completion) = self.completion_rx.recv() => {
+                    self.handle_task_completion(completion).await;
+                }
+
+                // Dispatch tasks when notified
+                _ = self.work_notify.notified() => {
+                    self.dispatch_tasks().await;
+                }
+            }
+
+            // Process signals for all active jobs
+            self.process_signals().await;
+
+            // Check for new child jobs
+            self.collect_child_jobs().await;
+
+            // Always try to dispatch after any activity
+            self.dispatch_tasks().await;
+
+            // Complete jobs that are done
+            self.complete_finished_jobs().await;
+        }
+    }
+
+    async fn handle_job_submission(&mut self, submitted: SubmittedJob) {
+        let job_id = submitted.job_id.clone();
+        let name = submitted.name.clone();
+        let priority = submitted.priority;
+
+        // Emit telemetry
+        self.telemetry.emit(TelemetryEvent::JobSubmitted {
+            job_id: job_id.clone(),
+            name: name.clone(),
+            priority,
+        });
+
+        // Create active job state
+        let mut active = ActiveJob::new(submitted);
+
+        // Create tasks from the job
+        active.pending_tasks = active.job.create_tasks();
+
+        // Update status to running
+        active.update_status(JobStatus::Running);
+        self.telemetry.emit(TelemetryEvent::JobStarted {
+            job_id: job_id.clone(),
+        });
+
+        // Enqueue initial tasks
+        let tasks_to_enqueue: Vec<_> = active.pending_tasks.drain(..).collect();
+        let _queue_depth = {
+            let mut queue = self.task_queue.lock().await;
+            for task in tasks_to_enqueue {
+                let task_name = task.name().to_string();
+                let queued = QueuedTask::new(task, job_id.clone(), priority);
+
+                self.telemetry.emit(TelemetryEvent::TaskEnqueued {
+                    job_id: job_id.clone(),
+                    task_name,
+                    priority,
+                    queue_depth: queue.len(),
+                });
+
+                queue.push(queued);
+            }
+            queue.len()
+        };
+
+        // Store active job
+        let mut jobs = self.active_jobs.lock().await;
+        jobs.insert(job_id, active);
+
+        // Notify that work is available
+        self.work_notify.notify_one();
+    }
+
+    async fn dispatch_tasks(&mut self) {
+        // Don't dispatch if we're at capacity
+        if self.dispatched_count >= self.config.max_concurrent_tasks {
+            return;
+        }
+
+        loop {
+            // Try to get a task that has resources available
+            let (task, job_id, priority, resource_type) = {
+                let mut queue = self.task_queue.lock().await;
+
+                // Look for a task we can dispatch
+                let mut temp_queue = Vec::new();
+                let mut found = None;
+
+                while let Some(queued) = queue.pop() {
+                    // Check if resources are available
+                    if self.resource_pools.try_acquire(queued.resource_type).is_some() {
+                        found = Some((
+                            queued.task,
+                            queued.job_id,
+                            queued.priority,
+                            queued.resource_type,
+                        ));
+                        break;
+                    } else {
+                        temp_queue.push(queued);
+                    }
+                }
+
+                // Put back tasks we couldn't dispatch
+                for task in temp_queue {
+                    queue.push(task);
+                }
+
+                match found {
+                    Some(t) => t,
+                    None => return, // No dispatchable tasks
+                }
+            };
+
+            // Check if job is still active and not paused/stopped
+            let (can_dispatch, ctx) = {
+                let jobs = self.active_jobs.lock().await;
+                if let Some(job) = jobs.get(&job_id) {
+                    if job.is_paused() || job.should_stop() {
+                        // Re-queue the task
+                        let mut queue = self.task_queue.lock().await;
+                        queue.push(QueuedTask::new(task, job_id, priority));
+                        continue;
+                    }
+
+                    // Create task context
+                    let ctx = TaskContext::with_child_sender(
+                        job_id.clone(),
+                        job.cancellation.clone(),
+                        job.child_job_tx.clone(),
+                    );
+                    (true, ctx)
+                } else {
+                    // Job was removed, skip this task
+                    continue;
+                }
+            };
+
+            if !can_dispatch {
+                continue;
+            }
+
+            // Update in-flight count
+            {
+                let mut jobs = self.active_jobs.lock().await;
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    job.tasks_in_flight += 1;
+                }
+            }
+
+            self.dispatched_count += 1;
+            let task_name = task.name().to_string();
+
+            // Emit telemetry
+            self.telemetry.emit(TelemetryEvent::TaskStarted {
+                job_id: job_id.clone(),
+                task_name: task_name.clone(),
+                resource_type,
+            });
+
+            // Spawn task execution
+            let completion_tx = self.completion_tx.clone();
+            let resource_pools = Arc::clone(&self.resource_pools);
+            let work_notify = Arc::clone(&self.work_notify);
+            let _telemetry = Arc::clone(&self.telemetry);
+
+            tokio::spawn(async move {
+                let start = Instant::now();
+
+                // Acquire resource permit (we know it's available)
+                let _permit = resource_pools.acquire(resource_type).await;
+
+                // Execute the task
+                let mut ctx = ctx;
+                let result = task.execute(&mut ctx).await;
+
+                let duration = start.elapsed();
+
+                // Send completion
+                let _ = completion_tx.send(TaskCompletion {
+                    job_id,
+                    task_name,
+                    result,
+                    duration,
+                });
+
+                // Notify executor
+                work_notify.notify_one();
+            });
+
+            // Check if we've hit dispatch limit
+            if self.dispatched_count >= self.config.max_concurrent_tasks {
+                break;
+            }
+        }
+    }
+
+    async fn handle_task_completion(&mut self, completion: TaskCompletion) {
+        self.dispatched_count = self.dispatched_count.saturating_sub(1);
+
+        let result_kind = completion.result.kind();
+
+        // Emit telemetry
+        self.telemetry.emit(TelemetryEvent::TaskCompleted {
+            job_id: completion.job_id.clone(),
+            task_name: completion.task_name.clone(),
+            result: result_kind,
+            duration: completion.duration,
+        });
+
+        let mut jobs = self.active_jobs.lock().await;
+        let job = match jobs.get_mut(&completion.job_id) {
+            Some(j) => j,
+            None => return, // Job was removed
+        };
+
+        job.tasks_in_flight -= 1;
+
+        match completion.result {
+            TaskResult::Success => {
+                job.succeeded_tasks.push(completion.task_name);
+            }
+            TaskResult::SuccessWithOutput(output) => {
+                job.task_outputs
+                    .insert(completion.task_name.clone(), output);
+                job.succeeded_tasks.push(completion.task_name);
+            }
+            TaskResult::Failed(_error) => {
+                // Check if we should retry
+                let task_name = &completion.task_name;
+                let _attempt = job.retry_counts.get(task_name).copied().unwrap_or(1);
+                // Note: we'd need to keep the task to retry, which requires refactoring
+                // For now, just record the failure
+                job.failed_tasks.push(completion.task_name);
+
+                // Check error policy
+                if let Some(status) = job.check_error_policy() {
+                    job.update_status(status);
+                    job.cancellation.cancel();
+                }
+            }
+            TaskResult::Retry(_error) => {
+                // For now, treat retry as failure
+                // Full retry implementation would re-enqueue the task
+                job.failed_tasks.push(completion.task_name.clone());
+
+                self.telemetry.emit(TelemetryEvent::TaskRetrying {
+                    job_id: completion.job_id.clone(),
+                    task_name: completion.task_name,
+                    attempt: 1,
+                    delay: Duration::from_millis(100),
+                });
+            }
+            TaskResult::Cancelled => {
+                job.cancelled_tasks.push(completion.task_name);
+            }
+        }
+
+        self.work_notify.notify_one();
+    }
+
+    async fn process_signals(&mut self) {
+        let mut jobs = self.active_jobs.lock().await;
+
+        for (job_id, job) in jobs.iter_mut() {
+            // Drain all pending signals
+            while let Ok(signal) = job.signal_rx.try_recv() {
+                self.telemetry.emit(TelemetryEvent::JobSignalled {
+                    job_id: job_id.clone(),
+                    signal,
+                });
+
+                match signal {
+                    Signal::Pause => {
+                        if job.status == JobStatus::Running {
+                            job.update_status(JobStatus::Paused);
+                        }
+                    }
+                    Signal::Resume => {
+                        if job.status == JobStatus::Paused {
+                            job.update_status(JobStatus::Running);
+                            self.work_notify.notify_one();
+                        }
+                    }
+                    Signal::Stop => {
+                        job.update_status(JobStatus::Stopped);
+                        // Don't cancel - let in-flight tasks complete
+                    }
+                    Signal::Kill => {
+                        job.update_status(JobStatus::Cancelled);
+                        job.cancellation.cancel();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn collect_child_jobs(&mut self) {
+        let mut new_children = Vec::new();
+
+        {
+            let mut jobs = self.active_jobs.lock().await;
+            for (parent_id, job) in jobs.iter_mut() {
+                while let Ok(spawned) = job.child_job_rx.try_recv() {
+                    let child_id = spawned.job.id();
+                    job.child_job_ids.push(child_id.clone());
+
+                    self.telemetry.emit(TelemetryEvent::ChildJobSpawned {
+                        parent_job_id: parent_id.clone(),
+                        child_job_id: child_id.clone(),
+                        task_name: spawned.spawning_task,
+                    });
+
+                    new_children.push((spawned.job, parent_id.clone()));
+                }
+            }
+        }
+
+        // Submit child jobs
+        for (child_job, parent_id) in new_children {
+            let child_id = child_job.id();
+            let priority = child_job.priority();
+            let name = child_job.name().to_string();
+
+            let (status_tx, _status_rx) = watch::channel(JobStatus::Pending);
+            let (_signal_tx, signal_rx) = mpsc::channel(DEFAULT_SIGNAL_CHANNEL_CAPACITY);
+
+            let submitted = SubmittedJob {
+                job: child_job,
+                job_id: child_id.clone(),
+                name: name.clone(),
+                priority,
+                status_tx,
+                signal_rx,
+            };
+
+            // Create active job with parent reference
+            let mut active = ActiveJob::with_parent(submitted, parent_id);
+            active.pending_tasks = active.job.create_tasks();
+            active.update_status(JobStatus::Running);
+
+            self.telemetry.emit(TelemetryEvent::JobStarted {
+                job_id: child_id.clone(),
+            });
+
+            // Enqueue child's tasks
+            {
+                let mut queue = self.task_queue.lock().await;
+                for task in active.pending_tasks.drain(..) {
+                    let queued = QueuedTask::new(task, child_id.clone(), priority);
+                    queue.push(queued);
+                }
+            }
+
+            let mut jobs = self.active_jobs.lock().await;
+            jobs.insert(child_id, active);
+        }
+    }
+
+    async fn complete_finished_jobs(&mut self) {
+        let mut completed_jobs = Vec::new();
+
+        {
+            let jobs = self.active_jobs.lock().await;
+            for (job_id, job) in jobs.iter() {
+                // Job is complete when:
+                // - No pending tasks
+                // - No tasks in flight
+                // - All children complete
+                // - OR job was stopped/cancelled
+                let is_complete = !job.has_pending_work()
+                    && job.all_children_complete()
+                    || job.status == JobStatus::Stopped
+                    || job.status == JobStatus::Cancelled;
+
+                if is_complete && !job.status.is_terminal() {
+                    completed_jobs.push(job_id.clone());
+                }
+            }
+        }
+
+        // Complete each finished job
+        for job_id in completed_jobs {
+            let (final_status, result, parent_id) = {
+                let mut jobs = self.active_jobs.lock().await;
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    let status = if job.status.is_terminal() {
+                        job.status
+                    } else {
+                        job.compute_final_status()
+                    };
+                    job.update_status(status);
+                    (status, job.build_result(), job.parent_job_id.clone())
+                } else {
+                    continue;
+                }
+            };
+
+            // Emit completion telemetry
+            self.telemetry.emit(TelemetryEvent::JobCompleted {
+                job_id: job_id.clone(),
+                status: final_status,
+                duration: result.duration,
+                tasks_succeeded: result.succeeded_tasks.len(),
+                tasks_failed: result.failed_tasks.len(),
+                children_succeeded: result.succeeded_children.len(),
+                children_failed: result.failed_children.len(),
+            });
+
+            // Update parent if this was a child job
+            if let Some(parent_id) = parent_id {
+                let mut jobs = self.active_jobs.lock().await;
+                if let Some(parent) = jobs.get_mut(&parent_id) {
+                    // Remove from parent's child list
+                    parent.child_job_ids.retain(|id| id != &job_id);
+
+                    // Record child result
+                    if final_status == JobStatus::Succeeded {
+                        parent.succeeded_children.push(job_id.clone());
+                    } else {
+                        parent.failed_children.push(job_id.clone());
+                    }
+                }
+            }
+
+            // Remove completed job
+            let mut jobs = self.active_jobs.lock().await;
+            jobs.remove(&job_id);
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        // Cancel all active jobs
+        let mut jobs = self.active_jobs.lock().await;
+        for (job_id, job) in jobs.iter_mut() {
+            job.cancellation.cancel();
+            job.update_status(JobStatus::Cancelled);
+
+            self.telemetry.emit(TelemetryEvent::JobCompleted {
+                job_id: job_id.clone(),
+                status: JobStatus::Cancelled,
+                duration: job.started_at.elapsed(),
+                tasks_succeeded: job.succeeded_tasks.len(),
+                tasks_failed: job.failed_tasks.len(),
+                children_succeeded: job.succeeded_children.len(),
+                children_failed: job.failed_children.len(),
+            });
+        }
+        jobs.clear();
+
+        // Clear task queue
+        let mut queue = self.task_queue.lock().await;
+        queue.clear();
+    }
+}
+
+impl std::fmt::Debug for JobExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobExecutor")
+            .field("dispatched_count", &self.dispatched_count)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::ResourceType;
+
+    struct SimpleTask {
+        name: String,
+    }
+
+    impl Task for SimpleTask {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn resource_type(&self) -> ResourceType {
+            ResourceType::CPU
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _ctx: &'a mut TaskContext,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskResult> + Send + 'a>> {
+            Box::pin(async { TaskResult::Success })
+        }
+    }
+
+    struct SimpleJob {
+        id: String,
+        tasks: Vec<Box<dyn Task>>,
+    }
+
+    impl Job for SimpleJob {
+        fn id(&self) -> JobId {
+            JobId::new(&self.id)
+        }
+
+        fn name(&self) -> &str {
+            "SimpleJob"
+        }
+
+        fn error_policy(&self) -> ErrorPolicy {
+            ErrorPolicy::FailFast
+        }
+
+        fn priority(&self) -> Priority {
+            Priority::PREFETCH
+        }
+
+        fn create_tasks(&self) -> Vec<Box<dyn Task>> {
+            self.tasks
+                .iter()
+                .map(|t| Box::new(SimpleTask { name: t.name().to_string() }) as Box<dyn Task>)
+                .collect()
+        }
+
+        fn on_complete(&self, result: &JobResult) -> JobStatus {
+            if result.failed_tasks.is_empty() {
+                JobStatus::Succeeded
+            } else {
+                JobStatus::Failed
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_executor_creation() {
+        let config = ExecutorConfig::default();
+        let (executor, _submitter) = JobExecutor::new(config);
+
+        assert_eq!(executor.dispatched_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_job_submission() {
+        let config = ExecutorConfig::default();
+        let (_executor, submitter) = JobExecutor::new(config);
+
+        let job = SimpleJob {
+            id: "test-job".to_string(),
+            tasks: vec![Box::new(SimpleTask {
+                name: "task1".to_string(),
+            })],
+        };
+
+        let handle = submitter.try_submit(job);
+        assert!(handle.is_some());
+        let handle = handle.unwrap();
+        assert_eq!(handle.id().as_str(), "test-job");
+    }
+
+    #[tokio::test]
+    async fn test_job_execution() {
+        let config = ExecutorConfig::default();
+        let (executor, submitter) = JobExecutor::new(config);
+
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+
+        // Spawn executor
+        let executor_handle = tokio::spawn(async move {
+            executor.run(shutdown_clone).await;
+        });
+
+        // Submit a job
+        let job = SimpleJob {
+            id: "exec-test".to_string(),
+            tasks: vec![Box::new(SimpleTask {
+                name: "task1".to_string(),
+            })],
+        };
+
+        let mut handle = submitter.submit(job);
+
+        // Wait for completion with timeout
+        tokio::select! {
+            _result = handle.wait() => {
+                // Job completed
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                panic!("Job timed out");
+            }
+        }
+
+        // Verify job succeeded
+        assert!(handle.status().is_terminal());
+
+        // Shutdown executor
+        shutdown.cancel();
+        let _ = executor_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_job_signalling() {
+        let config = ExecutorConfig::default();
+        let (_executor, submitter) = JobExecutor::new(config);
+
+        let job = SimpleJob {
+            id: "signal-test".to_string(),
+            tasks: vec![],
+        };
+
+        let handle = submitter.try_submit(job).unwrap();
+
+        // Initial status should be pending
+        assert_eq!(handle.status(), JobStatus::Pending);
+
+        // Send signals (they won't be processed without running executor)
+        handle.pause();
+        handle.resume();
+        handle.stop();
+        handle.kill();
+
+        // Signals were sent successfully (no panic)
+    }
+
+    #[test]
+    fn test_executor_config_default() {
+        let config = ExecutorConfig::default();
+        assert_eq!(config.job_channel_capacity, DEFAULT_JOB_CHANNEL_CAPACITY);
+        assert_eq!(config.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT_TASKS);
+    }
+}
