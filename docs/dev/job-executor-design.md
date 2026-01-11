@@ -2,7 +2,7 @@
 
 ## Status
 
-**In Progress** - Phase 1 (Core Framework) and Phase 2 (DDS Integration) complete
+**In Progress** - Phase 1 (Core Framework), Phase 2 (DDS Integration), and Phase 3 (Tile Prefetch) complete. Phase 4 (Daemon Architecture) in design.
 
 ## Problem Statement
 
@@ -1513,6 +1513,139 @@ executor.execute_blocking(move || assemble_chunks(chunks)).await
 ```
 
 While cloning ~16MB of chunk data isn't free, it's a one-time cost per tile and maintains clean API boundaries.
+
+### Phase 4: Daemon Architecture (January 2026)
+
+**Decision**: FUSE Handler and Job Executor are peer daemons communicating via channels, not hierarchically coupled.
+
+**Context**: The original integration plan embedded the Job Executor inside the FUSE handler's request path via a `DdsHandler` function pointer. This created implicit ownership and tight coupling. Analysis revealed that:
+
+- FUSE Handler is a **daemon** providing X-Plane with a filesystem interface
+- Job Executor is a **daemon** managing all DDS generation work
+- Prefetcher is a **daemon** proactively warming the cache
+- Prewarmer is a **one-shot context** that runs to completion
+
+These are independent processes that should exist in isolation with minimal knowledge of each other.
+
+**Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      CLI / XEarthLayerRuntime                    │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │ FUSE Daemon  │  │  Prefetch    │  │  Prewarm     │           │
+│  │              │  │  Daemon      │  │  Context     │           │
+│  │ (on-demand)  │  │ (continuous) │  │ (one-shot)   │           │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
+│         │                 │                 │                    │
+│         │    Job Producers (submit work)    │                    │
+│         ▼                 ▼                 ▼                    │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              JobRequest Channel (mpsc)                   │    │
+│  │              Owned by CLI, bounded                       │    │
+│  └─────────────────────────┬───────────────────────────────┘    │
+│                            │                                     │
+│                            │    Job Consumer                     │
+│                            ▼                                     │
+│                 ┌──────────────────────┐                        │
+│                 │  Job Executor Daemon │                        │
+│                 │                      │                        │
+│                 │  • Receives requests │                        │
+│                 │  • Schedules jobs    │                        │
+│                 │  • Manages resources │                        │
+│                 │  • Sends responses   │                        │
+│                 └──────────────────────┘                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Principles**:
+
+| Principle | Implementation |
+|-----------|----------------|
+| **Channel as Mediator** | Use bounded `mpsc` channel instead of Mediator object. Producers send to channel, consumer receives. Neither knows about the other. |
+| **Trait-Based Producer API** | Producers receive `Arc<dyn JobSubmitter>`, not raw channel sender. Enables mocking and hides implementation. |
+| **Optional Response Channels** | FUSE includes `oneshot::Sender` in request (must wait). Prefetch omits it (fire-and-forget). |
+| **Peer Daemons** | Neither daemon owns the other. CLI creates, starts, and shuts down all daemons. Independent lifecycles. |
+
+**Message Types**:
+
+```rust
+/// Request to generate a DDS tile
+pub struct JobRequest {
+    pub tile: TileCoord,
+    pub priority: Priority,
+    pub cancellation: CancellationToken,
+    pub response_tx: Option<oneshot::Sender<JobResponse>>,  // FUSE needs this
+    pub origin: RequestOrigin,  // Fuse, Prefetch, Prewarm, Manual
+}
+
+/// Response from job completion
+pub struct JobResponse {
+    pub data: Vec<u8>,
+    pub cache_hit: bool,
+    pub duration: Duration,
+}
+```
+
+**Producer Trait**:
+
+```rust
+/// Trait for submitting job requests to the executor
+pub trait JobSubmitter: Send + Sync + 'static {
+    fn submit(&self, request: JobRequest) -> Result<(), JobSubmitError>;
+    fn submit_with_response(&self, tile: TileCoord, priority: Priority, ...)
+        -> oneshot::Receiver<JobResponse>;
+    fn is_connected(&self) -> bool;
+}
+
+/// Implementation wraps channel sender
+pub struct ChannelJobSubmitter {
+    tx: mpsc::Sender<JobRequest>,
+}
+```
+
+**SOLID Analysis**:
+
+| Principle | How It's Satisfied |
+|-----------|-------------------|
+| **Single Responsibility** | FUSE handles filesystem, Executor handles jobs, Channel handles transport |
+| **Open/Closed** | New producers (e.g., CLI commands) can submit without modifying executor |
+| **Liskov Substitution** | Any `JobSubmitter` implementation is interchangeable |
+| **Interface Segregation** | Producers only know `JobSubmitter` trait, not executor internals |
+| **Dependency Inversion** | All components depend on abstractions (traits, channels), not concrete types |
+
+**Rationale**:
+
+1. **Maximum decoupling** - Producers don't know how jobs are executed, executor doesn't know who's asking
+2. **Testable in isolation** - Mock the trait for FUSE tests, no executor needed
+3. **Independent lifecycles** - Each daemon can be started/stopped independently
+4. **Natural backpressure** - Bounded channel prevents overwhelming the executor
+5. **Clean shutdown** - CLI coordinates graceful shutdown of all daemons
+
+**Comparison with Original Design**:
+
+| Aspect | Original (Embedded) | New (Peer Daemons) |
+|--------|---------------------|-------------------|
+| FUSE-Executor relationship | FUSE owns `DdsHandler` function | FUSE holds `JobSubmitter` client |
+| Coupling | FUSE embeds pipeline logic | FUSE only knows request/response |
+| Testing | Need executor for FUSE tests | Mock `JobSubmitter` trait |
+| Lifecycle | Tied together | Independent |
+| Adding producers | Modify DdsHandler signature | Clone channel sender |
+
+**Files to Create (Phase 4)**:
+
+```
+xearthlayer/src/
+├── executor/
+│   ├── daemon.rs     # JobExecutorDaemon - receives from channel, runs jobs
+│   └── client.rs     # JobSubmitter trait + ChannelJobSubmitter
+│
+└── runtime/
+    ├── mod.rs        # Module exports
+    ├── runtime.rs    # XEarthLayerRuntime - owns channel & daemons
+    └── request.rs    # JobRequest, JobResponse, RequestOrigin
+```
 
 ## References
 
