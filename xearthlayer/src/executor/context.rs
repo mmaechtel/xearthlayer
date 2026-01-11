@@ -213,6 +213,34 @@ impl TaskContext {
         false
     }
 
+    /// Spawns a child job from a boxed trait object.
+    ///
+    /// This is a variant of [`spawn_child_job`] that accepts an already-boxed
+    /// job. Use this when working with factory patterns that return `Box<dyn Job>`.
+    ///
+    /// # Arguments
+    ///
+    /// * `job` - The boxed child job to spawn
+    /// * `task_name` - Name of the spawning task (for telemetry)
+    ///
+    /// # Returns
+    ///
+    /// `true` if the job was successfully queued, `false` if child spawning
+    /// is not available (context was created without a child sender).
+    pub fn spawn_child_job_boxed(&mut self, job: Box<dyn Job>, task_name: &str) -> bool {
+        if let Some(ref sender) = self.child_job_sender {
+            let spawned = SpawnedChildJob {
+                job,
+                spawning_task: task_name.to_string(),
+            };
+            if sender.sender.send(spawned).is_ok() {
+                self.spawned_children += 1;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Returns the number of child jobs spawned by this context.
     pub fn spawned_children_count(&self) -> usize {
         self.spawned_children
