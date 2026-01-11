@@ -170,7 +170,11 @@ impl TaskContext {
     /// ```ignore
     /// let chunks: Option<&Vec<Bytes>> = ctx.get_output("DownloadChunks", "data");
     /// ```
-    pub fn get_output<T: std::any::Any + Send + Sync>(&self, task_name: &str, key: &str) -> Option<&T> {
+    pub fn get_output<T: std::any::Any + Send + Sync>(
+        &self,
+        task_name: &str,
+        key: &str,
+    ) -> Option<&T> {
         self.task_outputs
             .get(task_name)
             .and_then(|output| output.get(key))
@@ -225,7 +229,10 @@ impl std::fmt::Debug for TaskContext {
         f.debug_struct("TaskContext")
             .field("job_id", &self.job_id)
             .field("is_cancelled", &self.is_cancelled())
-            .field("task_outputs", &self.task_outputs.keys().collect::<Vec<_>>())
+            .field(
+                "task_outputs",
+                &self.task_outputs.keys().collect::<Vec<_>>(),
+            )
             .field("can_spawn_children", &self.can_spawn_children())
             .field("spawned_children", &self.spawned_children)
             .finish()

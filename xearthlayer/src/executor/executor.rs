@@ -566,7 +566,11 @@ impl JobExecutor {
 
                 while let Some(queued) = queue.pop() {
                     // Check if resources are available
-                    if self.resource_pools.try_acquire(queued.resource_type).is_some() {
+                    if self
+                        .resource_pools
+                        .try_acquire(queued.resource_type)
+                        .is_some()
+                    {
                         found = Some((
                             queued.task,
                             queued.job_id,
@@ -846,8 +850,7 @@ impl JobExecutor {
                 // - No tasks in flight
                 // - All children complete
                 // - OR job was stopped/cancelled
-                let is_complete = !job.has_pending_work()
-                    && job.all_children_complete()
+                let is_complete = !job.has_pending_work() && job.all_children_complete()
                     || job.status == JobStatus::Stopped
                     || job.status == JobStatus::Cancelled;
 
@@ -996,7 +999,11 @@ mod tests {
         fn create_tasks(&self) -> Vec<Box<dyn Task>> {
             self.tasks
                 .iter()
-                .map(|t| Box::new(SimpleTask { name: t.name().to_string() }) as Box<dyn Task>)
+                .map(|t| {
+                    Box::new(SimpleTask {
+                        name: t.name().to_string(),
+                    }) as Box<dyn Task>
+                })
                 .collect()
         }
 

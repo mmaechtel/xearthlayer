@@ -130,9 +130,10 @@ impl std::fmt::Debug for JobHandle {
 /// Job execution status.
 ///
 /// This enum represents all possible states of a job during its lifecycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum JobStatus {
     /// Waiting for dependencies to complete.
+    #[default]
     Pending,
 
     /// Currently executing tasks.
@@ -178,12 +179,6 @@ impl JobStatus {
     /// Returns true if the job completed successfully.
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Succeeded)
-    }
-}
-
-impl Default for JobStatus {
-    fn default() -> Self {
-        Self::Pending
     }
 }
 

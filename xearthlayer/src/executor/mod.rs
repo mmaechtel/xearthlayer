@@ -105,6 +105,7 @@
 
 // Module declarations
 mod context;
+#[allow(clippy::module_inception)]
 mod executor;
 mod handle;
 mod job;
@@ -118,9 +119,8 @@ mod telemetry;
 
 // Policy types
 pub use policy::{
-    ErrorPolicy, Priority, RetryPolicy,
-    DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_INITIAL_DELAY_MS, DEFAULT_MAX_DELAY_SECS,
-    PRIORITY_HOUSEKEEPING, PRIORITY_ON_DEMAND, PRIORITY_PREFETCH,
+    ErrorPolicy, Priority, RetryPolicy, DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_INITIAL_DELAY_MS,
+    DEFAULT_MAX_DELAY_SECS, PRIORITY_HOUSEKEEPING, PRIORITY_ON_DEMAND, PRIORITY_PREFETCH,
 };
 
 // Job types
@@ -139,14 +139,12 @@ pub use handle::{JobHandle, JobStatus, Signal};
 pub use resource_pool::{
     ResourcePermit, ResourcePool, ResourcePoolConfig, ResourcePools, ResourceType,
     DEFAULT_CPU_CAPACITY_MULTIPLIER, DEFAULT_DISK_IO_CAPACITY, DEFAULT_NETWORK_CAPACITY,
-    DISK_IO_CAPACITY_HDD, DISK_IO_CAPACITY_NVME, DISK_IO_CAPACITY_SSD,
-    MIN_CPU_CAPACITY_ADDITION,
+    DISK_IO_CAPACITY_HDD, DISK_IO_CAPACITY_NVME, DISK_IO_CAPACITY_SSD, MIN_CPU_CAPACITY_ADDITION,
 };
 
 // Telemetry
 pub use telemetry::{
-    MultiplexTelemetrySink, NullTelemetrySink, TelemetryEvent, TelemetrySink,
-    TracingTelemetrySink,
+    MultiplexTelemetrySink, NullTelemetrySink, TelemetryEvent, TelemetrySink, TracingTelemetrySink,
 };
 
 // Queue
@@ -154,6 +152,6 @@ pub use queue::{PriorityQueue, QueuedTask};
 
 // Executor
 pub use executor::{
-    ExecutorConfig, JobExecutor, JobSubmitter,
-    DEFAULT_JOB_CHANNEL_CAPACITY, DEFAULT_MAX_CONCURRENT_TASKS, DEFAULT_SIGNAL_CHANNEL_CAPACITY,
+    ExecutorConfig, JobExecutor, JobSubmitter, DEFAULT_JOB_CHANNEL_CAPACITY,
+    DEFAULT_MAX_CONCURRENT_TASKS, DEFAULT_SIGNAL_CHANNEL_CAPACITY,
 };

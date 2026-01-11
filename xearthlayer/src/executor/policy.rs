@@ -56,13 +56,14 @@ pub const PRIORITY_HOUSEKEEPING: i32 = -50;
 ///
 /// This policy determines whether a job continues executing after a task fails,
 /// and how it determines its final success/failure status.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum ErrorPolicy {
     /// Stop job immediately on first failure.
     ///
     /// The job will cancel any pending tasks and report failure as soon as
     /// any task fails. This is the default policy and is suitable for jobs
     /// where any failure invalidates the entire operation.
+    #[default]
     FailFast,
 
     /// Continue executing remaining tasks despite failures.
@@ -93,12 +94,6 @@ pub enum ErrorPolicy {
     Custom,
 }
 
-impl Default for ErrorPolicy {
-    fn default() -> Self {
-        Self::FailFast
-    }
-}
-
 impl ErrorPolicy {
     /// Creates a partial success policy with the given threshold.
     ///
@@ -122,9 +117,10 @@ impl ErrorPolicy {
 ///
 /// This policy controls automatic retry behavior for tasks that fail due to
 /// transient issues (network timeouts, temporary service unavailability, etc.).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum RetryPolicy {
     /// No retries - fail immediately on error.
+    #[default]
     None,
 
     /// Fixed number of retries with constant delay between attempts.
@@ -155,12 +151,6 @@ pub enum RetryPolicy {
     },
 }
 
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 impl RetryPolicy {
     /// Creates an exponential backoff policy with sensible defaults.
     ///
@@ -188,7 +178,10 @@ impl RetryPolicy {
     /// * `max_attempts` - Maximum number of attempts (including initial)
     /// * `delay` - Fixed delay between attempts
     pub fn fixed(max_attempts: u32, delay: Duration) -> Self {
-        Self::Fixed { max_attempts, delay }
+        Self::Fixed {
+            max_attempts,
+            delay,
+        }
     }
 
     /// Calculates the delay for a given attempt number.
@@ -203,7 +196,10 @@ impl RetryPolicy {
     pub fn delay_for_attempt(&self, attempt: u32) -> Option<Duration> {
         match self {
             Self::None => None,
-            Self::Fixed { max_attempts, delay } => {
+            Self::Fixed {
+                max_attempts,
+                delay,
+            } => {
                 if attempt < *max_attempts {
                     Some(*delay)
                 } else {
@@ -220,7 +216,8 @@ impl RetryPolicy {
                     // Calculate exponential delay: initial_delay * multiplier^(attempt-1)
                     let factor = multiplier.powi((attempt - 1) as i32);
                     let delay_ms = initial_delay.as_millis() as f64 * factor;
-                    let delay = Duration::from_millis(delay_ms.min(max_delay.as_millis() as f64) as u64);
+                    let delay =
+                        Duration::from_millis(delay_ms.min(max_delay.as_millis() as f64) as u64);
                     Some(delay.min(*max_delay))
                 } else {
                     None
@@ -346,8 +343,14 @@ mod tests {
     fn test_retry_policy_fixed() {
         let policy = RetryPolicy::fixed(3, Duration::from_millis(100));
         assert_eq!(policy.max_attempts(), 3);
-        assert_eq!(policy.delay_for_attempt(1), Some(Duration::from_millis(100)));
-        assert_eq!(policy.delay_for_attempt(2), Some(Duration::from_millis(100)));
+        assert_eq!(
+            policy.delay_for_attempt(1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            policy.delay_for_attempt(2),
+            Some(Duration::from_millis(100))
+        );
         assert_eq!(policy.delay_for_attempt(3), None); // No more retries
     }
 
@@ -361,9 +364,18 @@ mod tests {
         };
 
         assert_eq!(policy.max_attempts(), 4);
-        assert_eq!(policy.delay_for_attempt(1), Some(Duration::from_millis(100))); // 100ms
-        assert_eq!(policy.delay_for_attempt(2), Some(Duration::from_millis(200))); // 200ms
-        assert_eq!(policy.delay_for_attempt(3), Some(Duration::from_millis(400))); // 400ms
+        assert_eq!(
+            policy.delay_for_attempt(1),
+            Some(Duration::from_millis(100))
+        ); // 100ms
+        assert_eq!(
+            policy.delay_for_attempt(2),
+            Some(Duration::from_millis(200))
+        ); // 200ms
+        assert_eq!(
+            policy.delay_for_attempt(3),
+            Some(Duration::from_millis(400))
+        ); // 400ms
         assert_eq!(policy.delay_for_attempt(4), None); // No more retries
     }
 
@@ -392,7 +404,10 @@ mod tests {
             ..
         } = policy
         {
-            assert_eq!(initial_delay, Duration::from_millis(DEFAULT_INITIAL_DELAY_MS));
+            assert_eq!(
+                initial_delay,
+                Duration::from_millis(DEFAULT_INITIAL_DELAY_MS)
+            );
             assert_eq!(max_delay, Duration::from_secs(DEFAULT_MAX_DELAY_SECS));
             assert_eq!(multiplier, DEFAULT_BACKOFF_MULTIPLIER);
         } else {

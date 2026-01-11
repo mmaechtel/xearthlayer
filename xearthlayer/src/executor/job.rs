@@ -338,7 +338,12 @@ mod tests {
     #[test]
     fn test_job_result_meets_threshold() {
         let result = JobResult {
-            succeeded_tasks: vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
+            succeeded_tasks: vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ],
             failed_tasks: vec!["e".to_string()],
             ..Default::default()
         };

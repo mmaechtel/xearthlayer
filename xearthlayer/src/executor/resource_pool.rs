@@ -397,9 +397,18 @@ impl ResourcePools {
 impl std::fmt::Debug for ResourcePools {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResourcePools")
-            .field("network", &format_args!("{}/{}", self.network.in_flight(), self.network.capacity()))
-            .field("disk_io", &format_args!("{}/{}", self.disk_io.in_flight(), self.disk_io.capacity()))
-            .field("cpu", &format_args!("{}/{}", self.cpu.in_flight(), self.cpu.capacity()))
+            .field(
+                "network",
+                &format_args!("{}/{}", self.network.in_flight(), self.network.capacity()),
+            )
+            .field(
+                "disk_io",
+                &format_args!("{}/{}", self.disk_io.in_flight(), self.disk_io.capacity()),
+            )
+            .field(
+                "cpu",
+                &format_args!("{}/{}", self.cpu.in_flight(), self.cpu.capacity()),
+            )
             .finish()
     }
 }
@@ -570,9 +579,18 @@ mod tests {
     fn test_resource_pools_get() {
         let pools = ResourcePools::with_defaults();
 
-        assert_eq!(pools.get(ResourceType::Network).resource_type(), ResourceType::Network);
-        assert_eq!(pools.get(ResourceType::DiskIO).resource_type(), ResourceType::DiskIO);
-        assert_eq!(pools.get(ResourceType::CPU).resource_type(), ResourceType::CPU);
+        assert_eq!(
+            pools.get(ResourceType::Network).resource_type(),
+            ResourceType::Network
+        );
+        assert_eq!(
+            pools.get(ResourceType::DiskIO).resource_type(),
+            ResourceType::DiskIO
+        );
+        assert_eq!(
+            pools.get(ResourceType::CPU).resource_type(),
+            ResourceType::CPU
+        );
     }
 
     #[test]
