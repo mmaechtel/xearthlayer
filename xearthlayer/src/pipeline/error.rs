@@ -79,7 +79,7 @@ pub enum StageError {
 ///
 /// Tracks successful and failed chunks separately to enable partial
 /// results with magenta placeholders for failures.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChunkResults {
     /// Successfully downloaded chunks: (row, col) -> JPEG data
     pub successes: Vec<ChunkSuccess>,

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Proposed** - Design document for review
+**In Progress** - Phase 1 (Core Framework) and Phase 2 (DDS Integration) complete
 
 ## Problem Statement
 
@@ -1438,6 +1438,81 @@ xearthlayer/src/
 3. **Visualization** - Debug UI showing job graph and status (TUI widget)
 4. **Adaptive pools** - Auto-tune resource pool capacities based on observed performance
 5. **Work stealing** - Balance load across resource pools when one is idle
+
+## Implementation Notes
+
+This section captures key decisions made during implementation.
+
+### Phase 2: Direct Implementation vs Wrapping (January 2026)
+
+**Decision**: Tasks directly implement business logic rather than wrapping existing pipeline stages.
+
+**Context**: The original plan called for tasks to wrap existing pipeline stage functions (e.g., `download_stage_with_limiter`) to minimize regression risk. During implementation, we discovered this created unnecessary indirection:
+
+```rust
+// REJECTED: Wrapper approach
+// Task delegates to stage, bypassing most functionality (limiters, metrics)
+let result = encode_stage(job_id, image, encoder, executor, None, None, false).await;
+
+// IMPLEMENTED: Direct approach
+// Task contains the actual business logic
+let dds_data = executor.execute_blocking(move || encoder.encode(&image)).await;
+```
+
+**Rationale**:
+- Wrapping created double abstraction (Task → Stage → Work)
+- Stage parameters for limiters/metrics were always `None` (dead code paths)
+- Direct implementation makes the job executor the replacement, not a wrapper
+- Business logic is preserved through "lift and shift" from battle-tested stages
+
+### Resource Injection Pattern (January 2026)
+
+**Decision**: Use hybrid injection pattern - explicit dependencies for leaf tasks, factory pattern for spawning tasks.
+
+**Leaf Tasks (Phase 2)**:
+```rust
+// Explicit Arc<T> fields - clear contracts, easy testing
+pub struct DownloadChunksTask<P, D> {
+    provider: Arc<P>,
+    disk_cache: Arc<D>,
+}
+```
+
+**Spawning Tasks (Phase 3)**:
+```rust
+// Factory injection - encapsulates complex wiring
+pub struct EnumerateDdsFilesTask {
+    job_factory: Arc<dyn DdsJobFactory>,  // Creates child DdsGenerateJobs
+}
+
+pub trait DdsJobFactory: Send + Sync {
+    fn create_job(&self, tile: TileCoord, priority: Priority) -> Box<dyn Job>;
+}
+```
+
+**Rationale**:
+- Leaf tasks have clear, testable dependency contracts
+- Spawning tasks don't need knowledge of child job dependencies
+- Factory can be shared across multiple jobs
+- Dependency wiring happens once at application startup
+
+### TaskOutput Ownership (January 2026)
+
+**Decision**: Add `Clone` derive to `ChunkResults` to enable ownership transfer between tasks.
+
+**Context**: `TaskOutput::get()` returns `Option<&T>` (borrowed), but CPU-bound work requires `'static` closures for `spawn_blocking`. Solution:
+
+```rust
+// ChunkResults now derives Clone (pipeline/error.rs)
+#[derive(Debug, Clone)]
+pub struct ChunkResults { ... }
+
+// In AssembleImageTask
+let chunks = ctx.get_output::<ChunkResults>("DownloadChunks", "chunks")?.clone();
+executor.execute_blocking(move || assemble_chunks(chunks)).await
+```
+
+While cloning ~16MB of chunk data isn't free, it's a one-time cost per tile and maintains clean API boundaries.
 
 ## References
 
