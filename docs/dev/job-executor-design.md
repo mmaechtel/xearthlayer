@@ -35,6 +35,39 @@ This requires a generalized job execution framework.
 - Persistence/recovery (jobs are in-memory)
 - Scheduling/cron (jobs are submitted, not scheduled)
 
+## Design Decisions
+
+### Build vs Buy
+
+**Decision**: Build our own job executor backed by Tokio primitives.
+
+**Alternatives Considered**:
+
+| Crate | Why Not |
+|-------|---------|
+| [Apalis](https://crates.io/crates/apalis) | Requires external storage (Redis, Postgres, SQLite). Our jobs are transient, in-memory. |
+| [Fang](https://crates.io/crates/fang) | PostgreSQL-backed, designed for persistent job queues. |
+| [task-exec-queue](https://crates.io/crates/task-exec-queue) | Simple queue without resource pools, priority, or hierarchical jobs. |
+
+**Rationale**:
+
+1. **In-process, transient workloads** - We don't need persistence; jobs are short-lived (seconds to minutes)
+2. **Custom resource pools** - Existing crates don't support declaring "this task needs network" vs "this task needs CPU"
+3. **X-Plane coalescing** - Domain-specific requirement: same DDS path → share work, not duplicate
+4. **Hierarchical composition** - Jobs spawning child jobs is uncommon in job queue crates
+5. **Implementation cost** - Estimated ~500-800 lines of focused code on Tokio foundation
+
+### Tokio Primitives Used
+
+| Primitive | Purpose |
+|-----------|---------|
+| `Semaphore` | Resource pool capacity limits |
+| `mpsc::channel` | Task/job queues with backpressure |
+| `CancellationToken` | Signal propagation (stop/kill) |
+| `spawn_blocking` | CPU-bound work (encode, assemble) |
+| `watch::channel` | Job status broadcast to handles |
+| `select!` | Multi-source event loop |
+
 ## Design
 
 ### Core Concepts
@@ -46,6 +79,108 @@ This requires a generalized job execution framework.
 | **JobExecutor** | Runs jobs respecting dependencies and concurrency limits |
 | **JobHandle** | Reference to a submitted job for status/cancellation |
 | **TaskContext** | Execution context passed to tasks for spawning children and accessing resources |
+| **ResourcePool** | Semaphore-backed capacity limit for a resource type (network, disk, CPU) |
+
+### Resource Pools
+
+Tasks declare which resource type they require. The scheduler only dispatches tasks when their required resource pool has capacity. This replaces job-level concurrency limits with task-level resource awareness.
+
+```rust
+/// Resource types that tasks can require.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub enum ResourceType {
+    /// Network I/O (HTTP connections).
+    /// Default capacity: min(num_cpus * 16, 256)
+    Network,
+
+    /// Disk I/O (file read/write).
+    /// Capacity varies by storage type (HDD: 4, SSD: 64, NVMe: 256)
+    DiskIO,
+
+    /// CPU-bound work (encoding, assembly).
+    /// Default capacity: max(num_cpus * 1.25, num_cpus + 2)
+    CPU,
+}
+
+/// Pool of permits for a resource type.
+pub struct ResourcePool {
+    resource_type: ResourceType,
+    semaphore: Arc<Semaphore>,
+    capacity: usize,
+}
+
+impl ResourcePool {
+    pub fn new(resource_type: ResourceType, capacity: usize) -> Self {
+        Self {
+            resource_type,
+            semaphore: Arc::new(Semaphore::new(capacity)),
+            capacity,
+        }
+    }
+
+    /// Acquire a permit, waiting if none available.
+    pub async fn acquire(&self) -> OwnedSemaphorePermit {
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed")
+    }
+
+    /// Try to acquire a permit without waiting.
+    pub fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        self.semaphore.clone().try_acquire_owned().ok()
+    }
+
+    pub fn available(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+}
+
+/// Collection of all resource pools.
+pub struct ResourcePools {
+    pools: HashMap<ResourceType, ResourcePool>,
+}
+
+impl ResourcePools {
+    pub fn new(config: &ResourcePoolConfig) -> Self {
+        let mut pools = HashMap::new();
+        pools.insert(ResourceType::Network, ResourcePool::new(ResourceType::Network, config.network));
+        pools.insert(ResourceType::DiskIO, ResourcePool::new(ResourceType::DiskIO, config.disk_io));
+        pools.insert(ResourceType::CPU, ResourcePool::new(ResourceType::CPU, config.cpu));
+        Self { pools }
+    }
+
+    pub fn get(&self, resource_type: ResourceType) -> &ResourcePool {
+        self.pools.get(&resource_type).expect("pool exists")
+    }
+}
+
+/// Configuration for resource pool capacities.
+pub struct ResourcePoolConfig {
+    pub network: usize,  // Default: 256
+    pub disk_io: usize,  // Default: 64 (SSD profile)
+    pub cpu: usize,      // Default: num_cpus + 2
+}
+
+impl Default for ResourcePoolConfig {
+    fn default() -> Self {
+        let cpus = num_cpus::get();
+        Self {
+            network: (cpus * 16).min(256),
+            disk_io: 64,  // SSD default, configurable via cache.disk_io_profile
+            cpu: cpus + 2,
+        }
+    }
+}
+```
+
+**Design Rationale**:
+
+- Tasks from different jobs can run concurrently if they use different resource pools
+- A CPU-bound encode task doesn't block network downloads
+- Prevents resource exhaustion: can't spawn 1000 HTTP requests while encoding is starved
+- Aligns with existing `StorageConcurrencyLimiter` and `CPUConcurrencyLimiter` patterns
 
 ### Relationship Model
 
@@ -99,9 +234,9 @@ pub trait Job: Send + Sync + 'static {
         vec![]
     }
 
-    /// Priority (higher = more important). Default: 0.
-    fn priority(&self) -> i32 {
-        0
+    /// Priority for this job's tasks. Default: PREFETCH (0).
+    fn priority(&self) -> Priority {
+        Priority::PREFETCH
     }
 
     /// Create the tasks for this job.
@@ -140,6 +275,10 @@ impl JobId {
 pub trait Task: Send + Sync + 'static {
     /// Human-readable name for logging/display.
     fn name(&self) -> &str;
+
+    /// Resource type required by this task.
+    /// Scheduler acquires a permit from this pool before executing.
+    fn resource_type(&self) -> ResourceType;
 
     /// Retry policy for this task.
     fn retry_policy(&self) -> RetryPolicy {
@@ -321,16 +460,63 @@ impl RetryPolicy {
 }
 ```
 
+#### Priority
+
+Tasks are queued by priority, then FIFO within the same priority level. Higher values execute first.
+
+```rust
+/// Task priority (higher = more important).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Priority(pub i32);
+
+impl Priority {
+    /// On-demand requests from X-Plane FUSE layer.
+    /// These must be served immediately - X-Plane is waiting.
+    pub const ON_DEMAND: Priority = Priority(100);
+
+    /// Background prefetch work.
+    /// Lower priority, runs when X-Plane is idle.
+    pub const PREFETCH: Priority = Priority(0);
+
+    /// Housekeeping tasks (cache cleanup, index rebuilding).
+    /// Lowest priority, runs when nothing else needs resources.
+    pub const HOUSEKEEPING: Priority = Priority(-50);
+}
+
+impl Default for Priority {
+    fn default() -> Self {
+        Self::PREFETCH
+    }
+}
+```
+
+**Queue Behavior**:
+
+1. Tasks enter queue with their job's priority
+2. Scheduler pulls highest priority task first
+3. Within same priority, tasks execute in FIFO order (by `enqueued_at`)
+4. If highest-priority task's resource pool is full, scheduler waits (doesn't skip to lower priority)
+
+**Design Rationale**:
+
+- On-demand requests naturally preempt prefetch work without explicit signalling
+- X-Plane's FUSE requests (Priority 100) always get served before prefetch (Priority 0)
+- Prefetch tasks still make progress during quiet periods
+- Housekeeping (cache eviction) runs in gaps when system is truly idle
+
 ### JobExecutor
 
 ```rust
-/// Executes jobs respecting dependencies, concurrency limits, and policies.
+/// Executes jobs respecting dependencies, resource pools, and policies.
 pub struct JobExecutor {
     /// Channel for receiving new jobs (including child jobs).
     job_receiver: mpsc::Receiver<Box<dyn Job>>,
 
     /// Sender for submitting jobs.
     job_sender: mpsc::Sender<Box<dyn Job>>,
+
+    /// Priority queue of ready tasks (ordered by priority, then FIFO).
+    task_queue: PriorityQueue<QueuedTask>,
 
     /// Jobs waiting for dependencies.
     pending: HashMap<JobId, PendingJob>,
@@ -341,31 +527,31 @@ pub struct JobExecutor {
     /// Completed jobs (kept for dependency resolution).
     completed: HashMap<JobId, JobResult>,
 
-    /// Concurrency configuration.
-    concurrency: ConcurrencyConfig,
+    /// Resource pools (network, disk, CPU).
+    resource_pools: Arc<ResourcePools>,
 
     /// Shared resources for all jobs.
     resources: Arc<Resources>,
 
-    /// Metrics collector.
-    metrics: Arc<Metrics>,
+    /// Telemetry sink for emitting events.
+    telemetry: Arc<dyn TelemetrySink>,
 }
 
-/// Concurrency configuration.
-pub struct ConcurrencyConfig {
-    /// Maximum concurrent jobs.
-    pub max_jobs: usize,
-
-    /// Maximum concurrent tasks across all jobs.
-    pub max_tasks: usize,
-
-    /// Per-resource limits (e.g., "http" -> 256, "cpu" -> 8).
-    pub resource_limits: HashMap<String, usize>,
+/// A task queued for execution with its priority.
+struct QueuedTask {
+    task: Box<dyn Task>,
+    job_id: JobId,
+    priority: Priority,
+    enqueued_at: Instant,  // For FIFO ordering within same priority
 }
 
 impl JobExecutor {
     /// Create a new executor with the given configuration.
-    pub fn new(config: ConcurrencyConfig, resources: Resources) -> Self;
+    pub fn new(
+        pool_config: ResourcePoolConfig,
+        resources: Resources,
+        telemetry: Arc<dyn TelemetrySink>,
+    ) -> Self;
 
     /// Submit a job for execution. Returns handle for status/cancellation.
     pub fn submit(&self, job: impl Job) -> JobHandle {
@@ -383,8 +569,8 @@ impl JobExecutor {
                     self.enqueue_job(job);
                 }
 
-                // Check for jobs ready to run
-                _ = self.poll_ready_jobs() => {}
+                // Dispatch ready tasks to available resource pools
+                _ = self.dispatch_tasks() => {}
 
                 // Check for completed tasks
                 _ = self.poll_task_completion() => {}
@@ -399,21 +585,41 @@ impl JobExecutor {
         Ok(())
     }
 
-    /// Start jobs whose dependencies are satisfied.
-    async fn poll_ready_jobs(&mut self) {
-        let ready: Vec<_> = self.pending
-            .iter()
-            .filter(|(_, job)| self.dependencies_satisfied(job))
-            .map(|(id, _)| id.clone())
-            .collect();
+    /// Dispatch tasks from queue when their resource pool has capacity.
+    async fn dispatch_tasks(&mut self) {
+        // Iterate queue in priority order (highest first, then FIFO)
+        while let Some(queued) = self.task_queue.peek() {
+            let pool = self.resource_pools.get(queued.task.resource_type());
 
-        for job_id in ready {
-            if self.running.len() < self.concurrency.max_jobs {
-                if let Some(pending) = self.pending.remove(&job_id) {
-                    self.start_job(pending).await;
-                }
+            // Try to acquire permit without blocking
+            if let Some(permit) = pool.try_acquire() {
+                let queued = self.task_queue.pop().unwrap();
+                self.spawn_task(queued, permit).await;
+            } else {
+                // No capacity for highest-priority task; wait for completion
+                break;
             }
         }
+    }
+
+    /// Spawn a task with its acquired resource permit.
+    async fn spawn_task(&self, queued: QueuedTask, permit: OwnedSemaphorePermit) {
+        let job_id = queued.job_id.clone();
+        let task_name = queued.task.name().to_string();
+
+        self.telemetry.emit(TelemetryEvent::TaskStarted {
+            job_id: job_id.clone(),
+            task_name: task_name.clone(),
+        });
+
+        let start = Instant::now();
+
+        // Spawn task execution
+        tokio::spawn(async move {
+            let result = queued.task.execute(&mut ctx).await;
+            drop(permit);  // Release resource permit
+            // ... handle result, notify job ...
+        });
     }
 
     fn dependencies_satisfied(&self, job: &PendingJob) -> bool {
@@ -427,12 +633,12 @@ impl JobExecutor {
 ### JobHandle
 
 ```rust
-/// Handle to a submitted job for status queries and cancellation.
+/// Handle to a submitted job for status queries and signalling.
 #[derive(Clone)]
 pub struct JobHandle {
     job_id: JobId,
     status: watch::Receiver<JobStatus>,
-    cancel_token: CancellationToken,
+    signal_sender: mpsc::Sender<Signal>,
 }
 
 impl JobHandle {
@@ -452,14 +658,31 @@ impl JobHandle {
         // Return full result...
     }
 
-    /// Request job cancellation.
-    pub fn cancel(&self) {
-        self.cancel_token.cancel();
-    }
-
     /// Get the job ID.
     pub fn id(&self) -> &JobId {
         &self.job_id
+    }
+
+    // --- Signalling API ---
+
+    /// Pause the job: no new tasks start, in-flight tasks continue.
+    pub fn pause(&self) {
+        let _ = self.signal_sender.try_send(Signal::Pause);
+    }
+
+    /// Resume from paused state.
+    pub fn resume(&self) {
+        let _ = self.signal_sender.try_send(Signal::Resume);
+    }
+
+    /// Graceful stop: finish current tasks, don't start new ones.
+    pub fn stop(&self) {
+        let _ = self.signal_sender.try_send(Signal::Stop);
+    }
+
+    /// Immediate cancellation: cancel all in-flight tasks.
+    pub fn kill(&self) {
+        let _ = self.signal_sender.try_send(Signal::Kill);
     }
 }
 
@@ -472,6 +695,9 @@ pub enum JobStatus {
     /// Currently executing.
     Running,
 
+    /// Paused (no new tasks dispatched).
+    Paused,
+
     /// Completed successfully.
     Succeeded,
 
@@ -480,14 +706,197 @@ pub enum JobStatus {
 
     /// Cancelled before completion.
     Cancelled,
+
+    /// Stopped gracefully (finished current work).
+    Stopped,
 }
 
 impl JobStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled | Self::Stopped)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        matches!(self, Self::Paused)
     }
 }
 ```
+
+### Signalling
+
+Jobs can be controlled via signals sent through the `JobHandle`. This enables clean shutdown, burst detection pause, and task cancellation.
+
+```rust
+/// Signal that can be sent to a running job.
+#[derive(Clone, Copy, Debug)]
+pub enum Signal {
+    /// Pause execution: no new tasks start, in-flight tasks continue.
+    /// Status changes to `Paused`.
+    Pause,
+
+    /// Resume from paused state.
+    /// Status changes back to `Running`.
+    Resume,
+
+    /// Graceful stop: finish current tasks, don't start new ones.
+    /// Status changes to `Stopped` when complete.
+    Stop,
+
+    /// Immediate cancellation: cancel all in-flight tasks via CancellationToken.
+    /// Status changes to `Cancelled`.
+    Kill,
+}
+```
+
+**Signal Propagation**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Signal Propagation                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  JobHandle.pause()                                                  │
+│       │                                                             │
+│       ▼                                                             │
+│  Parent Job receives Signal::Pause                                  │
+│       │                                                             │
+│       ├── Sets status = Paused                                      │
+│       ├── Stops dispatching new tasks from its queue                │
+│       └── Propagates pause to all child jobs                        │
+│              │                                                      │
+│              ▼                                                      │
+│       Child jobs pause recursively                                  │
+│                                                                     │
+│  In-flight tasks: Continue until completion (graceful)              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Use Cases**:
+
+| Signal | Use Case |
+|--------|----------|
+| `Pause` | TileBasedPrefetcher detects X-Plane burst, pauses prefetch jobs |
+| `Resume` | Quiet period detected, resume prefetching |
+| `Stop` | Clean application shutdown |
+| `Kill` | Timeout exceeded, abort immediately |
+
+### Telemetry
+
+Jobs and tasks emit telemetry events via a sink abstraction. The executor doesn't know how events are consumed—this follows the "emit, don't present" pattern.
+
+```rust
+/// Events emitted during job/task execution.
+#[derive(Clone, Debug)]
+pub enum TelemetryEvent {
+    // --- Job Events ---
+    JobSubmitted {
+        job_id: JobId,
+        name: String,
+        priority: Priority,
+    },
+    JobStarted {
+        job_id: JobId,
+    },
+    JobCompleted {
+        job_id: JobId,
+        status: JobStatus,
+        duration: Duration,
+        tasks_succeeded: usize,
+        tasks_failed: usize,
+    },
+    JobSignalled {
+        job_id: JobId,
+        signal: Signal,
+    },
+
+    // --- Task Events ---
+    TaskStarted {
+        job_id: JobId,
+        task_name: String,
+        resource_type: ResourceType,
+    },
+    TaskCompleted {
+        job_id: JobId,
+        task_name: String,
+        result: TaskResultKind,
+        duration: Duration,
+    },
+    TaskRetrying {
+        job_id: JobId,
+        task_name: String,
+        attempt: u32,
+        delay: Duration,
+    },
+
+    // --- Resource Pool Events ---
+    ResourcePoolExhausted {
+        resource_type: ResourceType,
+        waiting_tasks: usize,
+    },
+    ResourcePoolAvailable {
+        resource_type: ResourceType,
+        available_permits: usize,
+    },
+}
+
+/// Simplified result kind for telemetry (no error details).
+#[derive(Clone, Copy, Debug)]
+pub enum TaskResultKind {
+    Success,
+    Failed,
+    Cancelled,
+}
+
+/// Sink for telemetry events.
+pub trait TelemetrySink: Send + Sync {
+    fn emit(&self, event: TelemetryEvent);
+}
+
+/// No-op sink for when telemetry is disabled.
+pub struct NullTelemetrySink;
+
+impl TelemetrySink for NullTelemetrySink {
+    fn emit(&self, _event: TelemetryEvent) {}
+}
+```
+
+**Telemetry Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Telemetry Flow                                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Job/Task Execution                                                │
+│        │                                                            │
+│        │ emit(TelemetryEvent)                                       │
+│        ▼                                                            │
+│   ┌─────────────────┐                                               │
+│   │ TelemetrySink   │ ◄── Trait (injected at startup)               │
+│   └────────┬────────┘                                               │
+│            │                                                        │
+│            ▼                                                        │
+│   ┌─────────────────┐     ┌─────────────────┐                       │
+│   │   Aggregator    │────►│    Metrics      │                       │
+│   │   (Optional)    │     │  (Prometheus)   │                       │
+│   └────────┬────────┘     └─────────────────┘                       │
+│            │                                                        │
+│            ▼                                                        │
+│   ┌─────────────────┐     ┌─────────────────┐                       │
+│   │   Status UI     │     │   Log Output    │                       │
+│   │   (TUI widget)  │     │   (tracing)     │                       │
+│   └─────────────────┘     └─────────────────┘                       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Design Rationale**:
+
+- Jobs/tasks are decoupled from presentation concerns
+- Same events can feed multiple consumers (TUI, logging, Prometheus)
+- `NullTelemetrySink` for tests and minimal overhead when disabled
+- Events are structured for efficient aggregation (job_id, durations)
 
 ### Shared Resources
 
@@ -522,6 +931,116 @@ impl Resources {
     }
 }
 ```
+
+### Coalescing
+
+X-Plane often requests the same DDS file multiple times in rapid succession (during initial load and when panning the map). The job executor integrates with coalescing to prevent duplicate work.
+
+```rust
+/// Coalescer for DDS generation jobs.
+///
+/// When multiple callers request the same DDS path, they share the same job
+/// rather than creating duplicates.
+pub struct DdsJobCoalescer {
+    /// In-flight jobs by DDS path.
+    in_flight: RwLock<HashMap<PathBuf, JobHandle>>,
+
+    /// Job executor for submitting new jobs.
+    executor: Arc<JobExecutor>,
+}
+
+impl DdsJobCoalescer {
+    pub fn new(executor: Arc<JobExecutor>) -> Self {
+        Self {
+            in_flight: RwLock::new(HashMap::new()),
+            executor,
+        }
+    }
+
+    /// Submit a DDS generation request, coalescing with in-flight jobs.
+    ///
+    /// If a job for the same path is already running, returns the existing handle.
+    /// Otherwise, creates a new job and returns its handle.
+    pub async fn submit_or_join(&self, path: PathBuf, priority: Priority) -> JobHandle {
+        // Fast path: check if already in-flight
+        {
+            let in_flight = self.in_flight.read().await;
+            if let Some(handle) = in_flight.get(&path) {
+                if !handle.status().is_terminal() {
+                    return handle.clone();
+                }
+            }
+        }
+
+        // Slow path: acquire write lock and submit new job
+        let mut in_flight = self.in_flight.write().await;
+
+        // Double-check after acquiring write lock
+        if let Some(handle) = in_flight.get(&path) {
+            if !handle.status().is_terminal() {
+                return handle.clone();
+            }
+        }
+
+        // Create and submit new job
+        let job = DdsGenerateJob::with_priority(path.clone(), priority);
+        let handle = self.executor.submit(job);
+
+        in_flight.insert(path, handle.clone());
+        handle
+    }
+
+    /// Clean up completed jobs from the in-flight map.
+    pub async fn cleanup(&self) {
+        let mut in_flight = self.in_flight.write().await;
+        in_flight.retain(|_, handle| !handle.status().is_terminal());
+    }
+}
+```
+
+**Integration with FUSE Layer**:
+
+```rust
+impl Fuse3OrthoUnionFS {
+    async fn handle_dds_request(&self, path: &Path) -> Result<Bytes> {
+        // Submit with ON_DEMAND priority (immediate)
+        let handle = self.coalescer
+            .submit_or_join(path.to_path_buf(), Priority::ON_DEMAND)
+            .await;
+
+        // Wait for completion
+        let result = handle.wait().await;
+
+        // ... return DDS data from cache ...
+    }
+}
+```
+
+**Coalescing with Prefetch**:
+
+```rust
+impl TileBasedPrefetcher {
+    async fn prefetch_dds(&self, path: PathBuf) {
+        // Submit with PREFETCH priority (lower)
+        // If an ON_DEMAND job is already running for this path,
+        // we'll join it rather than create duplicate work
+        let handle = self.coalescer
+            .submit_or_join(path, Priority::PREFETCH)
+            .await;
+
+        // Don't wait - prefetch is fire-and-forget
+        // Job runs in background, cache populated when done
+    }
+}
+```
+
+**Design Rationale**:
+
+- Extends existing `RequestCoalescer` pattern from the async pipeline
+- Multiple callers share work: X-Plane request + prefetch don't duplicate
+- Priority is respected: ON_DEMAND jobs run before PREFETCH, but they can coalesce
+- Lock granularity: read lock for check, write lock only for new jobs
+- Cleanup prevents unbounded memory growth
 
 ## Example: Tile Prefetch Implementation
 
@@ -588,6 +1107,10 @@ impl Task for EnumerateDdsFilesTask {
         "EnumerateDdsFiles"
     }
 
+    fn resource_type(&self) -> ResourceType {
+        ResourceType::CPU  // Index lookup is CPU-bound
+    }
+
     async fn execute(&self, ctx: &mut TaskContext) -> TaskResult {
         let ortho_index = &ctx.resources().ortho_index;
 
@@ -619,12 +1142,17 @@ impl Task for EnumerateDdsFilesTask {
 pub struct DdsGenerateJob {
     id: JobId,
     path: PathBuf,
+    priority: Priority,
 }
 
 impl DdsGenerateJob {
     pub fn new(path: PathBuf) -> Self {
+        Self::with_priority(path, Priority::PREFETCH)
+    }
+
+    pub fn with_priority(path: PathBuf, priority: Priority) -> Self {
         let id = JobId::new(format!("dds-{}", path.display()));
-        Self { id, path }
+        Self { id, path, priority }
     }
 }
 
@@ -641,9 +1169,8 @@ impl Job for DdsGenerateJob {
         ErrorPolicy::FailFast
     }
 
-    fn priority(&self) -> i32 {
-        // Lower priority than on-demand requests
-        -10
+    fn priority(&self) -> Priority {
+        self.priority
     }
 
     fn create_tasks(&self) -> Vec<Box<dyn Task>> {
@@ -667,6 +1194,10 @@ pub struct DownloadChunksTask {
 impl Task for DownloadChunksTask {
     fn name(&self) -> &str {
         "DownloadChunks"
+    }
+
+    fn resource_type(&self) -> ResourceType {
+        ResourceType::Network  // HTTP downloads
     }
 
     fn retry_policy(&self) -> RetryPolicy {
@@ -706,6 +1237,10 @@ impl Task for AssembleImageTask {
         "AssembleImage"
     }
 
+    fn resource_type(&self) -> ResourceType {
+        ResourceType::CPU  // Image assembly is CPU-bound
+    }
+
     async fn execute(&self, ctx: &mut TaskContext) -> TaskResult {
         // Get chunks from previous task
         let chunks: &Vec<Bytes> = ctx
@@ -733,6 +1268,10 @@ pub struct EncodeDdsTask {
 impl Task for EncodeDdsTask {
     fn name(&self) -> &str {
         "EncodeDds"
+    }
+
+    fn resource_type(&self) -> ResourceType {
+        ResourceType::CPU  // BC1 encoding is CPU-bound
     }
 
     async fn execute(&self, ctx: &mut TaskContext) -> TaskResult {
@@ -883,19 +1422,22 @@ xearthlayer/src/
 - [ ] Child job spawning works correctly (1:1 task→child relationship)
 - [ ] Error policies (FailFast, ContinueOnError, PartialSuccess) work correctly
 - [ ] Retry policies work with exponential backoff
-- [ ] Cancellation propagates from parent to children
-- [ ] Concurrency limits are respected
+- [ ] Resource pools (Network, DiskIO, CPU) limit concurrent tasks by type
+- [ ] Priority queue orders tasks correctly (ON_DEMAND > PREFETCH > HOUSEKEEPING)
+- [ ] Signalling works (pause/resume/stop/kill)
+- [ ] Telemetry events emitted via TelemetrySink
+- [ ] DDS job coalescing prevents duplicate work
 - [ ] Progress can be tracked via JobHandle
 - [ ] Existing DDS generation works via new framework
 - [ ] Tile prefetch jobs work end-to-end
 
 ## Future Considerations
 
-1. **Metrics/Observability** - Prometheus metrics for job/task durations, success rates
-2. **Priority queues** - Higher priority jobs preempt lower priority
-3. **Resource tagging** - Tasks declare resource requirements (http, cpu, disk)
-4. **Job persistence** - Optional persistence for crash recovery (not in scope)
-5. **Visualization** - Debug UI showing job graph and status
+1. **Prometheus metrics** - Export telemetry events to Prometheus for dashboards
+2. **Job persistence** - Optional persistence for crash recovery (not in scope)
+3. **Visualization** - Debug UI showing job graph and status (TUI widget)
+4. **Adaptive pools** - Auto-tune resource pool capacities based on observed performance
+5. **Work stealing** - Balance load across resource pools when one is idle
 
 ## References
 
