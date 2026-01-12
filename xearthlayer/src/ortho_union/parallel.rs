@@ -91,6 +91,12 @@ impl PartialIndex {
 /// Directories to skip full scanning (handled lazily).
 const LAZY_DIRECTORIES: &[&str] = &["terrain", "textures"];
 
+/// Directories allowed at the root level of ortho sources.
+///
+/// Only these directories are exposed in the virtual filesystem root.
+/// Everything else (Ortho4XP.cfg, build artifacts, etc.) is filtered out.
+const ALLOWED_ROOT_DIRECTORIES: &[&str] = &["Earth nav data", "terrain", "textures"];
+
 /// Scan a source directory with optimizations.
 ///
 /// - Fully scans `Earth nav data/` (DSF files need priority resolution)
@@ -127,6 +133,16 @@ pub fn scan_source_optimized(
         let virtual_path = PathBuf::from(&*name_str);
 
         if real_path.is_dir() {
+            // Filter: only allow known scenery directories at root level
+            if !ALLOWED_ROOT_DIRECTORIES.contains(&name_str.as_ref()) {
+                tracing::debug!(
+                    source = %source.display_name,
+                    dir = %name_str,
+                    "Skipping non-scenery directory at root"
+                );
+                continue;
+            }
+
             let is_lazy = LAZY_DIRECTORIES.contains(&name_str.as_ref());
 
             if is_lazy {
@@ -150,15 +166,12 @@ pub fn scan_source_optimized(
                 }
             }
         } else {
-            // Files at root level
-            if let Ok(dir_entry) = DirEntry::from_path(&real_path) {
-                partial.add_directory_entry(Path::new(""), dir_entry);
-            }
-            partial.add_file(virtual_path, real_path);
-
-            if let Some(counter) = files_counter {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
+            // Skip files at root level - only directories should appear in ortho packages
+            tracing::debug!(
+                source = %source.display_name,
+                file = %name_str,
+                "Skipping file at root level"
+            );
         }
     }
 
