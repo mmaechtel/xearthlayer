@@ -57,6 +57,8 @@ pub struct RuntimeBuilder {
     cache_dir: Option<PathBuf>,
     /// Runtime configuration
     config: RuntimeConfig,
+    /// Tokio runtime handle for spawning tasks
+    runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 impl RuntimeBuilder {
@@ -80,6 +82,7 @@ impl RuntimeBuilder {
             memory_cache: None,
             cache_dir: None,
             config: RuntimeConfig::default(),
+            runtime_handle: None,
         }
     }
 
@@ -110,6 +113,14 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the Tokio runtime handle for spawning tasks.
+    ///
+    /// This is required for the runtime to spawn background tasks.
+    pub fn with_runtime_handle(mut self, handle: tokio::runtime::Handle) -> Self {
+        self.runtime_handle = Some(handle);
+        self
+    }
+
     /// Builds the XEarthLayerRuntime with disk caching enabled.
     ///
     /// This method creates the runtime with a `DiskCacheAdapter` for chunk caching.
@@ -120,6 +131,7 @@ impl RuntimeBuilder {
     /// - `async_provider` is required
     /// - `memory_cache` is required
     /// - `cache_dir` is required (use `build_without_disk_cache` if disk cache not needed)
+    /// - `runtime_handle` is required
     pub fn build(self) -> XEarthLayerRuntime {
         let async_provider = self
             .async_provider
@@ -130,6 +142,9 @@ impl RuntimeBuilder {
         let cache_dir = self.cache_dir.expect(
             "RuntimeBuilder: cache_dir is required (use build_without_disk_cache if not needed)",
         );
+        let runtime_handle = self
+            .runtime_handle
+            .expect("RuntimeBuilder: runtime_handle is required");
 
         let cache_adapter = Arc::new(ExecutorCacheAdapter::new(
             memory_cache,
@@ -147,7 +162,7 @@ impl RuntimeBuilder {
             disk_cache,
         );
 
-        XEarthLayerRuntime::new(factory, cache_adapter, self.config)
+        XEarthLayerRuntime::new(factory, cache_adapter, self.config, runtime_handle)
     }
 
     /// Builds the XEarthLayerRuntime without disk caching.
@@ -160,6 +175,7 @@ impl RuntimeBuilder {
     /// Panics if required components are not set:
     /// - `async_provider` is required
     /// - `memory_cache` is required
+    /// - `runtime_handle` is required
     pub fn build_without_disk_cache(self) -> XEarthLayerRuntime {
         let async_provider = self
             .async_provider
@@ -167,6 +183,9 @@ impl RuntimeBuilder {
         let memory_cache = self
             .memory_cache
             .expect("RuntimeBuilder: memory_cache is required");
+        let runtime_handle = self
+            .runtime_handle
+            .expect("RuntimeBuilder: runtime_handle is required");
 
         let cache_adapter = Arc::new(ExecutorCacheAdapter::new(
             memory_cache,
@@ -180,7 +199,7 @@ impl RuntimeBuilder {
             Arc::clone(&cache_adapter),
         );
 
-        XEarthLayerRuntime::new(factory, cache_adapter, self.config)
+        XEarthLayerRuntime::new(factory, cache_adapter, self.config, runtime_handle)
     }
 
     /// Creates a factory with DiskCacheAdapter.
@@ -288,10 +307,12 @@ mod tests {
         let encoder = create_test_encoder();
         let cache = create_test_memory_cache();
         let async_provider = create_test_provider();
+        let handle = tokio::runtime::Handle::current();
 
         let runtime = RuntimeBuilder::new("bing", DdsFormat::BC1, encoder)
             .with_async_provider(async_provider)
             .with_memory_cache(cache)
+            .with_runtime_handle(handle)
             .build_without_disk_cache();
 
         assert!(runtime.is_running());
@@ -303,6 +324,7 @@ mod tests {
         let encoder = create_test_encoder();
         let cache = create_test_memory_cache();
         let async_provider = create_test_provider();
+        let handle = tokio::runtime::Handle::current();
 
         // Use temp dir for test
         let temp_dir = std::env::temp_dir().join("xearthlayer_test_runtime_builder");
@@ -311,31 +333,49 @@ mod tests {
             .with_async_provider(async_provider)
             .with_memory_cache(cache)
             .with_cache_dir(temp_dir)
+            .with_runtime_handle(handle)
             .build();
 
         assert!(runtime.is_running());
         runtime.shutdown().await;
     }
 
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "async_provider is required")]
-    fn test_builder_panics_without_provider() {
+    async fn test_builder_panics_without_provider() {
         let encoder = create_test_encoder();
         let cache = create_test_memory_cache();
+        let handle = tokio::runtime::Handle::current();
 
         RuntimeBuilder::new("test", DdsFormat::BC1, encoder)
             .with_memory_cache(cache)
+            .with_runtime_handle(handle)
             .build_without_disk_cache();
     }
 
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "memory_cache is required")]
-    fn test_builder_panics_without_cache() {
+    async fn test_builder_panics_without_cache() {
         let encoder = create_test_encoder();
+        let async_provider = create_test_provider();
+        let handle = tokio::runtime::Handle::current();
+
+        RuntimeBuilder::new("test", DdsFormat::BC1, encoder)
+            .with_async_provider(async_provider)
+            .with_runtime_handle(handle)
+            .build_without_disk_cache();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "runtime_handle is required")]
+    async fn test_builder_panics_without_runtime_handle() {
+        let encoder = create_test_encoder();
+        let cache = create_test_memory_cache();
         let async_provider = create_test_provider();
 
         RuntimeBuilder::new("test", DdsFormat::BC1, encoder)
             .with_async_provider(async_provider)
+            .with_memory_cache(cache)
             .build_without_disk_cache();
     }
 }

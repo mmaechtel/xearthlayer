@@ -303,10 +303,14 @@ where
 
         // Create and submit job (coalescing is handled by FUSE layer)
         let job = factory.create_job(tile, priority);
+        let job_id = job.id();
+        debug!(job_id = %job_id, tile = ?tile, "Created DDS generation job");
+
         let handle = submitter.try_submit_boxed(job);
 
         match handle {
             Some(mut handle) => {
+                debug!(job_id = %job_id, "Job submitted to executor");
                 let memory_cache = Arc::clone(memory_cache);
                 let cancellation = request.cancellation.clone();
 

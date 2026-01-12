@@ -104,12 +104,18 @@ impl XEarthLayerRuntime {
     /// * `factory` - Factory for creating DDS generation jobs
     /// * `memory_cache` - Memory cache for fast-path lookups
     /// * `config` - Runtime configuration
+    /// * `handle` - Handle to the Tokio runtime for spawning tasks
     ///
     /// # Type Parameters
     ///
     /// * `F` - DDS job factory type
     /// * `M` - Memory cache type
-    pub fn new<F, M>(factory: Arc<F>, memory_cache: Arc<M>, config: RuntimeConfig) -> Self
+    pub fn new<F, M>(
+        factory: Arc<F>,
+        memory_cache: Arc<M>,
+        config: RuntimeConfig,
+        handle: tokio::runtime::Handle,
+    ) -> Self
     where
         F: DdsJobFactory + 'static,
         M: DaemonMemoryCache + 'static,
@@ -126,8 +132,10 @@ impl XEarthLayerRuntime {
         let shutdown_token = CancellationToken::new();
 
         // Spawn the daemon as a background task with shutdown coordination
+        // Use handle.spawn() instead of tokio::spawn() so we don't require
+        // the calling thread to be in a runtime context.
         let daemon_shutdown = shutdown_token.clone();
-        let daemon_handle = Some(tokio::spawn(async move {
+        let daemon_handle = Some(handle.spawn(async move {
             daemon.run(daemon_shutdown).await;
         }));
 
@@ -256,9 +264,10 @@ mod tests {
         let factory = Arc::new(MockJobFactory);
         let memory_cache = Arc::new(MockMemoryCache);
         let config = RuntimeConfig::default();
+        let handle = tokio::runtime::Handle::current();
 
         // Use new() which creates its own coalescer
-        let runtime = XEarthLayerRuntime::new(factory, memory_cache, config);
+        let runtime = XEarthLayerRuntime::new(factory, memory_cache, config, handle);
 
         // Runtime should be running
         assert!(runtime.is_running());
@@ -272,15 +281,17 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_multiple_instances() {
         // Test that multiple runtimes can be created and shut down independently
+        let handle = tokio::runtime::Handle::current();
+
         let factory1 = Arc::new(MockJobFactory);
         let memory_cache1 = Arc::new(MockMemoryCache);
         let config1 = RuntimeConfig::default();
-        let runtime1 = XEarthLayerRuntime::new(factory1, memory_cache1, config1);
+        let runtime1 = XEarthLayerRuntime::new(factory1, memory_cache1, config1, handle.clone());
 
         let factory2 = Arc::new(MockJobFactory);
         let memory_cache2 = Arc::new(MockMemoryCache);
         let config2 = RuntimeConfig::default();
-        let runtime2 = XEarthLayerRuntime::new(factory2, memory_cache2, config2);
+        let runtime2 = XEarthLayerRuntime::new(factory2, memory_cache2, config2, handle);
 
         // Both should be running
         assert!(runtime1.is_running());
@@ -296,8 +307,9 @@ mod tests {
         let factory = Arc::new(MockJobFactory);
         let memory_cache = Arc::new(MockMemoryCache);
         let config = RuntimeConfig::default();
+        let handle = tokio::runtime::Handle::current();
 
-        let runtime = XEarthLayerRuntime::new(factory, memory_cache, config);
+        let runtime = XEarthLayerRuntime::new(factory, memory_cache, config, handle);
 
         // Client should be connected initially
         let client = runtime.dds_client();
