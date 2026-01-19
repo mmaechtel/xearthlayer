@@ -11,7 +11,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::metrics::TelemetrySnapshot;
 
 /// Widget displaying error statistics.
 pub struct ErrorsWidget<'a> {

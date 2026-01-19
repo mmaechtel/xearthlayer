@@ -54,6 +54,7 @@ use super::queue::{PriorityQueue, QueuedTask};
 use super::resource_pool::{ResourcePoolConfig, ResourcePools};
 use super::task::{Task, TaskResult};
 use super::telemetry::{NullTelemetrySink, TelemetryEvent, TelemetrySink};
+use crate::metrics::MetricsClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -432,6 +433,9 @@ pub struct JobExecutor {
 
     /// Number of currently dispatched tasks.
     dispatched_count: usize,
+
+    /// Metrics client for emitting metrics events.
+    metrics_client: Option<MetricsClient>,
 }
 
 impl JobExecutor {
@@ -447,6 +451,18 @@ impl JobExecutor {
         config: ExecutorConfig,
         telemetry: Arc<dyn TelemetrySink>,
     ) -> (Self, JobSubmitter) {
+        Self::with_telemetry_and_metrics(config, telemetry, None)
+    }
+
+    /// Creates a new job executor with telemetry and metrics.
+    ///
+    /// The `MetricsClient` will be passed to all tasks, enabling per-chunk
+    /// metrics emission for downloads, disk cache, and job lifecycle events.
+    pub fn with_telemetry_and_metrics(
+        config: ExecutorConfig,
+        telemetry: Arc<dyn TelemetrySink>,
+        metrics_client: Option<MetricsClient>,
+    ) -> (Self, JobSubmitter) {
         let (job_tx, job_rx) = mpsc::channel(config.job_channel_capacity);
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
 
@@ -461,6 +477,7 @@ impl JobExecutor {
             work_notify: Arc::new(Notify::new()),
             config,
             dispatched_count: 0,
+            metrics_client,
         };
 
         let submitter = JobSubmitter { sender: job_tx };
@@ -637,12 +654,16 @@ impl JobExecutor {
                     }
 
                     // Create task context with shared reference to accumulated outputs
-                    let ctx = TaskContext::with_child_sender(
+                    let mut ctx = TaskContext::with_child_sender(
                         job_id.clone(),
                         job.cancellation.clone(),
                         job.child_job_tx.clone(),
                         Arc::clone(&job.task_outputs),
                     );
+                    // Attach metrics client if available
+                    if let Some(ref metrics) = self.metrics_client {
+                        ctx = ctx.with_metrics(metrics.clone());
+                    }
                     (true, ctx)
                 } else {
                     // Job was removed, skip this task

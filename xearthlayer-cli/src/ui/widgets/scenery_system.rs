@@ -21,8 +21,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use xearthlayer::metrics::TelemetrySnapshot;
 use xearthlayer::runtime::HealthSnapshot;
-use xearthlayer::telemetry::TelemetrySnapshot;
 
 use super::primitives::{Sparkline, SparklineHistory};
 

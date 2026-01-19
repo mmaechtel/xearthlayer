@@ -16,10 +16,11 @@ use crate::executor::{
     ChunkProvider, ChunkResults, DiskCache, DownloadConfig, ResourceType, Task, TaskContext,
     TaskOutput, TaskResult,
 };
+use crate::metrics::{MetricsClient, OptionalMetrics};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, info, trace, warn};
@@ -112,18 +113,20 @@ where
             }
 
             let job_id = ctx.job_id();
+            let metrics = ctx.metrics_clone();
             debug!(
                 job_id = %job_id,
                 tile = ?self.tile,
                 "Starting chunk downloads"
             );
 
-            // Download all chunks
+            // Download all chunks with metrics tracking
             let chunks = download_all_chunks(
                 self.tile,
                 Arc::clone(&self.provider),
                 Arc::clone(&self.disk_cache),
                 &self.config,
+                metrics,
             )
             .await;
 
@@ -184,6 +187,7 @@ async fn download_all_chunks<P, D>(
     provider: Arc<P>,
     disk_cache: Arc<D>,
     config: &DownloadConfig,
+    metrics: Option<MetricsClient>,
 ) -> ChunkResults
 where
     P: ChunkProvider,
@@ -203,6 +207,7 @@ where
         let timeout = config.request_timeout;
         let max_retries = config.max_retries;
         let sem = Arc::clone(&semaphore);
+        let chunk_metrics = metrics.clone();
 
         downloads.spawn(async move {
             // Acquire semaphore permit before starting download
@@ -216,6 +221,7 @@ where
                 disk_cache,
                 timeout,
                 max_retries,
+                chunk_metrics,
             )
             .await
         });
@@ -251,6 +257,12 @@ where
 }
 
 /// Downloads a single chunk, checking disk cache first.
+///
+/// Emits metrics events for:
+/// - Disk cache hit/miss
+/// - Download started/completed/failed
+/// - Download retries
+#[allow(clippy::too_many_arguments)]
 async fn download_chunk_with_cache<P, D>(
     tile: TileCoord,
     chunk_row: u8,
@@ -259,6 +271,7 @@ async fn download_chunk_with_cache<P, D>(
     disk_cache: Arc<D>,
     timeout: Duration,
     max_retries: u32,
+    metrics: Option<MetricsClient>,
 ) -> Result<ChunkData, ChunkError>
 where
     P: ChunkProvider,
@@ -276,12 +289,17 @@ where
             chunk_col = chunk_col,
             "Chunk cache hit"
         );
+        // Emit disk cache hit metric
+        metrics.disk_cache_hit(cached.len() as u64);
         return Ok(ChunkData {
             row: chunk_row,
             col: chunk_col,
             data: cached,
         });
     }
+
+    // Emit disk cache miss metric
+    metrics.disk_cache_miss();
 
     // Calculate global coordinates for the provider
     let global_row = tile.row * 16 + chunk_row as u32;
@@ -299,7 +317,11 @@ where
         "Starting chunk download"
     );
 
+    // Track download started
+    metrics.download_started();
+
     // Try downloading with retries
+    let download_start = Instant::now();
     let mut last_error = String::new();
     for attempt in 1..=max_retries {
         debug!(
@@ -318,23 +340,30 @@ where
         .await
         {
             Ok(Ok(data)) => {
+                let duration_us = download_start.elapsed().as_micros() as u64;
+                let bytes = data.len() as u64;
+
                 info!(
                     provider = provider.name(),
                     global_row = global_row,
                     global_col = global_col,
                     zoom = chunk_zoom,
-                    bytes = data.len(),
+                    bytes = bytes,
                     attempt = attempt,
                     "Chunk download success"
                 );
 
-                // Cache the chunk (fire and forget)
+                // Emit download completed metric
+                metrics.download_completed(bytes, duration_us);
+
+                // Cache the chunk (fire and forget, with metrics)
                 spawn_cache_write(
                     Arc::clone(&disk_cache),
                     tile,
                     chunk_row,
                     chunk_col,
                     data.clone(),
+                    metrics.clone(),
                 );
 
                 return Ok(ChunkData {
@@ -358,6 +387,10 @@ where
                 if !e.is_retryable {
                     break;
                 }
+                // Emit retry metric if we'll retry
+                if attempt < max_retries {
+                    metrics.download_retried();
+                }
             }
             Err(_) => {
                 warn!(
@@ -370,6 +403,10 @@ where
                     "Chunk download timeout"
                 );
                 last_error = "timeout".to_string();
+                // Emit retry metric if we'll retry
+                if attempt < max_retries {
+                    metrics.download_retried();
+                }
             }
         }
 
@@ -381,6 +418,9 @@ where
         }
     }
 
+    // Emit download failed metric
+    metrics.download_failed();
+
     Err(ChunkError {
         row: chunk_row,
         col: chunk_col,
@@ -390,19 +430,32 @@ where
 }
 
 /// Spawns a fire-and-forget task to write chunk data to disk cache.
+///
+/// Emits `disk_write_started` when beginning and `disk_write_completed`
+/// with byte count and duration when finished.
 fn spawn_cache_write<D>(
     disk_cache: Arc<D>,
     tile: TileCoord,
     chunk_row: u8,
     chunk_col: u8,
     data: Vec<u8>,
+    metrics: Option<MetricsClient>,
 ) where
     D: DiskCache,
 {
+    let bytes = data.len() as u64;
     tokio::spawn(async move {
+        // Track disk write started
+        metrics.disk_write_started();
+        let start = Instant::now();
+
         let _ = disk_cache
             .put(tile.row, tile.col, tile.zoom, chunk_row, chunk_col, data)
             .await;
+
+        // Track disk write completed
+        let duration_us = start.elapsed().as_micros() as u64;
+        metrics.disk_write_completed(bytes, duration_us);
     });
 }
 

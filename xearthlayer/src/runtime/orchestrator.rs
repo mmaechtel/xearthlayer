@@ -45,10 +45,10 @@ use tracing::info;
 
 use crate::executor::{
     ChannelDdsClient, DaemonMemoryCache, DdsClient, ExecutorDaemon, ExecutorDaemonConfig,
-    MetricsTelemetrySink, MultiplexTelemetrySink, TelemetrySink, TracingTelemetrySink,
+    TelemetrySink, TracingTelemetrySink,
 };
 use crate::jobs::DdsJobFactory;
-use crate::telemetry::PipelineMetrics;
+use crate::metrics::MetricsClient;
 
 /// Configuration for the XEarthLayer runtime.
 #[derive(Debug, Clone, Default)]
@@ -122,14 +122,15 @@ impl XEarthLayerRuntime {
         F: DdsJobFactory + 'static,
         M: DaemonMemoryCache + 'static,
     {
-        // Default to tracing-only telemetry (for backwards compatibility)
-        Self::with_metrics(factory, memory_cache, config, handle, None)
+        // Default to tracing-only telemetry, no metrics
+        Self::with_metrics_client(factory, memory_cache, config, handle, None)
     }
 
-    /// Create a new runtime with pipeline metrics for dashboard UI.
+    /// Create a new runtime with the event-based metrics client.
     ///
     /// This starts the executor daemon in a background task immediately.
-    /// When metrics are provided, executor events update the dashboard.
+    /// When metrics are provided, per-chunk and job events flow to the
+    /// metrics daemon for real-time dashboard updates.
     ///
     /// # Arguments
     ///
@@ -137,18 +138,18 @@ impl XEarthLayerRuntime {
     /// * `memory_cache` - Memory cache for fast-path lookups
     /// * `config` - Runtime configuration
     /// * `handle` - Handle to the Tokio runtime for spawning tasks
-    /// * `metrics` - Optional pipeline metrics for UI updates
+    /// * `metrics_client` - Optional metrics client for event emission
     ///
     /// # Type Parameters
     ///
     /// * `F` - DDS job factory type
     /// * `M` - Memory cache type
-    pub fn with_metrics<F, M>(
+    pub fn with_metrics_client<F, M>(
         factory: Arc<F>,
         memory_cache: Arc<M>,
         config: RuntimeConfig,
         handle: tokio::runtime::Handle,
-        metrics: Option<Arc<PipelineMetrics>>,
+        metrics_client: Option<MetricsClient>,
     ) -> Self
     where
         F: DdsJobFactory + 'static,
@@ -156,24 +157,25 @@ impl XEarthLayerRuntime {
     {
         info!("Starting XEarthLayer runtime");
 
-        // Build telemetry sink - always log via tracing, optionally update metrics
-        let telemetry: Arc<dyn TelemetrySink> = match metrics {
-            Some(m) => {
-                // Multiplex: both logging and metrics updates
-                Arc::new(MultiplexTelemetrySink::new(vec![
-                    Arc::new(TracingTelemetrySink) as Arc<dyn TelemetrySink>,
-                    Arc::new(MetricsTelemetrySink::new(m)) as Arc<dyn TelemetrySink>,
-                ]))
-            }
-            None => {
-                // Logging only
-                Arc::new(TracingTelemetrySink)
-            }
-        };
+        // Use tracing for logging
+        let telemetry: Arc<dyn TelemetrySink> = Arc::new(TracingTelemetrySink);
 
-        // Create the daemon with telemetry and its channel
-        let (daemon, job_tx) =
-            ExecutorDaemon::with_telemetry(config.daemon_config, factory, memory_cache, telemetry);
+        // Create the daemon with or without metrics
+        let (daemon, job_tx) = match metrics_client {
+            Some(client) => ExecutorDaemon::with_metrics_client(
+                config.daemon_config,
+                factory,
+                memory_cache,
+                telemetry,
+                client,
+            ),
+            None => ExecutorDaemon::with_telemetry(
+                config.daemon_config,
+                factory,
+                memory_cache,
+                telemetry,
+            ),
+        };
 
         // Create the DDS client for producers
         let dds_client = Arc::new(ChannelDdsClient::new(job_tx));

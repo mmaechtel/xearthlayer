@@ -88,6 +88,14 @@ impl RequestOrigin {
             RequestOrigin::Prefetch => false,
         }
     }
+
+    /// Returns true if this request originated from FUSE (X-Plane file access).
+    ///
+    /// Used for metrics to differentiate between on-demand FUSE requests
+    /// and background prefetch/prewarm requests.
+    pub fn is_fuse(self) -> bool {
+        matches!(self, RequestOrigin::Fuse)
+    }
 }
 
 impl std::fmt::Display for RequestOrigin {

@@ -14,7 +14,6 @@ use crate::provider::{
     AsyncProviderFactory, AsyncProviderType, AsyncReqwestClient, Provider, ProviderConfig,
     ProviderFactory, ReqwestClient,
 };
-use crate::telemetry::PipelineMetrics;
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
 use crate::tile::{DefaultTileGenerator, ParallelConfig, ParallelTileGenerator, TileGenerator};
 use std::path::PathBuf;
@@ -197,71 +196,6 @@ pub fn create_network_logger(
             60, // Log every 60 seconds
         ))
     }
-}
-
-/// Initialize disk cache size metric from existing cache directory.
-///
-/// This runs asynchronously to avoid blocking startup for large caches.
-pub fn init_disk_cache_metrics(
-    cache_dir: Option<&PathBuf>,
-    metrics: &Arc<PipelineMetrics>,
-    runtime_handle: &Handle,
-) {
-    let Some(dir) = cache_dir else { return };
-
-    let chunks_dir = dir.join("chunks");
-    if !chunks_dir.exists() {
-        return;
-    }
-
-    let metrics_clone = Arc::clone(metrics);
-    let chunks_dir_clone = chunks_dir.clone();
-
-    runtime_handle.spawn(async move {
-        match calculate_directory_size(&chunks_dir_clone).await {
-            Ok(size) => {
-                metrics_clone.set_disk_cache_size(size);
-                tracing::info!(
-                    size_bytes = size,
-                    size_human = %crate::config::format_size(size as usize),
-                    "Initialized disk cache size from existing cache"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to calculate disk cache size");
-            }
-        }
-    });
-}
-
-/// Calculate the total size of a directory recursively.
-async fn calculate_directory_size(path: &std::path::Path) -> std::io::Result<u64> {
-    use tokio::fs;
-
-    let mut total_size = 0u64;
-    let mut dirs_to_scan = vec![path.to_path_buf()];
-
-    while let Some(dir) = dirs_to_scan.pop() {
-        let mut entries = match fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let metadata = match entry.metadata().await {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            if metadata.is_dir() {
-                dirs_to_scan.push(entry.path());
-            } else if metadata.is_file() {
-                total_size += metadata.len();
-            }
-        }
-    }
-
-    Ok(total_size)
 }
 
 #[cfg(test)]

@@ -98,6 +98,47 @@ pub struct TelemetrySnapshot {
     pub total_encode_time_ms: u64,
 }
 
+impl Default for TelemetrySnapshot {
+    fn default() -> Self {
+        Self {
+            uptime: Duration::ZERO,
+            fuse_requests_active: 0,
+            fuse_requests_waiting: 0,
+            jobs_submitted: 0,
+            fuse_jobs_submitted: 0,
+            jobs_completed: 0,
+            jobs_failed: 0,
+            jobs_timed_out: 0,
+            jobs_active: 0,
+            jobs_coalesced: 0,
+            chunks_downloaded: 0,
+            chunks_failed: 0,
+            chunks_retried: 0,
+            bytes_downloaded: 0,
+            downloads_active: 0,
+            memory_cache_hits: 0,
+            memory_cache_misses: 0,
+            memory_cache_hit_rate: 0.0,
+            memory_cache_size_bytes: 0,
+            disk_cache_hits: 0,
+            disk_cache_misses: 0,
+            disk_cache_hit_rate: 0.0,
+            disk_cache_size_bytes: 0,
+            encodes_completed: 0,
+            encodes_active: 0,
+            bytes_encoded: 0,
+            jobs_per_second: 0.0,
+            fuse_jobs_per_second: 0.0,
+            chunks_per_second: 0.0,
+            bytes_per_second: 0.0,
+            peak_bytes_per_second: 0.0,
+            total_download_time_ms: 0,
+            total_assembly_time_ms: 0,
+            total_encode_time_ms: 0,
+        }
+    }
+}
+
 impl TelemetrySnapshot {
     /// Returns the total number of tiles generated (completed jobs).
     pub fn tiles_generated(&self) -> u64 {
@@ -306,6 +347,14 @@ mod tests {
             total_assembly_time_ms: 15_000,
             total_encode_time_ms: 45_000,
         }
+    }
+
+    #[test]
+    fn test_default() {
+        let snapshot = TelemetrySnapshot::default();
+        assert_eq!(snapshot.uptime, Duration::ZERO);
+        assert_eq!(snapshot.jobs_submitted, 0);
+        assert_eq!(snapshot.bytes_per_second, 0.0);
     }
 
     #[test]

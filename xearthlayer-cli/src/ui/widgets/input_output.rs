@@ -20,7 +20,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::metrics::TelemetrySnapshot;
 
 use super::primitives::{format_bytes, format_throughput, Sparkline, SparklineHistory};
 

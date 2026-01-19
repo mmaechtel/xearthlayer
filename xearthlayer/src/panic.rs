@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-use crate::telemetry::TelemetrySnapshot;
+use crate::metrics::TelemetrySnapshot;
 
 /// Global mount point registry for panic cleanup.
 static MOUNT_REGISTRY: OnceLock<Mutex<MountRegistry>> = OnceLock::new();

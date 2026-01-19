@@ -60,6 +60,7 @@ use crate::executor::{
     TracingTelemetrySink,
 };
 use crate::jobs::DdsJobFactory;
+use crate::metrics::MetricsClient;
 use crate::runtime::{DdsResponse, JobRequest};
 use std::sync::Arc;
 use std::time::Instant;
@@ -170,6 +171,9 @@ where
 
     /// Channel receiver for requests.
     request_rx: mpsc::Receiver<JobRequest>,
+
+    /// Optional metrics client for event-based metrics.
+    metrics_client: Option<MetricsClient>,
 }
 
 impl<F, M> ExecutorDaemon<F, M>
@@ -225,6 +229,47 @@ where
             factory,
             memory_cache,
             request_rx,
+            metrics_client: None,
+        };
+
+        (daemon, request_tx)
+    }
+
+    /// Creates a new daemon with the event-based metrics client.
+    ///
+    /// This constructor enables metrics collection via the `MetricsClient`
+    /// for fire-and-forget event emission. The client is passed through to
+    /// the `JobExecutor` so tasks receive it via `TaskContext`.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Daemon configuration
+    /// * `factory` - Factory for creating DDS jobs
+    /// * `memory_cache` - Memory cache for fast-path lookups
+    /// * `telemetry` - Telemetry sink for emitting executor events
+    /// * `metrics_client` - Metrics client for event emission
+    pub fn with_metrics_client(
+        config: ExecutorDaemonConfig,
+        factory: Arc<F>,
+        memory_cache: Arc<M>,
+        telemetry: Arc<dyn TelemetrySink>,
+        metrics_client: MetricsClient,
+    ) -> (Self, mpsc::Sender<JobRequest>) {
+        let (request_tx, request_rx) = mpsc::channel(config.channel_capacity);
+        // Pass metrics_client to executor so tasks receive it via TaskContext
+        let (executor, submitter) = JobExecutor::with_telemetry_and_metrics(
+            config.executor,
+            telemetry,
+            Some(metrics_client.clone()),
+        );
+
+        let daemon = Self {
+            executor,
+            submitter,
+            factory,
+            memory_cache,
+            request_rx,
+            metrics_client: Some(metrics_client),
         };
 
         (daemon, request_tx)
@@ -249,6 +294,7 @@ where
             factory,
             memory_cache,
             mut request_rx,
+            metrics_client,
         } = self;
 
         // Spawn the executor in a separate task
@@ -275,6 +321,7 @@ where
                         &submitter,
                         &factory,
                         &memory_cache,
+                        metrics_client.as_ref(),
                     ).await;
                 }
             }
@@ -290,6 +337,7 @@ where
         submitter: &ExecutorSubmitter,
         factory: &Arc<F>,
         memory_cache: &Arc<M>,
+        metrics_client: Option<&MetricsClient>,
     ) {
         let start = Instant::now();
         let tile = request.tile;
@@ -323,10 +371,20 @@ where
                 "Cache hit"
             );
 
+            // Track cache hit
+            if let Some(client) = metrics_client {
+                client.memory_cache_hit();
+            }
+
             if let Some(tx) = request.response_tx {
                 let _ = tx.send(DdsResponse::cache_hit(data, duration));
             }
             return;
+        }
+
+        // Track cache miss
+        if let Some(client) = metrics_client {
+            client.memory_cache_miss();
         }
 
         // Create and submit job (coalescing is handled by FUSE layer)
@@ -339,8 +397,16 @@ where
         match handle {
             Some(mut handle) => {
                 debug!(job_id = %job_id, "Job submitted to executor");
+
+                // Track job submitted (FUSE requests are from RequestOrigin::Fuse)
+                let is_fuse = origin.is_fuse();
+                if let Some(client) = metrics_client {
+                    client.job_submitted(is_fuse);
+                }
+
                 let memory_cache = Arc::clone(memory_cache);
                 let cancellation = request.cancellation.clone();
+                let metrics_for_completion = metrics_client.cloned();
 
                 tokio::spawn(async move {
                     // Wait for job completion
@@ -349,8 +415,14 @@ where
                             let status = handle.status();
                             let duration = start.elapsed();
 
+                            // Track job completion
+                            let success = status == JobStatus::Succeeded;
+                            if let Some(ref client) = metrics_for_completion {
+                                client.job_completed(success, duration.as_micros() as u64);
+                            }
+
                             // Read result from cache
-                            let data = if status == JobStatus::Succeeded {
+                            let data = if success {
                                 memory_cache.get(tile.row, tile.col, tile.zoom).await
                                     .unwrap_or_default()
                             } else {

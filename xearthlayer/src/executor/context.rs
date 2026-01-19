@@ -31,6 +31,7 @@
 
 use super::job::{Job, JobId};
 use super::task::TaskOutput;
+use crate::metrics::MetricsClient;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -68,6 +69,9 @@ pub struct TaskContext {
 
     /// Count of child jobs spawned by this task.
     spawned_children: usize,
+
+    /// Optional metrics client for emitting events.
+    metrics: Option<MetricsClient>,
 }
 
 /// Sender for spawning child jobs.
@@ -102,6 +106,7 @@ impl TaskContext {
             task_outputs: Arc::new(RwLock::new(HashMap::new())),
             child_job_sender: None,
             spawned_children: 0,
+            metrics: None,
         }
     }
 
@@ -127,7 +132,32 @@ impl TaskContext {
                 sender: child_sender,
             }),
             spawned_children: 0,
+            metrics: None,
         }
+    }
+
+    /// Sets the metrics client for this context.
+    ///
+    /// This allows tasks to emit metrics events during execution.
+    pub fn with_metrics(mut self, metrics: MetricsClient) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Returns a reference to the metrics client, if available.
+    ///
+    /// Tasks can use this to emit metrics events. Returns `None` if
+    /// metrics are not configured for this context.
+    pub fn metrics(&self) -> Option<&MetricsClient> {
+        self.metrics.as_ref()
+    }
+
+    /// Returns a clone of the metrics client, if available.
+    ///
+    /// Useful when you need to pass the client to async operations
+    /// that outlive the context reference.
+    pub fn metrics_clone(&self) -> Option<MetricsClient> {
+        self.metrics.clone()
     }
 
     /// Returns the parent job's ID.

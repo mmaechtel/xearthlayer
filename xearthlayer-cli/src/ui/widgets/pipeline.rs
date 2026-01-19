@@ -15,7 +15,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::metrics::TelemetrySnapshot;
 
 /// Sparkline characters for rate visualization (8 levels).
 const SPARKLINE_CHARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

@@ -12,10 +12,10 @@ use crate::coord::to_tile_coords;
 use crate::executor::{DdsClient, ExecutorCacheAdapter, MemoryCacheAdapter};
 use crate::fuse::{MountHandle, SpawnedMountHandle};
 use crate::log::Logger;
+use crate::metrics::{MetricsSystem, TelemetrySnapshot, TuiReporter};
 use crate::prefetch::{FuseLoadMonitor, TileRequestCallback};
 use crate::provider::{AsyncProviderType, Provider, ProviderConfig};
 use crate::runtime::{SharedRuntimeHealth, XEarthLayerRuntime};
-use crate::telemetry::{PipelineMetrics, TelemetrySnapshot};
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
 use crate::tile::{TileGenerator, TileRequest};
 use std::path::PathBuf;
@@ -94,8 +94,8 @@ pub struct XEarthLayerService {
     /// Cache directory for disk cache
     #[allow(dead_code)]
     cache_dir: Option<PathBuf>,
-    /// Pipeline telemetry metrics
-    metrics: Arc<PipelineMetrics>,
+    /// Metrics system for event-based telemetry
+    metrics_system: Option<MetricsSystem>,
     /// XEarthLayer runtime (job executor daemon)
     xearthlayer_runtime: Option<XEarthLayerRuntime>,
     /// DDS client for requesting tile generation
@@ -265,13 +265,10 @@ impl XEarthLayerService {
         let network_stats_logger =
             builder::create_network_logger(&config, network_stats, logger.clone());
 
-        // 8. Create pipeline telemetry metrics
-        let metrics = Arc::new(PipelineMetrics::new());
+        // 8. Create metrics system for event-based telemetry
+        let metrics_system = MetricsSystem::new(&runtime_handle);
 
-        // 9. Initialize disk cache size from existing cache (async background task)
-        builder::init_disk_cache_metrics(cache_dir.as_ref(), &metrics, &runtime_handle);
-
-        // 10. Create XEarthLayer runtime with job executor daemon
+        // 9. Create XEarthLayer runtime with job executor daemon
         // Note: The runtime is created lazily when needed (when async_provider is available)
         // For now, store None and create on first DDS handler request
         let (xearthlayer_runtime, dds_client) = if let Some(ref async_prov) = async_provider {
@@ -293,7 +290,7 @@ impl XEarthLayerService {
                         .unwrap_or_else(|| PathBuf::from("/tmp/xearthlayer")),
                 )
                 .with_runtime_handle(runtime_handle.clone())
-                .with_metrics(Arc::clone(&metrics)) // Wire metrics for dashboard UI
+                .with_metrics_client(metrics_system.client()) // Wire metrics for dashboard UI
                 .build();
 
                 let client = runtime.dds_client();
@@ -321,7 +318,7 @@ impl XEarthLayerService {
             memory_cache_adapter,
             executor_cache_adapter,
             cache_dir,
-            metrics,
+            metrics_system: Some(metrics_system),
             xearthlayer_runtime,
             dds_client,
             tile_request_callback: None,
@@ -370,38 +367,27 @@ impl XEarthLayerService {
     ///
     /// The snapshot is safe to use for display without blocking the pipeline.
     ///
-    /// Note: This automatically updates cache size metrics before taking
-    /// the snapshot, ensuring accurate cache utilization data.
+    /// Get a telemetry snapshot for dashboard display.
+    ///
+    /// Note: Memory cache size is updated by tasks when they write to the cache,
+    /// providing accurate real-time data. This method only reads the current state.
     pub fn telemetry_snapshot(&self) -> TelemetrySnapshot {
-        // Update cache sizes from the cache system
-        self.update_cache_sizes();
-        self.metrics.snapshot()
-    }
-
-    /// Update cache size metrics from the cache systems.
-    ///
-    /// This is called automatically by `telemetry_snapshot()`, but can also
-    /// be called manually if you need to update metrics without taking a
-    /// snapshot.
-    fn update_cache_sizes(&self) {
-        // Get memory cache size from the shared async pipeline cache
-        if let Some(ref mem_cache) = self.memory_cache {
-            self.metrics
-                .set_memory_cache_size(mem_cache.size_bytes() as u64);
+        // Generate snapshot using TuiReporter
+        match &self.metrics_system {
+            Some(system) => {
+                let reporter = TuiReporter::new();
+                system.snapshot(&reporter)
+            }
+            None => TelemetrySnapshot::default(),
         }
-
-        // Note: Disk cache size (chunk-level) is tracked incrementally in the
-        // download stage via add_disk_cache_bytes(). The ParallelDiskCache stores
-        // chunks directly, and the download stage updates metrics as chunks are written.
     }
 
-    /// Get a reference to the pipeline metrics for direct access.
+    /// Get the metrics client for external metric emission.
     ///
-    /// This allows external code to record metrics or get raw metric values.
-    /// For display purposes, prefer `telemetry_snapshot()` which provides
-    /// computed rates and formatted values.
-    pub fn metrics(&self) -> &Arc<PipelineMetrics> {
-        &self.metrics
+    /// Returns None if the metrics system is not initialized.
+    /// This allows external components to emit metrics events.
+    pub fn metrics_client(&self) -> Option<crate::metrics::MetricsClient> {
+        self.metrics_system.as_ref().map(|s| s.client())
     }
 
     /// Check if the XEarthLayer runtime is running.

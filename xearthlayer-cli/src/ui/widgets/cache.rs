@@ -17,7 +17,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::metrics::TelemetrySnapshot;
 
 use super::primitives::{format_bytes, format_bytes_usize, ProgressBar, ProgressBarStyle};
 

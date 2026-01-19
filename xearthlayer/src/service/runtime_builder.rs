@@ -28,9 +28,9 @@ use crate::executor::{
     TextureEncoderAdapter, TokioExecutor,
 };
 use crate::jobs::DefaultDdsJobFactory;
+use crate::metrics::MetricsClient;
 use crate::provider::AsyncProviderType;
 use crate::runtime::{RuntimeConfig, XEarthLayerRuntime};
-use crate::telemetry::PipelineMetrics;
 use crate::texture::DdsTextureEncoder;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,8 +60,8 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     /// Tokio runtime handle for spawning tasks
     runtime_handle: Option<tokio::runtime::Handle>,
-    /// Pipeline metrics for telemetry (updates dashboard UI)
-    metrics: Option<Arc<PipelineMetrics>>,
+    /// Metrics client for event-based telemetry
+    metrics_client: Option<MetricsClient>,
 }
 
 impl RuntimeBuilder {
@@ -86,7 +86,7 @@ impl RuntimeBuilder {
             cache_dir: None,
             config: RuntimeConfig::default(),
             runtime_handle: None,
-            metrics: None,
+            metrics_client: None,
         }
     }
 
@@ -125,12 +125,12 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the pipeline metrics for telemetry.
+    /// Sets the metrics client for event-based telemetry.
     ///
-    /// When metrics are provided, the executor daemon emits events that update
-    /// the metrics, enabling the dashboard UI to show job activity.
-    pub fn with_metrics(mut self, metrics: Arc<PipelineMetrics>) -> Self {
-        self.metrics = Some(metrics);
+    /// When provided, per-chunk download events and job lifecycle events
+    /// flow to the metrics daemon for real-time dashboard updates.
+    pub fn with_metrics_client(mut self, client: MetricsClient) -> Self {
+        self.metrics_client = Some(client);
         self
     }
 
@@ -175,12 +175,12 @@ impl RuntimeBuilder {
             disk_cache,
         );
 
-        XEarthLayerRuntime::with_metrics(
+        XEarthLayerRuntime::with_metrics_client(
             factory,
             cache_adapter,
             self.config,
             runtime_handle,
-            self.metrics,
+            self.metrics_client,
         )
     }
 
@@ -218,12 +218,12 @@ impl RuntimeBuilder {
             Arc::clone(&cache_adapter),
         );
 
-        XEarthLayerRuntime::with_metrics(
+        XEarthLayerRuntime::with_metrics_client(
             factory,
             cache_adapter,
             self.config,
             runtime_handle,
-            self.metrics,
+            self.metrics_client,
         )
     }
 

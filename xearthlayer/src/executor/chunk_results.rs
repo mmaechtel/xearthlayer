@@ -105,6 +105,13 @@ impl ChunkResults {
             .find(|c| c.row == row && c.col == col)
             .map(|c| c.data.as_slice())
     }
+
+    /// Returns the total bytes downloaded across all successful chunks.
+    ///
+    /// This is useful for tracking network throughput in metrics.
+    pub fn total_bytes_downloaded(&self) -> u64 {
+        self.successes.iter().map(|c| c.data.len() as u64).sum()
+    }
 }
 
 impl Default for ChunkResults {

@@ -152,8 +152,7 @@ pub use resource_pool::{
 
 // Telemetry
 pub use telemetry::{
-    MetricsTelemetrySink, MultiplexTelemetrySink, NullTelemetrySink, TelemetryEvent, TelemetrySink,
-    TracingTelemetrySink,
+    MultiplexTelemetrySink, NullTelemetrySink, TelemetryEvent, TelemetrySink, TracingTelemetrySink,
 };
 
 // Queue

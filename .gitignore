@@ -49,3 +49,7 @@ Thumbs.db
 
 # Notes
 notes*
+
+# Local tools/scripts (temporary, will be replaced with proper benchmarks)
+/tools/
+/scripts/

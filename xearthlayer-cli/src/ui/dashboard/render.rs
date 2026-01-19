@@ -31,9 +31,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use xearthlayer::metrics::TelemetrySnapshot;
 use xearthlayer::prefetch::PrefetchStatusSnapshot;
 use xearthlayer::runtime::HealthSnapshot;
-use xearthlayer::telemetry::TelemetrySnapshot;
 
 use super::render_sections::inner_rect;
 use super::state::{JobRates, PrewarmProgress};

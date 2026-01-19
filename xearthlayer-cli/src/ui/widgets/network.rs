@@ -16,7 +16,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::metrics::TelemetrySnapshot;
 
 /// Rolling history for sparkline display.
 ///

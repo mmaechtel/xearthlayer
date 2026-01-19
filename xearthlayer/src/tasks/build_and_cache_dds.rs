@@ -21,10 +21,12 @@ use crate::executor::{
     BlockingExecutor, ChunkResults, MemoryCache, ResourceType, Task, TaskContext, TaskError,
     TaskResult, TextureEncoderAsync,
 };
+use crate::metrics::OptionalMetrics;
 use image::{Rgba, RgbaImage};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Tile dimensions
@@ -118,6 +120,7 @@ where
             }
 
             let job_id = ctx.job_id();
+            let metrics = ctx.metrics_clone();
 
             // Step 1: Get chunks from previous task (returns owned clone)
             let chunks: ChunkResults = match ctx.get_output("DownloadChunks", "chunks") {
@@ -136,6 +139,8 @@ where
             );
 
             // Step 2: Assemble image (CPU-bound)
+            let assembly_start = Instant::now();
+
             let image_result = self
                 .executor
                 .execute_blocking(move || assemble_chunks(chunks))
@@ -146,7 +151,11 @@ where
             }
 
             let image = match image_result {
-                Ok(Ok(img)) => img,
+                Ok(Ok(img)) => {
+                    let duration_us = assembly_start.elapsed().as_micros() as u64;
+                    metrics.assembly_completed(duration_us);
+                    img
+                }
                 Ok(Err(e)) => {
                     return TaskResult::Failed(TaskError::new(format!("Assembly failed: {}", e)));
                 }
@@ -167,6 +176,9 @@ where
             );
 
             // Step 3: Encode to DDS (CPU-bound)
+            metrics.encode_started();
+            let encode_start = Instant::now();
+
             let encoder = Arc::clone(&self.encoder);
             let encode_result = self
                 .executor
@@ -178,7 +190,12 @@ where
             }
 
             let dds_data = match encode_result {
-                Ok(Ok(data)) => data,
+                Ok(Ok(data)) => {
+                    let duration_us = encode_start.elapsed().as_micros() as u64;
+                    let bytes = data.len() as u64;
+                    metrics.encode_completed(bytes, duration_us);
+                    data
+                }
                 Ok(Err(e)) => {
                     return TaskResult::Failed(TaskError::new(format!(
                         "Encoding failed: {}",
@@ -207,10 +224,15 @@ where
                 .put(self.tile.row, self.tile.col, self.tile.zoom, dds_data)
                 .await;
 
+            // Emit updated cache size to metrics
+            let total_cache_size = self.memory_cache.size_bytes();
+            metrics.memory_cache_size(total_cache_size as u64);
+
             info!(
                 job_id = %job_id,
                 tile = ?self.tile,
                 size_bytes = dds_size,
+                cache_size_bytes = total_cache_size,
                 "DDS tile complete and cached"
             );
 

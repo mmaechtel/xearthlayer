@@ -28,9 +28,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use xearthlayer::metrics::TelemetrySnapshot;
 use xearthlayer::prefetch::SharedPrefetchStatus;
 use xearthlayer::runtime::{HealthSnapshot, SharedRuntimeHealth};
-use xearthlayer::telemetry::TelemetrySnapshot;
 
 use crate::ui::widgets::{
     CacheConfig, DiskHistory, NetworkHistory, PipelineHistory, SceneryHistory,

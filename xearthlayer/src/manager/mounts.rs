@@ -14,6 +14,7 @@ use crate::config::DiskIoProfile;
 use crate::executor::{MemoryCacheAdapter, StorageConcurrencyLimiter};
 use crate::fuse::fuse3::{Fuse3OrthoUnionFS, Fuse3UnionFS};
 use crate::fuse::SpawnedMountHandle;
+use crate::metrics::TelemetrySnapshot;
 use crate::ortho_union::{default_cache_path, IndexBuildProgressCallback, OrthoUnionIndexBuilder};
 use crate::package::{
     InstalledPackage as PackageInstalledPackage, Package as PackageCore, PackageType,
@@ -22,7 +23,6 @@ use crate::panic as panic_handler;
 use crate::patches::{PatchDiscovery, PatchUnionIndex};
 use crate::prefetch::{FuseLoadMonitor, SharedFuseLoadMonitor, TileRequestCallback};
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
-use crate::telemetry::TelemetrySnapshot;
 
 use super::local::{InstalledPackage, LocalPackageStore};
 use super::{ManagerError, ManagerResult};
