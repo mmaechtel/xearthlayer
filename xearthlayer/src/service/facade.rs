@@ -6,7 +6,7 @@ use super::error::ServiceError;
 use super::fuse_mount::{FuseMountConfig, FuseMountService};
 use super::network_logger::NetworkStatsLogger;
 use super::runtime_builder::RuntimeBuilder;
-use crate::cache::MemoryCache;
+use crate::cache::{disk_cache_stats, MemoryCache};
 use crate::config::DiskIoProfile;
 use crate::coord::to_tile_coords;
 use crate::executor::{DdsClient, ExecutorCacheAdapter, MemoryCacheAdapter};
@@ -268,7 +268,33 @@ impl XEarthLayerService {
         // 8. Create metrics system for event-based telemetry
         let metrics_system = MetricsSystem::new(&runtime_handle);
 
-        // 9. Create XEarthLayer runtime with job executor daemon
+        // 9. Scan existing disk cache in background to initialize size metrics
+        // This avoids blocking service creation with potentially slow directory walk
+        if let Some(ref cache_dir_path) = cache_dir {
+            let cache_path = cache_dir_path.clone();
+            let metrics_client = metrics_system.client();
+            runtime_handle.spawn(async move {
+                let path = cache_path;
+                let result = tokio::task::spawn_blocking(move || disk_cache_stats(&path)).await;
+                match result {
+                    Ok(Ok((_files, bytes))) => {
+                        metrics_client.disk_cache_initial_size(bytes);
+                        tracing::debug!(
+                            bytes = bytes,
+                            "Disk cache initial size scanned (background)"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "Failed to scan disk cache size");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Disk cache scan task panicked");
+                    }
+                }
+            });
+        }
+
+        // 10. Create XEarthLayer runtime with job executor daemon
         // Note: The runtime is created lazily when needed (when async_provider is available)
         // For now, store None and create on first DDS handler request
         let (xearthlayer_runtime, dds_client) = if let Some(ref async_prov) = async_provider {

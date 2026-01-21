@@ -869,9 +869,11 @@ impl MountManager {
         let index_for_prefetch = Arc::new(index);
 
         // Create and mount the consolidated ortho union filesystem with DDS access channel
+        // Also wire the load monitor so circuit breaker can detect X-Plane load
         let ortho_union_fs =
             Fuse3OrthoUnionFS::new((*index_for_prefetch).clone(), dds_client, expected_dds_size)
-                .with_dds_access_channel(dds_access_tx);
+                .with_dds_access_channel(dds_access_tx)
+                .with_load_monitor(Arc::clone(&self.load_monitor) as Arc<dyn FuseLoadMonitor>);
         let mountpoint_str = mountpoint.to_string_lossy();
 
         let mount_result = runtime_handle.block_on(ortho_union_fs.mount_spawned(&mountpoint_str));
@@ -1079,6 +1081,8 @@ impl MountManager {
             disk_cache_misses: 0,
             disk_cache_hit_rate: 0.0,
             disk_cache_size_bytes: 0,
+            disk_bytes_written: 0,
+            disk_bytes_read: 0,
             encodes_completed: 0,
             encodes_active: 0,
             bytes_encoded: 0,
@@ -1136,6 +1140,8 @@ impl MountManager {
             total.disk_cache_size_bytes = total
                 .disk_cache_size_bytes
                 .max(snapshot.disk_cache_size_bytes);
+            total.disk_bytes_written = total.disk_bytes_written.max(snapshot.disk_bytes_written);
+            total.disk_bytes_read = total.disk_bytes_read.max(snapshot.disk_bytes_read);
             total.encodes_completed += snapshot.encodes_completed;
             total.encodes_active += snapshot.encodes_active;
             total.bytes_encoded += snapshot.bytes_encoded;

@@ -43,9 +43,12 @@ use crate::coord::TileCoord;
 use crate::executor::{DdsClient, MemoryCache};
 use crate::ortho_union::OrthoUnionIndex;
 
-use super::super::state::AircraftState;
+use super::super::circuit_breaker::CircuitState;
+use super::super::state::{
+    AircraftState, DetailedPrefetchStats, PrefetchMode, SharedPrefetchStatus,
+};
 use super::super::strategy::Prefetcher;
-use super::super::throttler::PrefetchThrottler;
+use super::super::throttler::{PrefetchThrottler, ThrottleState};
 use super::{DdsAccessEvent, DsfTileCoord, TileBurstTracker, TilePredictor};
 
 /// Configuration for the tile-based prefetcher.
@@ -142,6 +145,24 @@ pub struct TileBasedPrefetcher<M: MemoryCache> {
 
     /// When quiet period started (for quiet_buffer).
     quiet_start: Option<Instant>,
+
+    /// Shared status for UI updates.
+    shared_status: Option<Arc<SharedPrefetchStatus>>,
+
+    /// Statistics: total cycles run.
+    stat_cycles: u64,
+
+    /// Statistics: tiles submitted in last cycle.
+    stat_tiles_last_cycle: u64,
+
+    /// Statistics: total tiles submitted.
+    stat_tiles_total: u64,
+
+    /// Statistics: cache hits (tiles skipped because already cached).
+    stat_cache_hits: u64,
+
+    /// Statistics: telemetry updates received.
+    stat_telemetry_updates: u64,
 }
 
 impl<M: MemoryCache> TileBasedPrefetcher<M> {
@@ -176,7 +197,24 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
             last_cleanup: Instant::now(),
             config,
             quiet_start: None,
+            shared_status: None,
+            stat_cycles: 0,
+            stat_tiles_last_cycle: 0,
+            stat_tiles_total: 0,
+            stat_cache_hits: 0,
+            stat_telemetry_updates: 0,
         }
+    }
+
+    /// Set the shared status for UI updates.
+    ///
+    /// When set, the prefetcher will update the shared status with:
+    /// - Current prefetch mode (TileBased, CircuitOpen, Idle)
+    /// - Circuit breaker state
+    /// - Detailed statistics (cycles, tiles submitted, etc.)
+    pub fn with_shared_status(mut self, status: Arc<SharedPrefetchStatus>) -> Self {
+        self.shared_status = Some(status);
+        self
     }
 
     /// Run the prefetcher main loop.
@@ -196,6 +234,9 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
             check_interval_ms = self.config.check_interval.as_millis(),
             "Tile-based prefetcher started"
         );
+
+        // Set initial UI status
+        self.update_ui_status();
 
         let mut check_interval = tokio::time::interval(self.config.check_interval);
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -223,8 +264,64 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
                 // Check for quiet period and run prefetch cycle
                 _ = check_interval.tick() => {
                     self.check_and_prefetch().await;
+                    // Update UI after each check cycle
+                    self.update_ui_status();
                 }
             }
+        }
+    }
+
+    /// Update the shared UI status with current prefetch state.
+    fn update_ui_status(&self) {
+        let Some(ref status) = self.shared_status else {
+            return;
+        };
+
+        // Determine current mode based on circuit breaker state and activity
+        let circuit_state = self.get_circuit_state();
+        let mode = match circuit_state {
+            CircuitState::Open | CircuitState::HalfOpen => PrefetchMode::CircuitOpen,
+            CircuitState::Closed => {
+                // Show TileBased only when actively tracking tiles (X-Plane loading)
+                // Show Idle when waiting for X-Plane to load new areas
+                if self.burst_tracker.has_tiles() {
+                    PrefetchMode::TileBased
+                } else {
+                    PrefetchMode::Idle
+                }
+            }
+        };
+
+        status.update_prefetch_mode(mode);
+
+        // Update detailed stats
+        let detailed_stats = DetailedPrefetchStats {
+            cycles: self.stat_cycles,
+            tiles_submitted_last_cycle: self.stat_tiles_last_cycle,
+            tiles_submitted_total: self.stat_tiles_total,
+            cache_hits: self.stat_cache_hits,
+            ttl_skipped: self.recently_attempted.len() as u64,
+            active_zoom_levels: vec![], // Not tracked per-zoom in tile-based mode
+            is_active: mode == PrefetchMode::TileBased,
+            circuit_state: Some(circuit_state),
+            loading_tiles: self
+                .burst_tracker
+                .current_tiles()
+                .iter()
+                .take(10)
+                .map(|t| (t.lat, t.lon))
+                .collect(),
+        };
+
+        status.update_detailed_stats(detailed_stats);
+    }
+
+    /// Get the current circuit breaker state.
+    fn get_circuit_state(&self) -> CircuitState {
+        match self.circuit_breaker.state() {
+            ThrottleState::Active => CircuitState::Closed,
+            ThrottleState::Paused => CircuitState::Open,
+            ThrottleState::Resuming => CircuitState::HalfOpen,
         }
     }
 
@@ -235,6 +332,13 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
         // Reset quiet period tracking - X-Plane is loading
         self.quiet_start = None;
 
+        // Update inferred position from DSF tile center (fallback when no telemetry)
+        if let Some(ref status) = self.shared_status {
+            // DSF tile center as approximate aircraft position
+            let (lat, lon) = event.dsf_tile.center();
+            status.update_inferred_position(lat, lon);
+        }
+
         trace!(
             dsf_tile = %event.dsf_tile,
             tiles_in_burst = self.burst_tracker.tile_count(),
@@ -244,15 +348,33 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
 
     /// Handle a telemetry update.
     fn handle_telemetry_update(&mut self, state: &AircraftState) {
+        self.stat_telemetry_updates += 1;
+
         // Update heading for prediction
         self.current_heading = Some(state.heading);
 
-        trace!(
-            lat = format!("{:.4}", state.latitude),
-            lon = format!("{:.4}", state.longitude),
-            heading = format!("{:.1}", state.heading),
-            "Telemetry update received"
-        );
+        // Update shared status for UI display
+        if let Some(ref status) = self.shared_status {
+            status.update_aircraft(state);
+        }
+
+        // Log first few telemetry updates at info level for visibility
+        if self.stat_telemetry_updates <= 3 {
+            info!(
+                lat = format!("{:.4}", state.latitude),
+                lon = format!("{:.4}", state.longitude),
+                heading = format!("{:.1}", state.heading),
+                update_num = self.stat_telemetry_updates,
+                "Telemetry update received by prefetcher"
+            );
+        } else {
+            trace!(
+                lat = format!("{:.4}", state.latitude),
+                lon = format!("{:.4}", state.longitude),
+                heading = format!("{:.1}", state.heading),
+                "Telemetry update received"
+            );
+        }
     }
 
     /// Check for quiet period and run prefetch cycle if appropriate.
@@ -338,9 +460,16 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
             total_submitted += submitted;
         }
 
+        // Update statistics
+        self.stat_cycles += 1;
+        self.stat_tiles_last_cycle = total_submitted as u64;
+        self.stat_tiles_total += total_submitted as u64;
+
         info!(
             dsf_tiles = next_tiles.len(),
             dds_submitted = total_submitted,
+            cycle = self.stat_cycles,
+            total_submitted = self.stat_tiles_total,
             "Prefetch cycle complete"
         );
 
@@ -359,7 +488,21 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
     /// Number of tiles submitted for prefetch.
     async fn prefetch_dsf_tile(&mut self, dsf_tile: &DsfTileCoord) -> usize {
         // Get DDS files in this DSF tile from the ortho index
-        let dds_tiles = self.enumerate_dds_tiles(dsf_tile);
+        // IMPORTANT: This involves blocking I/O (filesystem stat calls) so we
+        // run it in spawn_blocking to avoid blocking the tokio runtime.
+        let ortho_index = Arc::clone(&self.ortho_index);
+        let dsf_tile_owned = *dsf_tile;
+        let dds_tiles = match tokio::task::spawn_blocking(move || {
+            Self::enumerate_dds_tiles_blocking(&ortho_index, &dsf_tile_owned)
+        })
+        .await
+        {
+            Ok(tiles) => tiles,
+            Err(e) => {
+                warn!(error = %e, "spawn_blocking failed for enumerate_dds_tiles");
+                return 0;
+            }
+        };
 
         if dds_tiles.is_empty() {
             trace!(dsf_tile = %dsf_tile, "No DDS tiles found in DSF tile");
@@ -376,6 +519,7 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
                 .await
                 .is_some()
             {
+                self.stat_cache_hits += 1;
                 continue;
             }
 
@@ -409,13 +553,19 @@ impl<M: MemoryCache> TileBasedPrefetcher<M> {
         submitted
     }
 
-    /// Enumerate DDS tiles within a DSF tile.
+    /// Enumerate DDS tiles within a DSF tile (blocking version).
     ///
     /// Uses the OrthoUnionIndex's `dds_files_in_dsf_tile()` method to find
     /// all DDS textures within the 1° × 1° DSF tile boundary.
-    fn enumerate_dds_tiles(&self, dsf_tile: &DsfTileCoord) -> Vec<TileCoord> {
-        // Use the optimized index method
-        let dds_files = self.ortho_index.dds_files_in_dsf_tile(dsf_tile);
+    ///
+    /// **IMPORTANT**: This method performs blocking filesystem I/O (stat calls)
+    /// and must be called from `spawn_blocking`, not directly from async code.
+    fn enumerate_dds_tiles_blocking(
+        ortho_index: &OrthoUnionIndex,
+        dsf_tile: &DsfTileCoord,
+    ) -> Vec<TileCoord> {
+        // Use the optimized index method (involves blocking I/O)
+        let dds_files = ortho_index.dds_files_in_dsf_tile(dsf_tile);
 
         // Convert (virtual_path, real_path) to TileCoord
         dds_files

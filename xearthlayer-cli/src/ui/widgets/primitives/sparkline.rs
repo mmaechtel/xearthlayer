@@ -89,6 +89,20 @@ impl SparklineHistory {
         self.samples.clear();
     }
 
+    /// Get a reference to the underlying samples.
+    pub fn values(&self) -> &[f64] {
+        &self.samples
+    }
+
+    /// Create a history from existing values.
+    pub fn from_values(values: Vec<f64>) -> Self {
+        let max_samples = values.len().max(1);
+        Self {
+            samples: values,
+            max_samples,
+        }
+    }
+
     /// Generate a sparkline string from the history.
     ///
     /// The sparkline is normalized against the maximum value in the history,

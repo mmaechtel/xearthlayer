@@ -128,6 +128,18 @@ impl MetricsClient {
         self.send(MetricEvent::DiskWriteCompleted { bytes, duration_us });
     }
 
+    /// Sets the initial disk cache size (scanned on startup).
+    ///
+    /// This should be called once at startup after scanning the disk cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Total bytes already in the disk cache
+    #[inline]
+    pub fn disk_cache_initial_size(&self, bytes: u64) {
+        self.send(MetricEvent::DiskCacheInitialSize { bytes });
+    }
+
     // =========================================================================
     // Memory Cache Events
     // =========================================================================

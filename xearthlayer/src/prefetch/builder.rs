@@ -397,7 +397,7 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
             ..TileBasedConfig::default()
         };
 
-        let prefetcher = TileBasedPrefetcher::new(
+        let mut prefetcher = TileBasedPrefetcher::new(
             ortho_index,
             dds_client,
             memory_cache,
@@ -405,6 +405,11 @@ impl<M: MemoryCache + 'static> PrefetcherBuilder<M> {
             throttler,
             config,
         );
+
+        // Wire shared status for UI updates
+        if let Some(status) = self.shared_status {
+            prefetcher = prefetcher.with_shared_status(status);
+        }
 
         Box::new(prefetcher)
     }

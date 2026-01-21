@@ -65,8 +65,12 @@ pub struct TelemetrySnapshot {
     pub disk_cache_misses: u64,
     /// Disk cache hit rate (0.0 - 1.0)
     pub disk_cache_hit_rate: f64,
-    /// Disk cache current size in bytes
+    /// Disk cache current size in bytes (initial + session writes)
     pub disk_cache_size_bytes: u64,
+    /// Disk bytes written this session only (for "Written" display)
+    pub disk_bytes_written: u64,
+    /// Disk bytes read this session (from cache hits)
+    pub disk_bytes_read: u64,
 
     // === Encode metrics ===
     /// Encode operations completed
@@ -124,6 +128,8 @@ impl Default for TelemetrySnapshot {
             disk_cache_misses: 0,
             disk_cache_hit_rate: 0.0,
             disk_cache_size_bytes: 0,
+            disk_bytes_written: 0,
+            disk_bytes_read: 0,
             encodes_completed: 0,
             encodes_active: 0,
             bytes_encoded: 0,
@@ -335,6 +341,8 @@ mod tests {
             disk_cache_misses: 18040,
             disk_cache_hit_rate: 0.217,
             disk_cache_size_bytes: 5_000_000_000,
+            disk_bytes_written: 500_000_000, // Session writes only
+            disk_bytes_read: 750_000_000,    // Session reads (from cache hits)
             encodes_completed: 90,
             encodes_active: 2,
             bytes_encoded: 1_000_000_000, // ~1 GB

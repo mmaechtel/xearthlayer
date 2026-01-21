@@ -145,7 +145,9 @@ impl MetricsReporter for TuiReporter {
             disk_cache_hits: state.disk_cache_hits,
             disk_cache_misses: state.disk_cache_misses,
             disk_cache_hit_rate: disk_hit_rate,
-            disk_cache_size_bytes: state.disk_bytes_written, // Approximate
+            disk_cache_size_bytes: state.initial_disk_cache_bytes + state.disk_bytes_written,
+            disk_bytes_written: state.disk_bytes_written,
+            disk_bytes_read: state.disk_bytes_read,
 
             // Encode metrics
             encodes_completed: state.encodes_completed,

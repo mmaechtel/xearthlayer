@@ -207,9 +207,12 @@ impl Dashboard {
         // Update scenery history for new layout sparklines
         self.scenery_history.update(snapshot, sample_interval);
 
-        // Update disk history (using disk cache size as proxy for disk writes)
-        self.disk_history
-            .update(snapshot.disk_cache_size_bytes, sample_interval);
+        // Update disk history (both reads and writes for I/O tracking)
+        self.disk_history.update(
+            snapshot.disk_bytes_written,
+            snapshot.disk_bytes_read,
+            sample_interval,
+        );
 
         let uptime = self.start_time.elapsed();
         let cache_config = CacheConfig {

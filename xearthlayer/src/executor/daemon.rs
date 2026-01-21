@@ -423,9 +423,27 @@ where
 
                             // Read result from cache
                             let data = if success {
-                                memory_cache.get(tile.row, tile.col, tile.zoom).await
-                                    .unwrap_or_default()
+                                match memory_cache.get(tile.row, tile.col, tile.zoom).await {
+                                    Some(d) => d,
+                                    None => {
+                                        // Job succeeded but cache read failed - possible race condition
+                                        warn!(
+                                            tile_row = tile.row,
+                                            tile_col = tile.col,
+                                            tile_zoom = tile.zoom,
+                                            duration_ms = duration.as_millis(),
+                                            "Job succeeded but cache read returned empty - possible write race"
+                                        );
+                                        Vec::new()
+                                    }
+                                }
                             } else {
+                                warn!(
+                                    tile_row = tile.row,
+                                    tile_col = tile.col,
+                                    tile_zoom = tile.zoom,
+                                    "Job failed - returning empty data"
+                                );
                                 Vec::new()
                             };
 

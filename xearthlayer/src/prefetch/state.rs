@@ -36,6 +36,8 @@ pub enum PrefetchMode {
     FuseInference,
     /// Fallback to simple radial prefetch (no heading data).
     Radial,
+    /// Tile-based prefetch aligned with X-Plane's DSF loading behavior.
+    TileBased,
     /// Prefetch system is idle (no data received yet).
     #[default]
     Idle,
@@ -77,6 +79,7 @@ impl std::fmt::Display for PrefetchMode {
             Self::Telemetry => write!(f, "Heading-Aware (Telemetry)"),
             Self::FuseInference => write!(f, "Heading-Aware (Inferred)"),
             Self::Radial => write!(f, "Radial"),
+            Self::TileBased => write!(f, "Tile-Based"),
             Self::Idle => write!(f, "Idle"),
             Self::CircuitOpen => write!(f, "Paused"),
         }
@@ -128,6 +131,27 @@ impl SharedPrefetchStatus {
     pub fn update_gps_status(&self, status: GpsStatus) {
         if let Ok(mut inner) = self.inner.write() {
             inner.gps_status = status;
+        }
+    }
+
+    /// Update the aircraft position from FUSE inference.
+    ///
+    /// This is a fallback when telemetry is unavailable - we infer
+    /// approximate position from DSF tile loading patterns.
+    /// Sets GPS status to Inferred.
+    pub fn update_inferred_position(&self, latitude: f64, longitude: f64) {
+        if let Ok(mut inner) = self.inner.write() {
+            // Only update if we don't have real telemetry
+            if inner.gps_status != GpsStatus::Connected {
+                inner.aircraft = Some(AircraftSnapshot {
+                    latitude,
+                    longitude,
+                    heading: 0.0,      // Unknown without telemetry
+                    ground_speed: 0.0, // Unknown without telemetry
+                    altitude: 0.0,     // Unknown without telemetry
+                });
+                inner.gps_status = GpsStatus::Inferred;
+            }
         }
     }
 

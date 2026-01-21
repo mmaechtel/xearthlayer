@@ -65,7 +65,8 @@ impl<'a> PrefetchSystemWidget<'a> {
         match self.mode {
             PrefetchMode::Telemetry => "Heading-Aware (Telemetry)",
             PrefetchMode::FuseInference => "Heading-Aware (Inferred)",
-            PrefetchMode::Radial => "Tile Based (Radial)",
+            PrefetchMode::Radial => "Radial",
+            PrefetchMode::TileBased => "Tile-Based (DSF)",
             PrefetchMode::Idle => "Idle",
             PrefetchMode::CircuitOpen => "Paused (High Load)",
         }
@@ -77,6 +78,7 @@ impl<'a> PrefetchSystemWidget<'a> {
             PrefetchMode::Telemetry => Color::Green,
             PrefetchMode::FuseInference => Color::Yellow,
             PrefetchMode::Radial => Color::Cyan,
+            PrefetchMode::TileBased => Color::Blue,
             PrefetchMode::Idle => Color::DarkGray,
             PrefetchMode::CircuitOpen => Color::Magenta,
         }

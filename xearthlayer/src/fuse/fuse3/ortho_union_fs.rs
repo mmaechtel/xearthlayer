@@ -43,7 +43,7 @@ use crate::executor::{DdsClient, StorageConcurrencyLimiter};
 use crate::fuse::coalesce::RequestCoalescer;
 use crate::fuse::{get_default_placeholder, parse_dds_filename};
 use crate::ortho_union::OrthoUnionIndex;
-use crate::prefetch::{DdsAccessEvent, DsfTileCoord, TileRequestCallback};
+use crate::prefetch::{DdsAccessEvent, DsfTileCoord, FuseLoadMonitor, TileRequestCallback};
 use bytes::Bytes;
 use fuse3::raw::prelude::*;
 use fuse3::raw::reply::{
@@ -111,6 +111,11 @@ pub struct Fuse3OrthoUnionFS {
     /// texture request, enabling the tile-based prefetcher to track
     /// which DSF tiles X-Plane is loading.
     dds_access_tx: Option<mpsc::UnboundedSender<DdsAccessEvent>>,
+    /// Optional load monitor for circuit breaker integration.
+    ///
+    /// When set, records each DDS request so the circuit breaker can
+    /// detect when X-Plane is heavily loading scenery and pause prefetching.
+    load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
 }
 
 impl Fuse3OrthoUnionFS {
@@ -156,6 +161,7 @@ impl Fuse3OrthoUnionFS {
             tile_request_callback: None,
             request_coalescer,
             dds_access_tx: None,
+            load_monitor: None,
         }
     }
 
@@ -182,6 +188,7 @@ impl Fuse3OrthoUnionFS {
             tile_request_callback: None,
             request_coalescer,
             dds_access_tx: None,
+            load_monitor: None,
         }
     }
 
@@ -222,6 +229,25 @@ impl Fuse3OrthoUnionFS {
     /// ```
     pub fn with_dds_access_channel(mut self, tx: mpsc::UnboundedSender<DdsAccessEvent>) -> Self {
         self.dds_access_tx = Some(tx);
+        self
+    }
+
+    /// Set the load monitor for circuit breaker integration.
+    ///
+    /// When set, the filesystem calls [`FuseLoadMonitor::record_request()`]
+    /// for each DDS texture read. This enables the circuit breaker to detect
+    /// when X-Plane is heavily loading scenery (e.g., during scene load) and
+    /// pause prefetching to avoid competing for resources.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let monitor = Arc::new(SharedFuseLoadMonitor::new());
+    /// let fs = Fuse3OrthoUnionFS::new(index, client, size)
+    ///     .with_load_monitor(monitor);
+    /// ```
+    pub fn with_load_monitor(mut self, monitor: Arc<dyn FuseLoadMonitor>) -> Self {
+        self.load_monitor = Some(monitor);
         self
     }
 
@@ -538,6 +564,11 @@ impl Filesystem for Fuse3OrthoUnionFS {
                 .inode_manager
                 .get_virtual_dds(ino)
                 .ok_or(Errno::from(libc::ENOENT))?;
+
+            // Record request for circuit breaker (tracks X-Plane load rate)
+            if let Some(ref monitor) = self.load_monitor {
+                monitor.record_request();
+            }
 
             // Send DDS access event to tile-based prefetcher (fire-and-forget)
             if let Some(ref tx) = self.dds_access_tx {

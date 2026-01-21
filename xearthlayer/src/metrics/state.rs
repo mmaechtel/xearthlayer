@@ -144,8 +144,12 @@ pub struct AggregatedState {
     pub disk_writes_active: u64,
     /// Total bytes written to disk cache.
     pub disk_bytes_written: u64,
+    /// Total bytes read from disk cache (cache hits).
+    pub disk_bytes_read: u64,
     /// Total disk write time in microseconds.
     pub disk_write_time_us: u64,
+    /// Initial disk cache size (scanned on startup, not reset).
+    pub initial_disk_cache_bytes: u64,
 
     // =========================================================================
     // Memory Cache Metrics
@@ -229,7 +233,9 @@ impl AggregatedState {
             disk_cache_misses: 0,
             disk_writes_active: 0,
             disk_bytes_written: 0,
+            disk_bytes_read: 0,
             disk_write_time_us: 0,
+            initial_disk_cache_bytes: 0,
             memory_cache_hits: 0,
             memory_cache_misses: 0,
             memory_cache_size_bytes: 0,
@@ -269,6 +275,7 @@ impl AggregatedState {
         self.disk_cache_misses = 0;
         self.disk_writes_active = 0;
         self.disk_bytes_written = 0;
+        self.disk_bytes_read = 0;
         self.disk_write_time_us = 0;
         self.memory_cache_hits = 0;
         self.memory_cache_misses = 0;

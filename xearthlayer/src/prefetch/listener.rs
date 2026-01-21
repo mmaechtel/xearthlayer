@@ -190,8 +190,20 @@ impl TelemetryListener {
                                     );
                                 }
 
-                                // Send state, ignore if channel is full (drop oldest)
-                                let _ = state_tx.try_send(state);
+                                // Send state to prefetcher channel
+                                match state_tx.try_send(state) {
+                                    Ok(()) => {
+                                        if states_sent == 1 {
+                                            info!("State sent to prefetcher channel successfully");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Log channel send failures (channel full or closed)
+                                        if states_sent <= 3 {
+                                            warn!("Failed to send state to prefetcher: {} (channel may be full or closed)", e);
+                                        }
+                                    }
+                                }
                                 last_send_time = Instant::now();
                             }
                         }

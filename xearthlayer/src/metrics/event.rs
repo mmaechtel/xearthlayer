@@ -62,6 +62,12 @@ pub enum MetricEvent {
         duration_us: u64,
     },
 
+    /// Set the initial disk cache size (scanned on startup).
+    DiskCacheInitialSize {
+        /// Total bytes already in the disk cache at startup.
+        bytes: u64,
+    },
+
     // =========================================================================
     // Memory Cache Events (tile-level, tracked in daemon)
     // =========================================================================
@@ -154,6 +160,7 @@ impl MetricEvent {
             Self::DiskCacheMiss => "disk_cache_miss",
             Self::DiskWriteStarted => "disk_write_started",
             Self::DiskWriteCompleted { .. } => "disk_write_completed",
+            Self::DiskCacheInitialSize { .. } => "disk_cache_initial_size",
             Self::MemoryCacheHit => "memory_cache_hit",
             Self::MemoryCacheMiss => "memory_cache_miss",
             Self::MemoryCacheSizeUpdate { .. } => "memory_cache_size_update",

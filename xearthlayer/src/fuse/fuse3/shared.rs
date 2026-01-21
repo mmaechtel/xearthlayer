@@ -451,10 +451,20 @@ pub trait DdsRequestor: FileAttrBuilder {
             }
             Err(_) => {
                 // Timeout - cancel the request
-                warn!(
+                // Enhanced logging for stall diagnosis
+                error!(
+                    tile_row = tile.row,
+                    tile_col = tile.col,
+                    tile_zoom = tile.zoom,
                     timeout_secs = timeout.as_secs(),
                     context = context_label,
-                    "DDS generation timed out - cancelling"
+                    "TIMEOUT: DDS generation exceeded {}s - possible executor stall. \
+                     Tile: ({},{},{}) Context: {}. Returning placeholder.",
+                    timeout.as_secs(),
+                    tile.row,
+                    tile.col,
+                    tile.zoom,
+                    context_label
                 );
                 cancellation_token.cancel();
                 get_default_placeholder()

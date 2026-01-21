@@ -56,11 +56,12 @@ use super::task::{Task, TaskResult};
 use super::telemetry::{NullTelemetrySink, TelemetryEvent, TelemetrySink};
 use crate::metrics::MetricsClient;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // =============================================================================
 // Configuration Constants
@@ -74,6 +75,15 @@ pub const DEFAULT_SIGNAL_CHANNEL_CAPACITY: usize = 16;
 
 /// Default maximum concurrent tasks (across all resource types).
 pub const DEFAULT_MAX_CONCURRENT_TASKS: usize = 128;
+
+/// Number of loop iterations between yield points (scheduler fairness).
+const YIELD_EVERY_N_ITERATIONS: u64 = 50;
+
+/// Stall detection threshold in milliseconds (warn if no activity for this long).
+const STALL_DETECTION_THRESHOLD_MS: u64 = 30_000; // 30 seconds
+
+/// Stall watchdog check interval in seconds.
+const STALL_WATCHDOG_INTERVAL_SECS: u64 = 10;
 
 // =============================================================================
 // Executor Configuration
@@ -446,6 +456,18 @@ pub struct JobExecutor {
 
     /// Metrics client for emitting metrics events.
     metrics_client: Option<MetricsClient>,
+
+    /// Last activity timestamp (milliseconds since UNIX epoch).
+    /// Used for stall detection - updated on every loop iteration.
+    last_activity_ms: Arc<AtomicU64>,
+
+    /// Count of pending work (active jobs + queued tasks).
+    /// Used by stall detector to distinguish idle from stalled.
+    /// Only warn about stall if there's pending work that should be processing.
+    pending_work_count: Arc<AtomicU64>,
+
+    /// Loop iteration counter for periodic yield.
+    loop_count: u64,
 }
 
 impl JobExecutor {
@@ -476,6 +498,12 @@ impl JobExecutor {
         let (job_tx, job_rx) = mpsc::channel(config.job_channel_capacity);
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
 
+        // Initialize last activity to current time
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         let executor = Self {
             resource_pools: Arc::new(ResourcePools::new(config.resource_pools.clone())),
             task_queue: Arc::new(Mutex::new(PriorityQueue::new())),
@@ -488,6 +516,9 @@ impl JobExecutor {
             config,
             dispatched_count: 0,
             metrics_client,
+            last_activity_ms: Arc::new(AtomicU64::new(now_ms)),
+            pending_work_count: Arc::new(AtomicU64::new(0)),
+            loop_count: 0,
         };
 
         let submitter = JobSubmitter { sender: job_tx };
@@ -502,8 +533,74 @@ impl JobExecutor {
     /// - Dispatches tasks to workers
     /// - Handles task completions
     /// - Processes job signals
+    ///
+    /// Includes defensive measures:
+    /// - Stall detection watchdog (logs warning if no activity for 30s)
+    /// - Periodic yield points (every 50 iterations) for scheduler fairness
     pub async fn run(mut self, shutdown: CancellationToken) {
+        // Spawn stall detection watchdog
+        let last_activity = Arc::clone(&self.last_activity_ms);
+        let pending_work = Arc::clone(&self.pending_work_count);
+        let watchdog_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(STALL_WATCHDOG_INTERVAL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = watchdog_shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let last_ms = last_activity.load(Ordering::Relaxed);
+                        let elapsed_ms = now_ms.saturating_sub(last_ms);
+                        let work_count = pending_work.load(Ordering::Relaxed);
+
+                        if elapsed_ms > STALL_DETECTION_THRESHOLD_MS && work_count > 0 {
+                            // True stall: pending work but no progress
+                            warn!(
+                                elapsed_ms = elapsed_ms,
+                                pending_work = work_count,
+                                threshold_ms = STALL_DETECTION_THRESHOLD_MS,
+                                "STALL DETECTED: Executor has {} pending work items but no progress for {}s",
+                                work_count,
+                                elapsed_ms / 1000
+                            );
+                        } else if elapsed_ms > STALL_DETECTION_THRESHOLD_MS {
+                            // Idle: no pending work, just waiting for requests
+                            debug!(
+                                elapsed_ms = elapsed_ms,
+                                "Stall watchdog: executor idle (no pending work)"
+                            );
+                        } else {
+                            debug!(
+                                elapsed_ms = elapsed_ms,
+                                pending_work = work_count,
+                                "Stall watchdog: executor loop healthy"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+        info!(
+            "Executor started with stall detection (threshold={}s, check_interval={}s)",
+            STALL_DETECTION_THRESHOLD_MS / 1000,
+            STALL_WATCHDOG_INTERVAL_SECS
+        );
+
         loop {
+            // Update activity timestamp at start of each iteration
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.last_activity_ms.store(now_ms, Ordering::Relaxed);
+
             tokio::select! {
                 biased;
 
@@ -540,7 +637,28 @@ impl JobExecutor {
 
             // Complete jobs that are done
             self.complete_finished_jobs().await;
+
+            // Update pending work count for stall detection
+            self.update_pending_work_count().await;
+
+            // Periodic yield for scheduler fairness
+            self.loop_count += 1;
+            if self.loop_count.is_multiple_of(YIELD_EVERY_N_ITERATIONS) {
+                tokio::task::yield_now().await;
+            }
         }
+    }
+
+    /// Update the pending work count for stall detection.
+    ///
+    /// Counts active jobs + queued tasks. The watchdog uses this to
+    /// distinguish between "idle" (no work) and "stalled" (work pending
+    /// but not progressing).
+    async fn update_pending_work_count(&self) {
+        let active_jobs = self.active_jobs.lock().await.len();
+        let queued_tasks = self.task_queue.lock().await.len();
+        let total = (active_jobs + queued_tasks) as u64;
+        self.pending_work_count.store(total, Ordering::Relaxed);
     }
 
     async fn handle_job_submission(&mut self, submitted: SubmittedJob) {

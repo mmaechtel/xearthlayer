@@ -161,8 +161,9 @@ impl MetricsDaemon {
             }
 
             // Disk cache events
-            MetricEvent::DiskCacheHit { bytes: _ } => {
+            MetricEvent::DiskCacheHit { bytes } => {
                 self.state.disk_cache_hits += 1;
+                self.state.disk_bytes_read += bytes;
             }
             MetricEvent::DiskCacheMiss => {
                 self.state.disk_cache_misses += 1;
@@ -174,6 +175,9 @@ impl MetricsDaemon {
                 self.state.disk_writes_active = self.state.disk_writes_active.saturating_sub(1);
                 self.state.disk_bytes_written += bytes;
                 self.state.disk_write_time_us += duration_us;
+            }
+            MetricEvent::DiskCacheInitialSize { bytes } => {
+                self.state.initial_disk_cache_bytes = bytes;
             }
 
             // Memory cache events

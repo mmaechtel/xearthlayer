@@ -26,14 +26,18 @@ use super::primitives::{format_bytes, format_throughput, Sparkline, SparklineHis
 
 /// History tracking for disk I/O metrics.
 ///
-/// Tracks disk write throughput for sparkline visualization.
-/// Uses cache writes as a proxy for disk I/O activity.
+/// Tracks disk read and write throughput for sparkline visualization.
+/// Uses cache reads/writes as a proxy for disk I/O activity.
 #[derive(Debug, Clone)]
 pub struct DiskHistory {
     /// Disk write rate history (bytes/s).
     write_history: SparklineHistory,
+    /// Disk read rate history (bytes/s).
+    read_history: SparklineHistory,
     /// Previous disk bytes written for delta calculation.
     prev_disk_writes: u64,
+    /// Previous disk bytes read for delta calculation.
+    prev_disk_reads: u64,
 }
 
 impl DiskHistory {
@@ -41,41 +45,61 @@ impl DiskHistory {
     pub fn new(max_samples: usize) -> Self {
         Self {
             write_history: SparklineHistory::new(max_samples),
+            read_history: SparklineHistory::new(max_samples),
             prev_disk_writes: 0,
+            prev_disk_reads: 0,
         }
     }
 
-    /// Update history with new disk write bytes.
+    /// Update history with new disk I/O bytes.
     ///
     /// # Arguments
     /// * `disk_writes` - Total bytes written to disk cache
+    /// * `disk_reads` - Total bytes read from disk cache
     /// * `sample_interval` - Time interval since last update in seconds
-    pub fn update(&mut self, disk_writes: u64, sample_interval: f64) {
+    pub fn update(&mut self, disk_writes: u64, disk_reads: u64, sample_interval: f64) {
         if sample_interval <= 0.0 {
             return;
         }
 
-        let delta = disk_writes.saturating_sub(self.prev_disk_writes);
-        let rate = delta as f64 / sample_interval;
-
+        let write_delta = disk_writes.saturating_sub(self.prev_disk_writes);
+        let write_rate = write_delta as f64 / sample_interval;
         self.prev_disk_writes = disk_writes;
-        self.write_history.push(rate);
+        self.write_history.push(write_rate);
+
+        let read_delta = disk_reads.saturating_sub(self.prev_disk_reads);
+        let read_rate = read_delta as f64 / sample_interval;
+        self.prev_disk_reads = disk_reads;
+        self.read_history.push(read_rate);
     }
 
-    /// Get disk write sparkline string.
-    pub fn write_sparkline(&self) -> String {
-        self.write_history.to_sparkline()
+    /// Get combined disk I/O sparkline string (reads + writes).
+    pub fn io_sparkline(&self) -> String {
+        // Combine read and write histories for overall I/O activity
+        let combined: Vec<f64> = self
+            .read_history
+            .values()
+            .iter()
+            .zip(self.write_history.values().iter())
+            .map(|(r, w)| r + w)
+            .collect();
+
+        SparklineHistory::from_values(combined).to_sparkline()
+    }
+
+    /// Get current total I/O rate (bytes/s).
+    pub fn current_io_rate(&self) -> f64 {
+        self.read_history.current() + self.write_history.current()
+    }
+
+    /// Get current read rate (bytes/s).
+    pub fn current_read_rate(&self) -> f64 {
+        self.read_history.current()
     }
 
     /// Get current write rate (bytes/s).
     pub fn current_write_rate(&self) -> f64 {
         self.write_history.current()
-    }
-
-    /// Get peak write rate (bytes/s).
-    #[allow(dead_code)]
-    pub fn peak_write_rate(&self) -> f64 {
-        self.write_history.peak()
     }
 }
 
@@ -194,17 +218,21 @@ impl Widget for InputOutputWidget<'_> {
         };
 
         // Disk metrics
-        let (disk_sparkline, disk_rate) = if let Some(disk_history) = self.disk_history {
-            (
-                disk_history.write_sparkline(),
-                disk_history.current_write_rate(),
-            )
-        } else {
-            ("▁▁▁▁▁▁▁▁▁▁▁▁".to_string(), 0.0)
-        };
+        let (disk_sparkline, disk_io_rate, disk_read_rate, disk_write_rate) =
+            if let Some(disk_history) = self.disk_history {
+                (
+                    disk_history.io_sparkline(),
+                    disk_history.current_io_rate(),
+                    disk_history.current_read_rate(),
+                    disk_history.current_write_rate(),
+                )
+            } else {
+                ("▁▁▁▁▁▁▁▁▁▁▁▁".to_string(), 0.0, 0.0, 0.0)
+            };
 
-        // Total disk writes (using disk cache size as proxy)
-        let total_disk_writes = self.snapshot.disk_cache_size_bytes;
+        // Total disk I/O this session
+        let total_disk_writes = self.snapshot.disk_bytes_written;
+        let total_disk_reads = self.snapshot.disk_bytes_read;
 
         // Split into 2 columns
         let columns =
@@ -217,7 +245,7 @@ impl Widget for InputOutputWidget<'_> {
             Color::DarkGray
         };
 
-        let disk_sparkline_color = if disk_rate > 0.0 {
+        let disk_sparkline_color = if disk_io_rate > 0.0 {
             Color::Blue
         } else {
             Color::DarkGray
@@ -251,6 +279,25 @@ impl Widget for InputOutputWidget<'_> {
         );
 
         // Right column: DISK
+        // Format read/write rates on one line: "R: 1.2MB/s W: 0.5MB/s"
+        let io_rate_str = format!(
+            "R:{} W:{}",
+            format_throughput(disk_read_rate),
+            format_throughput(disk_write_rate)
+        );
+        let io_rate_color = if disk_io_rate > 0.0 {
+            Color::Blue
+        } else {
+            Color::DarkGray
+        };
+
+        // Format read/written totals: "R: 500MB / W: 200MB"
+        let io_total_str = format!(
+            "R:{} W:{}",
+            format_bytes(total_disk_reads),
+            format_bytes(total_disk_writes)
+        );
+
         Self::render_column(
             columns[1],
             buf,
@@ -259,16 +306,8 @@ impl Widget for InputOutputWidget<'_> {
             &disk_sparkline,
             disk_sparkline_color,
             &[
-                (
-                    "Throughput",
-                    format_throughput(disk_rate),
-                    if disk_rate > 0.0 {
-                        Color::Blue
-                    } else {
-                        Color::DarkGray
-                    },
-                ),
-                ("Written", format_bytes(total_disk_writes), Color::Cyan),
+                ("I/O Rate", io_rate_str, io_rate_color),
+                ("Total", io_total_str, Color::Cyan),
                 ("Provider", self.provider_name.to_string(), Color::Yellow),
             ],
         );
