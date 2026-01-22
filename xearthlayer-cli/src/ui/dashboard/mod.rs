@@ -28,6 +28,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use xearthlayer::aircraft_position::{AircraftPositionProvider, SharedAircraftPosition};
 use xearthlayer::metrics::TelemetrySnapshot;
 use xearthlayer::prefetch::SharedPrefetchStatus;
 use xearthlayer::runtime::{HealthSnapshot, SharedRuntimeHealth};
@@ -74,6 +75,8 @@ pub struct Dashboard {
     quit_confirmation: Option<Instant>,
     /// Background prewarm status (None = no prewarm, Some = prewarm in progress or complete).
     prewarm_status: Option<PrewarmProgress>,
+    /// Aircraft position provider from APT module.
+    aircraft_position: Option<SharedAircraftPosition>,
 }
 
 impl Dashboard {
@@ -114,6 +117,7 @@ impl Dashboard {
             prev_control_plane_snapshot: None,
             quit_confirmation: None,
             prewarm_status: None,
+            aircraft_position: None,
         })
     }
 
@@ -131,6 +135,12 @@ impl Dashboard {
     ) -> Self {
         self.runtime_health = Some(health);
         self.max_concurrent_jobs = max_concurrent_jobs;
+        self
+    }
+
+    /// Set the aircraft position provider from APT module.
+    pub fn with_aircraft_position(mut self, apt: SharedAircraftPosition) -> Self {
+        self.aircraft_position = Some(apt);
         self
     }
 
@@ -278,6 +288,13 @@ impl Dashboard {
             None
         };
 
+        // Get aircraft position status from APT module
+        let aircraft_position_status = self
+            .aircraft_position
+            .as_ref()
+            .map(|apt| apt.status())
+            .unwrap_or_default();
+
         self.terminal.draw(|frame| {
             render::render_ui(
                 frame,
@@ -290,6 +307,7 @@ impl Dashboard {
                 uptime,
                 &cache_config,
                 &prefetch_snapshot,
+                &aircraft_position_status,
                 control_plane_snapshot.as_ref(),
                 max_concurrent_jobs,
                 job_rates.as_ref(),

@@ -39,9 +39,10 @@ use super::render_sections::inner_rect;
 use super::state::{JobRates, PrewarmProgress};
 use super::utils::format_duration;
 use crate::ui::widgets::{
-    CacheConfig, CacheWidgetCompact, DiskHistory, InputOutputWidget, NetworkHistory,
-    PipelineHistory, PrefetchSystemWidget, SceneryHistory, ScenerySystemWidget,
+    AircraftPositionWidget, CacheConfig, CacheWidgetCompact, DiskHistory, InputOutputWidget,
+    NetworkHistory, PipelineHistory, PrefetchSystemWidget, SceneryHistory, ScenerySystemWidget,
 };
+use xearthlayer::aircraft_position::AircraftPositionStatus;
 
 /// Render the main dashboard UI to the frame.
 ///
@@ -61,6 +62,7 @@ pub fn render_ui(
     uptime: Duration,
     cache_config: &CacheConfig,
     prefetch_snapshot: &PrefetchStatusSnapshot,
+    aircraft_position_status: &AircraftPositionStatus,
     control_plane_snapshot: Option<&HealthSnapshot>,
     max_concurrent_jobs: usize,
     #[allow(unused_variables)] job_rates: Option<&JobRates>, // Legacy, kept for compatibility
@@ -76,7 +78,7 @@ pub fn render_ui(
         .margin(0)
         .constraints([
             Constraint::Length(3), // Header
-            Constraint::Length(4), // Aircraft Position
+            Constraint::Length(5), // Aircraft Position (3 content lines + border + margin)
             Constraint::Length(4), // Prefetch System
             Constraint::Length(8), // Scenery System (2-column)
             Constraint::Length(8), // Input/Output (2-column)
@@ -88,8 +90,8 @@ pub fn render_ui(
     // 1. Header
     render_header(frame, chunks[0], uptime, prewarm_status, prewarm_spinner);
 
-    // 2. Aircraft Position (simplified - prefetch moved to its own panel)
-    render_aircraft_position(frame, chunks[1], prefetch_snapshot);
+    // 2. Aircraft Position (now using APT module)
+    render_aircraft_position(frame, chunks[1], aircraft_position_status);
 
     // 3. Prefetch System (new panel)
     render_prefetch_system(frame, chunks[2], prefetch_snapshot);
@@ -145,12 +147,16 @@ pub fn render_ui(
     }
 }
 
-/// Render the aircraft position section (simplified for v0.3.0).
+/// Render the aircraft position section using APT module.
 ///
-/// Shows GPS status and position only. Prefetch details moved to dedicated panel.
-fn render_aircraft_position(frame: &mut Frame, area: Rect, prefetch: &PrefetchStatusSnapshot) {
-    use xearthlayer::prefetch::GpsStatus;
-
+/// Shows position, accuracy, and provider connection status.
+/// Layout matches the wireframe:
+/// ```text
+/// Position : 9.99°E, 53.63°N | Hdg: 090° | GS: 489kt | Alt: 33532ft
+/// Accuracy : 10m (GPS)
+/// GPS: * Connected
+/// ```
+fn render_aircraft_position(frame: &mut Frame, area: Rect, status: &AircraftPositionStatus) {
     let block = Block::default()
         .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
         .border_style(Style::default().fg(Color::DarkGray))
@@ -162,41 +168,7 @@ fn render_aircraft_position(frame: &mut Frame, area: Rect, prefetch: &PrefetchSt
     frame.render_widget(block, area);
     let inner = inner_rect(area, 1, 1);
 
-    // GPS Status line with colored indicator
-    let (gps_indicator, gps_text, gps_color) = match prefetch.gps_status {
-        GpsStatus::Connected => ("●", "Connected", Color::Green),
-        GpsStatus::Acquiring => ("●", "Acquiring...", Color::Yellow),
-        GpsStatus::Inferred => ("●", "Inferred", Color::Red),
-    };
-
-    let gps_line = Line::from(vec![
-        Span::styled("GPS Status: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{} ", gps_indicator),
-            Style::default().fg(gps_color),
-        ),
-        Span::styled(gps_text, Style::default().fg(gps_color)),
-    ]);
-
-    // Position line
-    let position_line = if prefetch.aircraft.is_some() {
-        Line::from(vec![
-            Span::styled("Position:   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(prefetch.aircraft_line(), Style::default().fg(Color::Green)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("Position:   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "Waiting for X-Plane telemetry...",
-                Style::default().fg(Color::Yellow),
-            ),
-        ])
-    };
-
-    let text = vec![gps_line, position_line];
-    let paragraph = Paragraph::new(text);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(AircraftPositionWidget::new(status), inner);
 }
 
 /// Render the prefetch system panel (new in v0.3.0).

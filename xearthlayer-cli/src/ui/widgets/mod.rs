@@ -12,6 +12,7 @@
 //! - `CacheWidget` - Compact cache display (2 lines)
 //! - `CacheWidgetCompact` - Extended compact cache (4 lines with stats)
 
+mod aircraft_position;
 mod cache;
 mod control_plane;
 mod errors;
@@ -33,6 +34,7 @@ pub use network::NetworkHistory;
 pub use network::NetworkWidget;
 
 // New v0.3.0 widgets
+pub use aircraft_position::AircraftPositionWidget;
 pub use input_output::{DiskHistory, InputOutputWidget};
 pub use prefetch_system::PrefetchSystemWidget;
 pub use scenery_system::{SceneryHistory, ScenerySystemWidget};

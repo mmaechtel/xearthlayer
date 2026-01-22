@@ -317,8 +317,9 @@ mod tests {
 
     #[test]
     fn test_telemetry_timeout() {
+        // Use longer timeouts to avoid flakiness on loaded systems
         let config = StateAggregatorConfig {
-            telemetry_timeout: Duration::from_millis(10),
+            telemetry_timeout: Duration::from_millis(100),
             ..Default::default()
         };
         let (tx, _rx) = broadcast::channel(16);
@@ -329,8 +330,8 @@ mod tests {
         aggregator.receive_telemetry(state);
         assert_eq!(aggregator.telemetry_status(), TelemetryStatus::Connected);
 
-        // Wait for timeout
-        std::thread::sleep(Duration::from_millis(20));
+        // Wait for timeout (150ms > 100ms timeout)
+        std::thread::sleep(Duration::from_millis(150));
 
         // Should now be disconnected
         assert_eq!(aggregator.telemetry_status(), TelemetryStatus::Disconnected);

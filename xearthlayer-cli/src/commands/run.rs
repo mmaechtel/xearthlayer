@@ -634,7 +634,8 @@ fn run_with_dashboard(
     let mut dashboard =
         Dashboard::with_state(dashboard_config, ctx.shutdown.clone(), initial_state)
             .map_err(|e| CliError::Config(format!("Failed to create dashboard: {}", e)))?
-            .with_prefetch_status(Arc::clone(&ctx.prefetch_status));
+            .with_prefetch_status(Arc::clone(&ctx.prefetch_status))
+            .with_aircraft_position(ctx.aircraft_position.clone());
 
     // Draw initial loading screen immediately
     dashboard

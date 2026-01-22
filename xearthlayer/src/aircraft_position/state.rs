@@ -50,6 +50,12 @@ impl PositionAccuracy {
     pub fn is_better_than(&self, other: &Self) -> bool {
         self.0 < other.0
     }
+
+    /// Get the accuracy value in meters.
+    #[inline]
+    pub fn meters(&self) -> f32 {
+        self.0
+    }
 }
 
 impl PartialOrd for PositionAccuracy {
