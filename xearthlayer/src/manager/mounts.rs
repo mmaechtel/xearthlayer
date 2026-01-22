@@ -27,6 +27,7 @@ use crate::panic as panic_handler;
 use crate::patches::{PatchDiscovery, PatchUnionIndex};
 use crate::prefetch::tile_based::DdsAccessEvent;
 use crate::prefetch::{FuseLoadMonitor, SharedFuseLoadMonitor, TileRequestCallback};
+use crate::scene_tracker::FuseAccessEvent;
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
 
 use super::local::{InstalledPackage, LocalPackageStore};
@@ -272,6 +273,10 @@ pub struct MountManager {
     /// This is populated when mounting consolidated ortho and can be retrieved
     /// by the prefetcher via `take_dds_access_receiver()`.
     dds_access_rx: Option<mpsc::UnboundedReceiver<DdsAccessEvent>>,
+    /// Scene Tracker event receiver for empirical scenery tracking.
+    /// This is populated when mounting consolidated ortho and can be retrieved
+    /// by the Scene Tracker via `take_scene_tracker_receiver()`.
+    scene_tracker_rx: Option<mpsc::UnboundedReceiver<FuseAccessEvent>>,
     /// OrthoUnionIndex for DSF tile enumeration (tile-based prefetch).
     /// This is populated when mounting consolidated ortho.
     ortho_union_index: Option<Arc<OrthoUnionIndex>>,
@@ -293,6 +298,7 @@ impl MountManager {
             consolidated_mount: None,
             consolidated_service: None,
             dds_access_rx: None,
+            scene_tracker_rx: None,
             ortho_union_index: None,
         }
     }
@@ -315,6 +321,7 @@ impl MountManager {
             consolidated_mount: None,
             consolidated_service: None,
             dds_access_rx: None,
+            scene_tracker_rx: None,
             ortho_union_index: None,
         }
     }
@@ -865,14 +872,20 @@ impl MountManager {
         // The sender goes to FUSE, the receiver goes to the prefetcher
         let (dds_access_tx, dds_access_rx) = mpsc::unbounded_channel();
 
+        // Create Scene Tracker event channel for empirical scenery tracking
+        // The sender goes to FUSE, the receiver goes to the Scene Tracker
+        let (scene_tracker_tx, scene_tracker_rx) = mpsc::unbounded_channel();
+
         // Store the index for tile-based prefetcher to use later
         let index_for_prefetch = Arc::new(index);
 
         // Create and mount the consolidated ortho union filesystem with DDS access channel
         // Also wire the load monitor so circuit breaker can detect X-Plane load
+        // Wire Scene Tracker channel for empirical scenery tracking
         let mut ortho_union_fs =
             Fuse3OrthoUnionFS::new((*index_for_prefetch).clone(), dds_client, expected_dds_size)
                 .with_dds_access_channel(dds_access_tx)
+                .with_scene_tracker_channel(scene_tracker_tx)
                 .with_load_monitor(Arc::clone(&self.load_monitor) as Arc<dyn FuseLoadMonitor>);
 
         // Wire metrics client for coalesced request tracking
@@ -902,6 +915,9 @@ impl MountManager {
                 // Store DDS access channel receiver and index for tile-based prefetcher
                 self.dds_access_rx = Some(dds_access_rx);
                 self.ortho_union_index = Some(index_for_prefetch);
+
+                // Store Scene Tracker receiver for empirical scenery tracking
+                self.scene_tracker_rx = Some(scene_tracker_rx);
 
                 tracing::info!(
                     mountpoint = %mountpoint.display(),
@@ -946,6 +962,22 @@ impl MountManager {
     /// `None` otherwise.
     pub fn take_dds_access_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<DdsAccessEvent>> {
         self.dds_access_rx.take()
+    }
+
+    /// Take the Scene Tracker event receiver for empirical scenery tracking.
+    ///
+    /// This method takes ownership of the receiver, so it can only be called once.
+    /// The receiver is created when mounting consolidated ortho and is used by
+    /// the Scene Tracker to receive FUSE access events.
+    ///
+    /// # Returns
+    ///
+    /// `Some(receiver)` if consolidated ortho is mounted and receiver hasn't been taken,
+    /// `None` otherwise.
+    pub fn take_scene_tracker_receiver(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<FuseAccessEvent>> {
+        self.scene_tracker_rx.take()
     }
 
     /// Get a reference to the OrthoUnionIndex for tile-based prefetching.
@@ -1029,6 +1061,9 @@ impl MountManager {
         // Clear tile-based prefetch resources
         self.dds_access_rx = None;
         self.ortho_union_index = None;
+
+        // Clear Scene Tracker resources
+        self.scene_tracker_rx = None;
     }
 
     /// Get a reference to a mounted service (if any).
