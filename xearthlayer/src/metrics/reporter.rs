@@ -145,7 +145,10 @@ impl MetricsReporter for TuiReporter {
             disk_cache_hits: state.disk_cache_hits,
             disk_cache_misses: state.disk_cache_misses,
             disk_cache_hit_rate: disk_hit_rate,
-            disk_cache_size_bytes: state.initial_disk_cache_bytes + state.disk_bytes_written,
+            disk_cache_size_bytes: state
+                .initial_disk_cache_bytes
+                .saturating_add(state.disk_bytes_written)
+                .saturating_sub(state.disk_bytes_evicted),
             disk_bytes_written: state.disk_bytes_written,
             disk_bytes_read: state.disk_bytes_read,
 

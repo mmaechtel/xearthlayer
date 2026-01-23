@@ -61,8 +61,8 @@ pub use installer::{InstallProgressCallback, InstallResult, InstallStage, Packag
 pub use local::{InstalledPackage, LocalPackageStore, MountStatus};
 #[allow(deprecated)]
 pub use mounts::{
-    ActiveMount, ConsolidatedOrthoMountResult, MountManager, MountResult, PatchesMountResult,
-    ServiceBuilder,
+    ActiveMount, CacheBridges, ConsolidatedOrthoMountResult, MountManager, MountResult,
+    PatchesMountResult, ServiceBuilder,
 };
 pub use symlinks::{
     consolidated_overlay_exists, create_consolidated_overlay, create_overlay_symlink,

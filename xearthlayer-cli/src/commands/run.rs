@@ -14,7 +14,7 @@ use xearthlayer::aircraft_position::{
     TelemetryReceiverConfig, DEFAULT_LOG_INTERVAL,
 };
 use xearthlayer::airport::AirportIndex;
-use xearthlayer::cache::{run_eviction_daemon, DiskCacheConfig};
+use xearthlayer::app::{AppConfig, XEarthLayerApp};
 use xearthlayer::config::{
     analyze_config, config_file_path, format_size, ConfigFile, DownloadConfig, TextureConfig,
 };
@@ -227,6 +227,30 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         None
     };
 
+    // Start XEarthLayerApp FIRST to initialize cache services with internal GC daemon.
+    // This replaces the legacy external eviction daemon and ensures GC runs in all modes.
+    let xel_app = if !args.no_cache {
+        let app_config =
+            AppConfig::from_config_file(config, provider_config.clone(), service_config.clone());
+        match XEarthLayerApp::start_sync(app_config) {
+            Ok(app) => {
+                tracing::info!(
+                    memory_size = config.cache.memory_size,
+                    disk_size = config.cache.disk_size,
+                    cache_dir = %config.cache.directory.display(),
+                    "XEarthLayerApp started with internal cache GC daemon"
+                );
+                Some(app)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to start XEarthLayerApp, cache services disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create service builder with shared disk I/O limiter and configured profile
     // This ensures all packages share a single limiter tuned for the storage type
     let mut service_builder = ServiceBuilder::with_disk_io_profile(
@@ -235,6 +259,11 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         logger.clone(),
         config.cache.disk_io_profile,
     );
+
+    // Wire cache bridges from XEarthLayerApp if available
+    if let Some(ref app) = xel_app {
+        service_builder = service_builder.with_cache_bridges(app.cache_bridges());
+    }
 
     // Wire FUSE analyzer callback to services for position inference
     if let Some(ref analyzer) = fuse_analyzer {
@@ -331,29 +360,6 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
             consolidated_result.source_count
         );
         println!();
-    }
-
-    // Start disk cache eviction daemon (shared between TUI and non-TUI paths)
-    // This runs in the background and evicts oldest files when cache exceeds limit
-    let eviction_cancellation = CancellationToken::new();
-    if !args.no_cache {
-        if let Some(service) = mount_manager.get_service() {
-            let eviction_config = DiskCacheConfig {
-                cache_dir: config.cache.directory.clone(),
-                max_size_bytes: config.cache.disk_size,
-                daemon_interval_secs: 60,
-                max_age_days: None,
-            };
-            let eviction_cancel = eviction_cancellation.clone();
-            let runtime_handle = service.runtime_handle().clone();
-            runtime_handle.spawn(async move {
-                run_eviction_daemon(eviction_config, eviction_cancel).await;
-            });
-            tracing::debug!(
-                max_size = config.cache.disk_size,
-                "Disk cache eviction daemon started"
-            );
-        }
     }
 
     // Start prefetch system if enabled (non-TUI path only)
@@ -556,10 +562,8 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     // Cancel prefetch system for TUI path
     cleanup_cancellation.cancel();
 
-    // Cancel disk cache eviction daemon
-    eviction_cancellation.cancel();
-
     // Get final telemetry before unmounting
+    // Note: XEarthLayerApp's cache GC daemon shuts down automatically when app is dropped
     let final_snapshot = mount_manager.aggregated_telemetry();
 
     // Unmount all packages

@@ -6,6 +6,7 @@ use super::error::ServiceError;
 use super::fuse_mount::{FuseMountConfig, FuseMountService};
 use super::network_logger::NetworkStatsLogger;
 use super::runtime_builder::RuntimeBuilder;
+use crate::cache::adapters::{DiskCacheBridge, MemoryCacheBridge};
 use crate::cache::{disk_cache_stats, MemoryCache};
 use crate::config::DiskIoProfile;
 use crate::coord::to_tile_coords;
@@ -208,6 +209,60 @@ impl XEarthLayerService {
         Self::build(config, provider_config, logger, runtime_handle, None)
     }
 
+    /// Create a new XEarthLayer service with cache bridges from the new cache service.
+    ///
+    /// This constructor uses the new `CacheService` architecture where:
+    /// - `MemoryCacheBridge` implements `executor::MemoryCache`
+    /// - `DiskCacheBridge` implements `executor::DiskCache` with **internal GC daemon**
+    ///
+    /// This eliminates the need for external GC daemon management and ensures
+    /// garbage collection runs regardless of how the application is started
+    /// (TUI vs non-TUI modes).
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Service configuration
+    /// * `provider_config` - Provider-specific configuration
+    /// * `logger` - Logger implementation
+    /// * `runtime_handle` - Handle to an existing Tokio runtime
+    /// * `memory_bridge` - Memory cache bridge from `XEarthLayerApp`
+    /// * `disk_bridge` - Disk cache bridge from `XEarthLayerApp`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::app::XEarthLayerApp;
+    /// use xearthlayer::service::XEarthLayerService;
+    ///
+    /// let app = XEarthLayerApp::start(config).await?;
+    /// let service = XEarthLayerService::with_cache_bridges(
+    ///     service_config,
+    ///     provider_config,
+    ///     logger,
+    ///     runtime_handle,
+    ///     app.memory_bridge(),
+    ///     app.disk_bridge(),
+    /// )?;
+    /// ```
+    pub fn with_cache_bridges(
+        config: ServiceConfig,
+        provider_config: ProviderConfig,
+        logger: Arc<dyn Logger>,
+        runtime_handle: Handle,
+        memory_bridge: Arc<MemoryCacheBridge>,
+        disk_bridge: Arc<DiskCacheBridge>,
+    ) -> Result<Self, ServiceError> {
+        Self::build_with_bridges(
+            config,
+            provider_config,
+            logger,
+            runtime_handle,
+            None,
+            memory_bridge,
+            disk_bridge,
+        )
+    }
+
     /// Internal builder that does the actual construction.
     ///
     /// This method delegates to focused builder functions in the `builder` module
@@ -344,6 +399,95 @@ impl XEarthLayerService {
             memory_cache_adapter,
             executor_cache_adapter,
             cache_dir,
+            metrics_system: Some(metrics_system),
+            xearthlayer_runtime,
+            dds_client,
+            tile_request_callback: None,
+            load_monitor: None,
+        })
+    }
+
+    /// Build the service using cache bridges from the new cache service architecture.
+    ///
+    /// This method is similar to `build()` but uses `MemoryCacheBridge` and `DiskCacheBridge`
+    /// instead of the legacy cache system. The key difference is that:
+    /// - The runtime is created using `RuntimeBuilder::build_with_cache_service()`
+    /// - No external GC daemon is needed (DiskCacheBridge has internal GC)
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_bridges(
+        config: ServiceConfig,
+        provider_config: ProviderConfig,
+        logger: Arc<dyn Logger>,
+        runtime_handle: Handle,
+        owned_runtime: Option<Runtime>,
+        memory_bridge: Arc<MemoryCacheBridge>,
+        disk_bridge: Arc<DiskCacheBridge>,
+    ) -> Result<Self, ServiceError> {
+        // 1. Create providers (sync for legacy pipeline, async for new pipeline)
+        let ProviderComponents {
+            sync_provider: provider,
+            async_provider,
+            name: provider_name,
+            max_zoom,
+        } = builder::create_providers(&provider_config, &runtime_handle)?;
+
+        // 2. Create texture encoder
+        let dds_encoder = builder::create_encoder(&config);
+        let encoder: Arc<dyn TextureEncoder> = Arc::clone(&dds_encoder) as Arc<dyn TextureEncoder>;
+
+        // 3. Create tile generator pipeline (for legacy download_tile())
+        let GeneratorComponents {
+            generator,
+            network_stats,
+        } = builder::create_generator(&config, Arc::clone(&provider), encoder, logger.clone());
+
+        // 4. Create network stats logger (if not in quiet mode)
+        let network_stats_logger =
+            builder::create_network_logger(&config, Arc::clone(&network_stats), logger.clone());
+
+        // 5. Create metrics system
+        let metrics_system = MetricsSystem::new(&runtime_handle);
+
+        // 6. Create XEarthLayer runtime with cache bridges
+        let (xearthlayer_runtime, dds_client) = if let Some(ref async_prov) = async_provider {
+            let runtime = RuntimeBuilder::new(
+                &provider_name,
+                config.texture().format(),
+                Arc::clone(&dds_encoder),
+            )
+            .with_async_provider(Arc::clone(async_prov))
+            .with_runtime_handle(runtime_handle.clone())
+            .with_metrics_client(metrics_system.client())
+            .build_with_cache_service(Arc::clone(&memory_bridge), Arc::clone(&disk_bridge));
+
+            let client = runtime.dds_client();
+            (Some(runtime), Some(client))
+        } else {
+            (None, None)
+        };
+
+        tracing::info!(
+            provider = %provider_name,
+            "XEarthLayerService created with cache bridges (internal GC enabled)"
+        );
+
+        Ok(Self {
+            config,
+            provider_name,
+            max_zoom,
+            generator,
+            logger,
+            network_stats_logger,
+            owned_runtime,
+            runtime_handle,
+            provider,
+            async_provider,
+            dds_encoder,
+            // Legacy cache fields are None when using bridges
+            memory_cache: None,
+            memory_cache_adapter: None,
+            executor_cache_adapter: None,
+            cache_dir: None,
             metrics_system: Some(metrics_system),
             xearthlayer_runtime,
             dds_client,

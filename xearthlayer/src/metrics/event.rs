@@ -68,6 +68,12 @@ pub enum MetricEvent {
         bytes: u64,
     },
 
+    /// Disk cache eviction completed (background GC).
+    DiskCacheEvicted {
+        /// Number of bytes freed by eviction.
+        bytes_freed: u64,
+    },
+
     // =========================================================================
     // Memory Cache Events (tile-level, tracked in daemon)
     // =========================================================================
@@ -161,6 +167,7 @@ impl MetricEvent {
             Self::DiskWriteStarted => "disk_write_started",
             Self::DiskWriteCompleted { .. } => "disk_write_completed",
             Self::DiskCacheInitialSize { .. } => "disk_cache_initial_size",
+            Self::DiskCacheEvicted { .. } => "disk_cache_evicted",
             Self::MemoryCacheHit => "memory_cache_hit",
             Self::MemoryCacheMiss => "memory_cache_miss",
             Self::MemoryCacheSizeUpdate { .. } => "memory_cache_size_update",

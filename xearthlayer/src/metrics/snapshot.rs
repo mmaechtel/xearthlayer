@@ -183,14 +183,16 @@ impl TelemetrySnapshot {
         }
     }
 
-    /// Returns the coalescing rate (0.0 - 1.0).
+    /// Returns the coalescing savings rate (0.0 - 1.0).
     ///
-    /// Ratio of coalesced jobs to total jobs submitted.
+    /// Percentage of total requests that were avoided via coalescing.
+    /// Formula: coalesced / (coalesced + completed)
     pub fn coalescing_rate(&self) -> f64 {
-        if self.jobs_submitted == 0 {
+        let total_requests = self.jobs_coalesced + self.jobs_completed;
+        if total_requests == 0 {
             0.0
         } else {
-            self.jobs_coalesced as f64 / self.jobs_submitted as f64
+            self.jobs_coalesced as f64 / total_requests as f64
         }
     }
 
@@ -384,8 +386,9 @@ mod tests {
     #[test]
     fn test_coalescing_rate() {
         let snapshot = test_snapshot();
-        // 20 coalesced out of 100 submitted
-        assert!((snapshot.coalescing_rate() - 0.2).abs() < 0.001);
+        // 20 coalesced out of 110 total requests (20 coalesced + 90 completed)
+        let expected = 20.0 / 110.0; // ~0.1818
+        assert!((snapshot.coalescing_rate() - expected).abs() < 0.001);
     }
 
     #[test]

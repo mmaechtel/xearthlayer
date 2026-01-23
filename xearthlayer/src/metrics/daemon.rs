@@ -179,6 +179,9 @@ impl MetricsDaemon {
             MetricEvent::DiskCacheInitialSize { bytes } => {
                 self.state.initial_disk_cache_bytes = bytes;
             }
+            MetricEvent::DiskCacheEvicted { bytes_freed } => {
+                self.state.disk_bytes_evicted += bytes_freed;
+            }
 
             // Memory cache events
             MetricEvent::MemoryCacheHit => {

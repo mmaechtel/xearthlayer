@@ -140,6 +140,16 @@ impl MetricsClient {
         self.send(MetricEvent::DiskCacheInitialSize { bytes });
     }
 
+    /// Records bytes evicted from disk cache by the GC daemon.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes_freed` - Number of bytes freed by eviction
+    #[inline]
+    pub fn disk_cache_evicted(&self, bytes_freed: u64) {
+        self.send(MetricEvent::DiskCacheEvicted { bytes_freed });
+    }
+
     // =========================================================================
     // Memory Cache Events
     // =========================================================================

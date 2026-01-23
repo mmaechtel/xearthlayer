@@ -150,6 +150,8 @@ pub struct AggregatedState {
     pub disk_write_time_us: u64,
     /// Initial disk cache size (scanned on startup, not reset).
     pub initial_disk_cache_bytes: u64,
+    /// Total bytes evicted from disk cache by the GC daemon.
+    pub disk_bytes_evicted: u64,
 
     // =========================================================================
     // Memory Cache Metrics
@@ -236,6 +238,7 @@ impl AggregatedState {
             disk_bytes_read: 0,
             disk_write_time_us: 0,
             initial_disk_cache_bytes: 0,
+            disk_bytes_evicted: 0,
             memory_cache_hits: 0,
             memory_cache_misses: 0,
             memory_cache_size_bytes: 0,

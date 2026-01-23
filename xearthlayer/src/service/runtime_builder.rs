@@ -21,6 +21,7 @@
 //!                         DdsClient
 //! ```
 
+use crate::cache::adapters::{DiskCacheBridge, MemoryCacheBridge};
 use crate::cache::MemoryCache;
 use crate::dds::DdsFormat;
 use crate::executor::{
@@ -279,6 +280,91 @@ impl RuntimeBuilder {
             encoder_adapter,
             cache_adapter,
             disk_cache,
+            executor,
+        ))
+    }
+
+    /// Builds the XEarthLayerRuntime using the new cache service architecture.
+    ///
+    /// This method creates the runtime using `MemoryCacheBridge` and `DiskCacheBridge`
+    /// from the new cache service infrastructure. The bridges wrap `CacheService` instances
+    /// that manage their own lifecycle, including internal GC daemons.
+    ///
+    /// # Arguments
+    ///
+    /// * `memory_bridge` - Memory cache bridge from `XEarthLayerApp`
+    /// * `disk_bridge` - Disk cache bridge from `XEarthLayerApp` (has internal GC!)
+    ///
+    /// # Panics
+    ///
+    /// Panics if required components are not set:
+    /// - `async_provider` is required
+    /// - `runtime_handle` is required
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::app::XEarthLayerApp;
+    /// use xearthlayer::service::RuntimeBuilder;
+    ///
+    /// let app = XEarthLayerApp::start(config).await?;
+    /// let runtime = RuntimeBuilder::new(provider_name, format, encoder)
+    ///     .with_async_provider(provider)
+    ///     .with_runtime_handle(handle)
+    ///     .build_with_cache_service(app.memory_bridge(), app.disk_bridge());
+    /// ```
+    pub fn build_with_cache_service(
+        self,
+        memory_bridge: Arc<MemoryCacheBridge>,
+        disk_bridge: Arc<DiskCacheBridge>,
+    ) -> XEarthLayerRuntime {
+        let async_provider = self
+            .async_provider
+            .expect("RuntimeBuilder: async_provider is required");
+        let runtime_handle = self
+            .runtime_handle
+            .expect("RuntimeBuilder: runtime_handle is required");
+
+        let factory = Self::create_factory_with_bridges(
+            async_provider,
+            Arc::clone(&self.encoder),
+            Arc::clone(&memory_bridge),
+            disk_bridge,
+        );
+
+        XEarthLayerRuntime::with_metrics_client(
+            factory,
+            memory_bridge,
+            self.config,
+            runtime_handle,
+            self.metrics_client,
+        )
+    }
+
+    /// Creates a factory with bridge adapters from the new cache service.
+    fn create_factory_with_bridges(
+        async_provider: Arc<AsyncProviderType>,
+        encoder: Arc<DdsTextureEncoder>,
+        memory_bridge: Arc<MemoryCacheBridge>,
+        disk_bridge: Arc<DiskCacheBridge>,
+    ) -> Arc<
+        DefaultDdsJobFactory<
+            ProviderAdapter,
+            EncoderAdapter,
+            MemoryCacheBridge,
+            DiskCacheBridge,
+            TokioExecutor,
+        >,
+    > {
+        let provider_adapter = Arc::new(AsyncProviderAdapter::from_arc(async_provider));
+        let encoder_adapter = Arc::new(TextureEncoderAdapter::new(encoder));
+        let executor = Arc::new(TokioExecutor::new());
+
+        Arc::new(DefaultDdsJobFactory::new(
+            provider_adapter,
+            encoder_adapter,
+            memory_bridge,
+            disk_bridge,
             executor,
         ))
     }

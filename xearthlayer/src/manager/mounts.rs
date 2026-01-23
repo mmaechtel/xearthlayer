@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::cache::adapters::{DiskCacheBridge, MemoryCacheBridge};
 use crate::cache::MemoryCache;
 use crate::config::DiskIoProfile;
 use crate::executor::{MemoryCacheAdapter, StorageConcurrencyLimiter};
@@ -1274,18 +1275,35 @@ pub struct ServiceBuilder {
     /// Kept for potential future use with shared I/O limiting.
     #[allow(dead_code)]
     disk_io_limiter: Arc<StorageConcurrencyLimiter>,
-    /// Shared memory cache across all service instances.
+    /// Shared memory cache across all service instances (legacy).
     /// Without this, each package would have its own cache with the full
     /// configured limit, potentially using N times the expected memory.
     shared_memory_cache: Option<Arc<MemoryCache>>,
     /// Shared memory cache adapter (wraps cache with provider/format context).
     shared_memory_cache_adapter: Option<Arc<MemoryCacheAdapter>>,
+    /// Cache bridges from the new CacheService architecture.
+    /// When set, these are used instead of the legacy cache system.
+    /// The DiskCacheBridge includes internal GC daemon (no external GC needed!).
+    cache_bridges: Option<CacheBridges>,
     /// Shared tile request callback for FUSE-based position inference.
     /// When set, all services forward tile requests to this callback.
     tile_request_callback: Option<TileRequestCallback>,
     /// Shared load monitor for circuit breaker integration.
     /// All services call `record_request()` for FUSE-originated requests.
     load_monitor: Arc<dyn FuseLoadMonitor>,
+}
+
+/// Cache bridges from the new CacheService architecture.
+///
+/// These bridges wrap `CacheService` instances that own their own lifecycle,
+/// including internal GC daemons. This eliminates the need for external
+/// GC daemon management.
+#[derive(Clone)]
+pub struct CacheBridges {
+    /// Memory cache bridge (implements executor::MemoryCache).
+    pub memory: Arc<MemoryCacheBridge>,
+    /// Disk cache bridge (implements executor::DiskCache, has internal GC!).
+    pub disk: Arc<DiskCacheBridge>,
 }
 
 impl ServiceBuilder {
@@ -1377,9 +1395,44 @@ impl ServiceBuilder {
             disk_io_limiter,
             shared_memory_cache,
             shared_memory_cache_adapter,
+            cache_bridges: None,
             tile_request_callback: None,
             load_monitor: Arc::new(DefaultSceneTracker::with_defaults()), // Default, can be overridden
         }
+    }
+
+    /// Set the cache bridges from the new CacheService architecture.
+    ///
+    /// When cache bridges are set, services will use the new cache infrastructure
+    /// with internal GC daemons instead of the legacy external GC daemon.
+    ///
+    /// # Arguments
+    ///
+    /// * `bridges` - Cache bridges from `XEarthLayerApp`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::app::XEarthLayerApp;
+    /// use xearthlayer::manager::{ServiceBuilder, CacheBridges};
+    ///
+    /// let app = XEarthLayerApp::start(config).await?;
+    /// let bridges = CacheBridges {
+    ///     memory: app.memory_bridge(),
+    ///     disk: app.disk_bridge(),
+    /// };
+    ///
+    /// let builder = ServiceBuilder::new(service_config, provider_config, logger)
+    ///     .with_cache_bridges(bridges);
+    /// ```
+    pub fn with_cache_bridges(mut self, bridges: CacheBridges) -> Self {
+        self.cache_bridges = Some(bridges);
+        self
+    }
+
+    /// Get the cache bridges if set.
+    pub fn cache_bridges(&self) -> Option<&CacheBridges> {
+        self.cache_bridges.as_ref()
     }
 
     /// Set the shared load monitor for circuit breaker integration.
@@ -1410,21 +1463,12 @@ impl ServiceBuilder {
     ///
     /// The service will share the disk I/O concurrency limiter and memory cache
     /// with all other services built by this builder.
+    ///
+    /// If cache bridges are set (via `with_cache_bridges()`), the service uses
+    /// the new cache service architecture with internal GC. Otherwise, it uses
+    /// the legacy cache system.
     pub fn build(&self, _package: &InstalledPackage) -> Result<XEarthLayerService, ServiceError> {
-        let mut service = XEarthLayerService::new(
-            self.service_config.clone(),
-            self.provider_config.clone(),
-            self.logger.clone(),
-        )?;
-
-        // Set shared memory cache to ensure global memory limit is respected
-        // Without this, each package would have its own cache potentially using
-        // N times the configured memory limit
-        if let (Some(ref cache), Some(ref adapter)) =
-            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
-        {
-            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
-        }
+        let mut service = self.build_service_internal()?;
 
         // Wire tile request callback for FUSE-based position inference
         if let Some(ref callback) = self.tile_request_callback {
@@ -1443,18 +1487,7 @@ impl ServiceBuilder {
     /// union filesystem. The service shares the same resources (disk I/O limiter,
     /// memory cache, etc.) as services built for regional packages.
     pub fn build_patches_service(&self) -> Result<XEarthLayerService, ServiceError> {
-        let mut service = XEarthLayerService::new(
-            self.service_config.clone(),
-            self.provider_config.clone(),
-            self.logger.clone(),
-        )?;
-
-        // Set shared memory cache to ensure global memory limit is respected
-        if let (Some(ref cache), Some(ref adapter)) =
-            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
-        {
-            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
-        }
+        let mut service = self.build_service_internal()?;
 
         // Wire tile request callback for FUSE-based position inference
         if let Some(ref callback) = self.tile_request_callback {
@@ -1464,6 +1497,44 @@ impl ServiceBuilder {
         // Wire load monitor for circuit breaker integration
         service.set_load_monitor(Arc::clone(&self.load_monitor));
 
+        Ok(service)
+    }
+
+    /// Internal helper to build a service with either cache bridges or legacy cache.
+    fn build_service_internal(&self) -> Result<XEarthLayerService, ServiceError> {
+        // Use cache bridges if available (new architecture with internal GC)
+        if let Some(ref bridges) = self.cache_bridges {
+            let runtime_handle = tokio::runtime::Handle::current();
+            let service = XEarthLayerService::with_cache_bridges(
+                self.service_config.clone(),
+                self.provider_config.clone(),
+                self.logger.clone(),
+                runtime_handle,
+                Arc::clone(&bridges.memory),
+                Arc::clone(&bridges.disk),
+            )?;
+
+            tracing::debug!("Built service with cache bridges (internal GC)");
+            return Ok(service);
+        }
+
+        // Fall back to legacy cache system
+        let mut service = XEarthLayerService::new(
+            self.service_config.clone(),
+            self.provider_config.clone(),
+            self.logger.clone(),
+        )?;
+
+        // Set shared memory cache to ensure global memory limit is respected
+        // Without this, each package would have its own cache potentially using
+        // N times the configured memory limit
+        if let (Some(ref cache), Some(ref adapter)) =
+            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
+        {
+            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
+        }
+
+        tracing::debug!("Built service with legacy cache (external GC required)");
         Ok(service)
     }
 }
