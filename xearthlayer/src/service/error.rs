@@ -28,6 +28,8 @@ pub enum ServiceError {
     RuntimeError(String),
     /// FUSE mount or operation error
     FuseError(String),
+    /// Service not started or required component not available
+    NotStarted(String),
 }
 
 impl fmt::Display for ServiceError {
@@ -51,6 +53,7 @@ impl fmt::Display for ServiceError {
             }
             Self::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             Self::FuseError(msg) => write!(f, "FUSE error: {}", msg),
+            Self::NotStarted(msg) => write!(f, "Service not started: {}", msg),
         }
     }
 }

@@ -18,6 +18,7 @@
 mod commands;
 mod error;
 mod runner;
+mod tui_app;
 mod ui;
 
 use clap::{Parser, Subcommand};

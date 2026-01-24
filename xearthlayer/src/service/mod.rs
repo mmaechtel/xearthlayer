@@ -30,10 +30,16 @@ mod error;
 mod facade;
 mod fuse_mount;
 mod network_logger;
+mod orchestrator;
+mod orchestrator_config;
+mod prewarm;
 mod runtime_builder;
 
 pub use config::{ServiceConfig, ServiceConfigBuilder};
 pub use error::ServiceError;
 pub use facade::XEarthLayerService;
 pub use fuse_mount::{FuseMountConfig, FuseMountService};
+pub use orchestrator::{MountResult, PrefetchHandle, ServiceOrchestrator};
+pub use orchestrator_config::{OrchestratorConfig, PrefetchConfig, PrewarmConfig};
+pub use prewarm::{PrewarmHandle, PrewarmOrchestrator, PrewarmStartError, PrewarmStartResult};
 pub use runtime_builder::RuntimeBuilder;
