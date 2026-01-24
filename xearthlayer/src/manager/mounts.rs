@@ -838,12 +838,18 @@ pub struct ServiceBuilder {
 /// These bridges wrap `CacheService` instances that own their own lifecycle,
 /// including internal GC daemons. This eliminates the need for external
 /// GC daemon management.
+///
+/// The `runtime_handle` provides access to the Tokio runtime that manages
+/// the cache services, ensuring async operations can be executed even from
+/// non-async contexts.
 #[derive(Clone)]
 pub struct CacheBridges {
     /// Memory cache bridge (implements executor::MemoryCache).
     pub memory: Arc<MemoryCacheBridge>,
     /// Disk cache bridge (implements executor::DiskCache, has internal GC!).
     pub disk: Arc<DiskCacheBridge>,
+    /// Handle to the runtime managing the cache services.
+    pub runtime_handle: tokio::runtime::Handle,
 }
 
 impl ServiceBuilder {
@@ -1044,7 +1050,9 @@ impl ServiceBuilder {
     fn build_service_internal(&self) -> Result<XEarthLayerService, ServiceError> {
         // Use cache bridges if available (new architecture with internal GC)
         if let Some(ref bridges) = self.cache_bridges {
-            let runtime_handle = tokio::runtime::Handle::current();
+            // Use the runtime handle from cache bridges - this was provided by XEarthLayerApp
+            // and ensures we have a valid Tokio runtime even from non-async contexts
+            let runtime_handle = bridges.runtime_handle.clone();
             let service = XEarthLayerService::with_cache_bridges(
                 self.service_config.clone(),
                 self.provider_config.clone(),

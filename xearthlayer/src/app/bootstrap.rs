@@ -264,7 +264,29 @@ impl XEarthLayerApp {
         CacheBridges {
             memory: Arc::clone(&self.memory_bridge),
             disk: Arc::clone(&self.disk_bridge),
+            runtime_handle: self.runtime_handle(),
         }
+    }
+
+    /// Get a handle to the application's Tokio runtime.
+    ///
+    /// This handle can be used to spawn tasks or run blocking operations
+    /// on the runtime that manages the cache services.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called when:
+    /// - The app was created via `start()` (async) and no external runtime is active
+    /// - The app was created via `start_sync()` but its runtime has been dropped
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime
+            .as_ref()
+            .map(|r| r.handle().clone())
+            .unwrap_or_else(|| {
+                // If no owned runtime, try to get current runtime handle
+                // This works when the app was created via async start() inside a runtime
+                tokio::runtime::Handle::current()
+            })
     }
 
     /// Get the raw memory cache for direct access.
