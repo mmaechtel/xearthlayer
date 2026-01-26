@@ -71,9 +71,18 @@ impl Default for CoverageConfig {
         region_colors.insert("na".to_string(), (51, 136, 255, 180));
         // Orange for EU (matches GeoJSON)
         region_colors.insert("eu".to_string(), (255, 136, 0, 180));
-        // Green for other regions
-        region_colors.insert("as".to_string(), (0, 200, 83, 180));
+        // Green for SA
+        region_colors.insert("sa".to_string(), (0, 200, 83, 180));
+        // Purple for OC
         region_colors.insert("oc".to_string(), (156, 39, 176, 180));
+        // Red for AS3 (Asia Part 3)
+        region_colors.insert("as3".to_string(), (255, 80, 80, 180));
+        // Green for AS (legacy/future Asia regions)
+        region_colors.insert("as".to_string(), (0, 200, 83, 180));
+        // Yellowish-green for AF/AF1/AF2 (Africa - desert/savanna/jungle)
+        region_colors.insert("af".to_string(), (180, 200, 80, 180));
+        region_colors.insert("af1".to_string(), (180, 200, 80, 180));
+        region_colors.insert("af2".to_string(), (180, 200, 80, 180));
 
         Self {
             width: 1200,
@@ -95,8 +104,16 @@ impl CoverageConfig {
         // Brighter colors for dark background
         region_colors.insert("na".to_string(), (100, 180, 255, 200));
         region_colors.insert("eu".to_string(), (255, 180, 100, 200));
-        region_colors.insert("as".to_string(), (100, 255, 150, 200));
+        region_colors.insert("sa".to_string(), (100, 255, 150, 200));
         region_colors.insert("oc".to_string(), (200, 100, 255, 200));
+        // Red for AS3 (Asia Part 3)
+        region_colors.insert("as3".to_string(), (255, 100, 100, 200));
+        // Green for AS (legacy/future Asia regions)
+        region_colors.insert("as".to_string(), (100, 255, 150, 200));
+        // Yellowish-green for AF/AF1/AF2 (Africa - brighter for dark background)
+        region_colors.insert("af".to_string(), (210, 230, 120, 200));
+        region_colors.insert("af1".to_string(), (210, 230, 120, 200));
+        region_colors.insert("af2".to_string(), (210, 230, 120, 200));
 
         Self {
             width: 1200,

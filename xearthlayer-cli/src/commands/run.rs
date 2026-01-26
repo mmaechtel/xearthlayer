@@ -102,7 +102,8 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
 
     // Validate airport code early (before heavy initialization)
     if let Some(ref icao) = args.airport {
-        validate_airport_icao(&custom_scenery_path, icao).map_err(|e| CliError::Config(e.to_string()))?;
+        validate_airport_icao(&custom_scenery_path, icao)
+            .map_err(|e| CliError::Config(e.to_string()))?;
     }
 
     // Discover installed packages from install_location
