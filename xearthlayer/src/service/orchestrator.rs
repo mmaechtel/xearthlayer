@@ -640,6 +640,7 @@ impl ServiceOrchestrator {
         // Periodic position logger for flight analysis (DEBUG level only)
         if tracing::enabled!(tracing::Level::DEBUG) {
             spawn_position_logger(
+                &runtime_handle,
                 self.aircraft_position.clone(),
                 logger_cancellation,
                 DEFAULT_LOG_INTERVAL,

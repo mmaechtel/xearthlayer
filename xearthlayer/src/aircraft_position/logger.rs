@@ -31,6 +31,7 @@
 
 use std::time::Duration;
 
+use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -47,6 +48,7 @@ pub const DEFAULT_LOG_INTERVAL: Duration = Duration::from_secs(20);
 ///
 /// # Arguments
 ///
+/// * `runtime_handle` - Tokio runtime handle to spawn on
 /// * `aircraft_position` - Shared position provider to query
 /// * `cancellation` - Token to stop the logger
 /// * `interval` - How often to log position (default: 20 seconds)
@@ -62,15 +64,16 @@ pub const DEFAULT_LOG_INTERVAL: Duration = Duration::from_secs(20);
 ///
 /// ```ignore
 /// if tracing::enabled!(tracing::Level::DEBUG) {
-///     spawn_position_logger(apt, cancel, Duration::from_secs(20));
+///     spawn_position_logger(runtime_handle, apt, cancel, Duration::from_secs(20));
 /// }
 /// ```
 pub fn spawn_position_logger(
+    runtime_handle: &Handle,
     aircraft_position: SharedAircraftPosition,
     cancellation: CancellationToken,
     interval: Duration,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    runtime_handle.spawn(async move {
         let mut ticker = tokio::time::interval(interval);
 
         loop {
