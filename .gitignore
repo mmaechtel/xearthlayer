@@ -27,7 +27,6 @@ perf.data.old
 .DS_Store
 
 # Claude Code resources (tool-specific, not for version control)
-CLAUDE.md
 .claude/
 .cursor/
 .cursorrules
