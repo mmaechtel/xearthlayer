@@ -175,6 +175,33 @@ impl CacheService {
     pub fn is_disk(&self) -> bool {
         matches!(self.provider_type, ProviderType::Disk)
     }
+
+    /// Scan the initial disk cache size.
+    ///
+    /// For disk caches, this scans the cache directory to get an accurate
+    /// count of existing cached data. This is useful for metrics display
+    /// to show accurate initial cache size.
+    ///
+    /// For memory caches, this returns 0 (memory starts empty).
+    ///
+    /// This method should be called during service initialization, after
+    /// the cache service has started but before the main UI loop, to allow
+    /// for progress feedback during the potentially slow disk scan.
+    pub async fn scan_initial_size(&self) -> Result<u64, ServiceCacheError> {
+        match self.provider_type {
+            ProviderType::Memory => {
+                // Memory cache always starts empty
+                Ok(0)
+            }
+            ProviderType::Disk => {
+                if let Some(ref provider) = self.disk_provider {
+                    provider.scan_initial_size().await
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

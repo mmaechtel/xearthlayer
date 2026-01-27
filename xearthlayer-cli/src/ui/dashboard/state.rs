@@ -55,6 +55,8 @@ pub struct LoadingProgress {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(dead_code)] // Infrastructure for future TUI integration
 pub enum LoadingPhase {
+    /// Scanning disk cache for initial size.
+    ScanningDiskCache,
     /// Discovering packages and patches.
     #[default]
     Discovering,
@@ -75,6 +77,7 @@ impl LoadingPhase {
     /// Get a human-readable description of the phase.
     pub fn description(&self) -> &'static str {
         match self {
+            LoadingPhase::ScanningDiskCache => "Scanning disk cache...",
             LoadingPhase::Discovering => "Discovering packages...",
             LoadingPhase::CheckingCache => "Checking cache...",
             LoadingPhase::Scanning => "Scanning sources...",

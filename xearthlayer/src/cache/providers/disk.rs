@@ -104,7 +104,7 @@ impl DiskCacheProvider {
             directory: config.directory.clone(),
             max_size_bytes: AtomicU64::new(config.max_size_bytes),
             gc_interval: config.gc_interval,
-            cached_size: AtomicU64::new(0),
+            cached_size: AtomicU64::new(0), // Will be populated by scan_initial_size() or first GC
             cached_count: AtomicU64::new(0),
             gc_handle: RwLock::new(None),
             shutdown: shutdown.clone(),
@@ -130,6 +130,32 @@ impl DiskCacheProvider {
         );
 
         Ok(provider)
+    }
+
+    /// Scan existing cache size and update cached_size.
+    ///
+    /// This should be called after start() to get an accurate initial size
+    /// for metrics display. The scan is done in a blocking task to avoid
+    /// blocking the async runtime.
+    ///
+    /// Returns the total size in bytes.
+    pub async fn scan_initial_size(&self) -> Result<u64, ServiceCacheError> {
+        let directory = self.directory.clone();
+        let initial_size = tokio::task::spawn_blocking(move || {
+            let files = Self::collect_cache_files(&directory);
+            files.iter().map(|(_, _, size)| size).sum::<u64>()
+        })
+        .await
+        .map_err(|e| ServiceCacheError::SpawnError(e.to_string()))?;
+
+        self.cached_size.store(initial_size, Ordering::Relaxed);
+
+        info!(
+            initial_size = initial_size,
+            "Disk cache initial size scanned"
+        );
+
+        Ok(initial_size)
     }
 
     /// Shutdown the provider, stopping the GC daemon.

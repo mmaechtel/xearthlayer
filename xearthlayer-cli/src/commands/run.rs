@@ -230,6 +230,9 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
 
         // Progress callback that prints to stdout
         let progress_callback = |progress: StartupProgress| match progress {
+            StartupProgress::ScanningDiskCache => {
+                println!("  Scanning disk cache...");
+            }
             StartupProgress::Mounting { current_source, .. } => {
                 if let Some(source) = current_source {
                     println!("  Scanning: {}", source);

@@ -93,6 +93,8 @@ pub struct MountResult {
 /// Progress updates during service initialization.
 #[derive(Debug, Clone)]
 pub enum StartupProgress {
+    /// Scanning disk cache size.
+    ScanningDiskCache,
     /// Mounting FUSE filesystem.
     Mounting {
         /// Current phase of index building.
@@ -335,6 +337,18 @@ impl ServiceOrchestrator {
         let callback: Option<Arc<dyn Fn(StartupProgress) + Send + Sync>> =
             progress_callback.map(|f| Arc::new(f) as Arc<dyn Fn(StartupProgress) + Send + Sync>);
 
+        // Phase 0: Scan disk cache size (for accurate metrics display)
+        // We scan early for UI feedback, but defer metrics reporting until after mount
+        // (when the service with its metrics system exists)
+        let initial_disk_cache_bytes = if let Some(ref app) = self.cache_app {
+            if let Some(ref cb) = callback {
+                cb(StartupProgress::ScanningDiskCache);
+            }
+            app.scan_disk_cache_size_sync()
+        } else {
+            0
+        };
+
         // Phase 1: Mount consolidated ortho with progress
         let mount_result = if let Some(ref cb) = callback {
             // Convert our StartupProgress to the ortho_union IndexBuildProgress
@@ -361,6 +375,19 @@ impl ServiceOrchestrator {
                     .clone()
                     .unwrap_or_else(|| "Mount failed".to_string()),
             )));
+        }
+
+        // Report initial disk cache size to metrics (now that service exists)
+        if initial_disk_cache_bytes > 0 {
+            if let Some(service) = self.mount_manager.get_service() {
+                if let Some(metrics) = service.metrics_client() {
+                    metrics.disk_cache_initial_size(initial_disk_cache_bytes);
+                    tracing::debug!(
+                        bytes = initial_disk_cache_bytes,
+                        "Reported initial disk cache size to metrics"
+                    );
+                }
+            }
         }
 
         // Phase 2: Create overlay symlinks

@@ -303,6 +303,15 @@ pub fn run_tui(config: TuiAppConfig) -> Result<CancellationToken, CliError> {
 /// Update dashboard loading progress based on StartupProgress.
 fn update_loading_progress(dashboard: &mut Dashboard, progress: &StartupProgress) {
     match progress {
+        StartupProgress::ScanningDiskCache => {
+            // Update phase to show disk cache scanning
+            let loading = LoadingProgress {
+                phase: LoadingPhase::ScanningDiskCache,
+                current_package: "Disk cache".to_string(),
+                ..Default::default()
+            };
+            dashboard.update_loading_progress(loading);
+        }
         StartupProgress::Mounting {
             phase,
             current_source,

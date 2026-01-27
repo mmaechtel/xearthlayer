@@ -175,6 +175,8 @@ impl XEarthLayerApp {
         );
 
         // 2. Start disk cache service (spawns internal GC daemon!)
+        // Note: Initial size is NOT scanned here to keep startup fast.
+        // Call scan_disk_cache_size() later when UI can show progress.
         let disk_config = config.disk_service_config();
         let disk_cache_service = CacheService::start(disk_config)
             .await
@@ -315,6 +317,38 @@ impl XEarthLayerApp {
     /// Get current disk cache size in bytes.
     pub fn disk_cache_size_bytes(&self) -> u64 {
         self.disk_cache_service.cache().size_bytes()
+    }
+
+    /// Scan and report the initial disk cache size.
+    ///
+    /// This scans the disk cache directory to count existing cached data
+    /// and reports it to the metrics system. Call this during service
+    /// initialization when the UI can display progress feedback.
+    ///
+    /// Returns the scanned size in bytes.
+    pub async fn scan_disk_cache_size(&self) -> u64 {
+        match self.disk_cache_service.scan_initial_size().await {
+            Ok(size) => {
+                // Report to metrics if available
+                if let Some(ref metrics) = self.metrics_client {
+                    metrics.disk_cache_initial_size(size);
+                }
+                info!(initial_size_bytes = size, "Disk cache initial size scanned");
+                size
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to scan disk cache size");
+                0
+            }
+        }
+    }
+
+    /// Synchronous version of scan_disk_cache_size for non-async contexts.
+    ///
+    /// Uses the app's runtime to run the async scan.
+    pub fn scan_disk_cache_size_sync(&self) -> u64 {
+        let handle = self.runtime_handle();
+        handle.block_on(self.scan_disk_cache_size())
     }
 
     /// Shutdown the application gracefully.
