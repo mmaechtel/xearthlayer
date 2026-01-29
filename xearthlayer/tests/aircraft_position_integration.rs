@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc};
 use xearthlayer::aircraft_position::{
     AircraftPositionProvider, AircraftState, InferenceAdapter, InferenceAdapterConfig,
     PositionAccuracy, PositionSource, SharedAircraftPosition, StateAggregator,
-    StateAggregatorConfig, TelemetryStatus,
+    StateAggregatorConfig, TelemetryStatus, TrackSource,
 };
 use xearthlayer::scene_tracker::{
     BurstConfig, DdsTileCoord, DefaultSceneTracker, FuseAccessEvent, GeoBounds, GeoRegion,
@@ -49,7 +49,15 @@ fn create_apt_with_timeout(
 
 /// Create a telemetry AircraftState with typical X-Plane data.
 fn create_telemetry_state(lat: f64, lon: f64) -> AircraftState {
-    AircraftState::from_telemetry(lat, lon, 90.0, 120.0, 10000.0)
+    AircraftState::from_telemetry(
+        lat,
+        lon,
+        Some(90.0), // Track from XGPS2
+        TrackSource::Telemetry,
+        90.0, // Heading from XATT2
+        120.0,
+        10000.0,
+    )
 }
 
 /// Create an inference AircraftState from scene bounds center.

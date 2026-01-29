@@ -244,7 +244,7 @@ impl Fuse3OrthoUnionFS {
     /// let (tx, rx) = mpsc::unbounded_channel();
     /// let fs = Fuse3OrthoUnionFS::new(index, client, size)
     ///     .with_dds_access_channel(tx);
-    /// // rx is passed to TileBasedPrefetcher
+    /// // rx is passed to AdaptivePrefetchCoordinator for DSF tile tracking
     /// ```
     pub fn with_dds_access_channel(mut self, tx: mpsc::UnboundedSender<DdsAccessEvent>) -> Self {
         self.dds_access_tx = Some(tx);

@@ -159,6 +159,7 @@ impl PositionModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aircraft_position::TrackSource;
     use std::thread;
 
     #[test]
@@ -220,7 +221,15 @@ mod tests {
         model.apply_update(inference);
 
         // Telemetry (10m) should replace it
-        let telemetry = AircraftState::from_telemetry(53.6, 10.1, 90.0, 120.0, 10000.0);
+        let telemetry = AircraftState::from_telemetry(
+            53.6,
+            10.1,
+            Some(90.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         assert!(model.apply_update(telemetry));
         assert_eq!(model.position_source(), Some(PositionSource::Telemetry));
     }
@@ -230,7 +239,15 @@ mod tests {
         let mut model = PositionModel::new();
 
         // Start with telemetry (10m accuracy)
-        let telemetry = AircraftState::from_telemetry(53.6, 10.1, 90.0, 120.0, 10000.0);
+        let telemetry = AircraftState::from_telemetry(
+            53.6,
+            10.1,
+            Some(90.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         model.apply_update(telemetry);
 
         // Inference (100km) should be rejected
@@ -245,7 +262,15 @@ mod tests {
         let mut model = PositionModel::with_stale_threshold(Duration::from_millis(10));
 
         // Start with telemetry
-        let telemetry = AircraftState::from_telemetry(53.6, 10.1, 90.0, 120.0, 10000.0);
+        let telemetry = AircraftState::from_telemetry(
+            53.6,
+            10.1,
+            Some(90.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         model.apply_update(telemetry);
 
         // Wait for it to become stale
@@ -285,7 +310,15 @@ mod tests {
         assert!(!model.has_vectors());
 
         // Telemetry has vectors
-        let telemetry = AircraftState::from_telemetry(53.6, 10.1, 90.0, 120.0, 10000.0);
+        let telemetry = AircraftState::from_telemetry(
+            53.6,
+            10.1,
+            Some(90.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         model.apply_update(telemetry);
         assert!(model.has_vectors());
     }

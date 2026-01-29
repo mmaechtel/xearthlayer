@@ -62,8 +62,9 @@ use crate::manager::{
 use crate::metrics::TelemetrySnapshot;
 use crate::ortho_union::OrthoUnionIndex;
 use crate::prefetch::{
-    load_cache, save_cache, CacheLoadResult, FuseRequestAnalyzer, PrefetchStrategy,
-    PrefetcherBuilder, SceneryIndex, SceneryIndexConfig, SharedPrefetchStatus,
+    load_cache, save_cache, warn_if_legacy, AdaptivePrefetchConfig, AdaptivePrefetchCoordinator,
+    CacheLoadResult, CircuitBreaker, FuseRequestAnalyzer, Prefetcher, SceneryIndex,
+    SceneryIndexConfig, SharedPrefetchStatus,
 };
 use crate::runtime::SharedRuntimeHealth;
 
@@ -687,7 +688,7 @@ impl ServiceOrchestrator {
         &mut self,
         runtime_handle: &Handle,
         dds_client: Arc<dyn DdsClient>,
-        memory_cache: Arc<M>,
+        _memory_cache: Arc<M>, // Reserved for future use
     ) -> Result<(), ServiceError> {
         use crate::prefetch::AircraftState as PrefetchAircraftState;
 
@@ -737,72 +738,45 @@ impl ServiceOrchestrator {
 
         // Build prefetcher
         let config = &self.config.prefetch;
-        let mut builder = PrefetcherBuilder::new()
-            .memory_cache(memory_cache)
-            .dds_client(dds_client)
-            .strategy(&config.strategy)
-            .shared_status(Arc::clone(&self.prefetch_status))
-            .cone_half_angle(config.cone_angle)
-            .inner_radius_nm(config.inner_radius_nm)
-            .outer_radius_nm(config.outer_radius_nm)
-            .radial_radius(config.radial_radius)
-            .max_tiles_per_cycle(config.max_tiles_per_cycle)
-            .cycle_interval_ms(config.cycle_interval_ms)
-            .with_circuit_breaker_throttler(
-                self.mount_manager.load_monitor(),
-                config.circuit_breaker.clone(),
-            );
 
-        // Wire FUSE analyzer
-        if let Some(ref analyzer) = self.fuse_analyzer {
-            builder = builder.with_fuse_analyzer(Arc::clone(analyzer));
-        }
+        // Keep a reference to DDS client for adaptive strategy
+        let dds_client_for_adaptive = Arc::clone(&dds_client);
 
-        // Wire scenery index if available
-        if self.scenery_index.tile_count() > 0 {
-            builder = builder.with_scenery_index(Arc::clone(&self.scenery_index));
-        }
-
-        // Parse strategy
-        let strategy: PrefetchStrategy = config.strategy.parse().unwrap_or(PrefetchStrategy::Auto);
+        // Warn if a legacy strategy is configured (all now use adaptive)
+        warn_if_legacy(&config.strategy);
 
         // Build and start the prefetcher
         let prefetcher_cancel = self.cancellation.clone();
-        match strategy {
-            PrefetchStrategy::TileBased => {
-                // Tile-based prefetcher requires DDS access channel and OrthoUnionIndex
-                if let (Some(access_rx), Some(ortho_index)) = (
-                    self.mount_manager.take_dds_access_receiver(),
-                    self.mount_manager.ortho_union_index(),
-                ) {
-                    builder = builder.tile_based_rows_ahead(config.tile_based_rows_ahead);
-                    let prefetcher = builder.build_tile_based(ortho_index, access_rx);
 
-                    let handle = runtime_handle.spawn(async move {
-                        prefetcher.run(state_rx, prefetcher_cancel).await;
-                    });
+        // Build adaptive prefetch coordinator
+        let adaptive_config = AdaptivePrefetchConfig::from_prefetch_config(config);
+        let mut coordinator = AdaptivePrefetchCoordinator::new(adaptive_config);
 
-                    self.prefetch_handle = Some(PrefetchHandle { handle });
-                    info!(strategy = "tile-based", "Prefetch system started");
-                } else {
-                    // Fall back to radial
-                    let prefetcher = builder.strategy("radial").build();
-                    let handle = runtime_handle.spawn(async move {
-                        prefetcher.run(state_rx, prefetcher_cancel).await;
-                    });
-                    self.prefetch_handle = Some(PrefetchHandle { handle });
-                    info!(strategy = "radial (fallback)", "Prefetch system started");
-                }
-            }
-            _ => {
-                let prefetcher = builder.build();
-                let handle = runtime_handle.spawn(async move {
-                    prefetcher.run(state_rx, prefetcher_cancel).await;
-                });
-                self.prefetch_handle = Some(PrefetchHandle { handle });
-                info!(strategy = %config.strategy, "Prefetch system started");
-            }
+        // Wire DDS client
+        coordinator = coordinator.with_dds_client(dds_client_for_adaptive);
+
+        // Wire circuit breaker as throttler
+        let circuit_breaker = CircuitBreaker::new(
+            config.circuit_breaker.clone(),
+            self.mount_manager.load_monitor(),
+        );
+        coordinator = coordinator.with_throttler(Arc::new(circuit_breaker));
+
+        // Wire scenery index if available
+        if self.scenery_index.tile_count() > 0 {
+            coordinator = coordinator.with_scenery_index(Arc::clone(&self.scenery_index));
         }
+
+        // Wire shared status for TUI display
+        coordinator = coordinator.with_shared_status(Arc::clone(&self.prefetch_status));
+
+        let prefetcher: Box<dyn Prefetcher> = Box::new(coordinator);
+        let handle = runtime_handle.spawn(async move {
+            prefetcher.run(state_rx, prefetcher_cancel).await;
+        });
+
+        self.prefetch_handle = Some(PrefetchHandle { handle });
+        info!(strategy = "adaptive", "Prefetch system started");
 
         Ok(())
     }

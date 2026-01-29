@@ -169,6 +169,7 @@ impl AircraftPositionBroadcaster for Arc<SharedAircraftPosition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aircraft_position::TrackSource;
 
     fn create_shared() -> SharedAircraftPosition {
         let (tx, _rx) = broadcast::channel(16);
@@ -204,7 +205,15 @@ mod tests {
     fn test_shared_with_telemetry() {
         let shared = create_shared();
 
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            Some(90.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         shared.receive_telemetry(state);
 
         assert!(shared.has_position());
@@ -219,7 +228,15 @@ mod tests {
         let shared = create_shared();
         let mut rx = shared.subscribe();
 
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            Some(90.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         shared.receive_telemetry(state);
 
         let received = rx.try_recv().expect("Should receive broadcast");

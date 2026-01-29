@@ -1,63 +1,24 @@
-//! Tile-based prefetch strategy for X-Plane 12.
+//! DSF tile coordinate types and FUSE access events.
 //!
-//! This module implements a prefetch strategy that aligns with X-Plane's actual
-//! loading behavior: whole 1° DSF tiles loaded in bursts, followed by quiet
-//! periods of 1-2+ minutes.
+//! This module provides types for working with X-Plane's 1° × 1° DSF (Distribution
+//! Scenery Format) tiles and tracking FUSE layer DDS access events.
 //!
-//! # Architecture
+//! # Types
 //!
-//! ```text
-//! FUSE Layer (Fuse3OrthoUnionFS)
-//!   │
-//!   │ DdsAccessEvent (via channel)
-//!   ▼
-//! TileBasedPrefetcher
-//!   ├─ TileBurstTracker (tracks which DSF tiles are being loaded)
-//!   ├─ TilePredictor (predicts next tiles based on heading)
-//!   └─ CircuitBreaker (detects quiet periods - reused from existing)
-//! ```
-//!
-//! # Key Insight
-//!
-//! X-Plane loads entire DSF tiles (1° × 1° grid), not individual textures.
-//! The prefetcher exploits quiet periods between tile loads to prefetch
-//! the next row of tiles based on movement direction.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use xearthlayer::prefetch::tile_based::{TileBasedPrefetcher, TileBasedConfig};
-//!
-//! let prefetcher = TileBasedPrefetcher::new(
-//!     ortho_index,
-//!     dds_client,
-//!     memory_cache,
-//!     access_rx,
-//!     circuit_breaker,
-//!     TileBasedConfig::default(),
-//! );
-//!
-//! // Run with telemetry for heading-aware prediction
-//! prefetcher.run(state_rx, cancellation_token).await;
-//! ```
+//! - [`DsfTileCoord`] - Coordinate of a 1° × 1° DSF tile
+//! - [`DdsAccessEvent`] - Event fired when FUSE layer accesses a DDS texture
 
-mod burst_tracker;
 mod dsf_coord;
-mod predictor;
-mod prefetcher;
 
-pub use burst_tracker::TileBurstTracker;
 pub use dsf_coord::DsfTileCoord;
-pub use predictor::TilePredictor;
-pub use prefetcher::{TileBasedConfig, TileBasedPrefetcher};
 
 use std::time::Instant;
 
 /// Event sent from FUSE when a DDS file is accessed.
 ///
 /// The FUSE layer sends these events via a channel whenever X-Plane requests
-/// a DDS texture. The prefetcher uses these events to track which DSF tiles
-/// are actively being loaded.
+/// a DDS texture. This enables tracking which DSF tiles are actively being
+/// loaded for circuit breaker and monitoring purposes.
 ///
 /// # Design Notes
 ///

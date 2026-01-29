@@ -102,6 +102,30 @@ pub enum PositionSource {
     SceneInference,
 }
 
+/// Source of ground track data.
+///
+/// Indicates how the track value was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackSource {
+    /// From XGPS2 telemetry (authoritative GPS track).
+    Telemetry,
+    /// Calculated from position history.
+    Derived,
+    /// Not available (insufficient data or non-telemetry source).
+    #[default]
+    Unavailable,
+}
+
+impl std::fmt::Display for TrackSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Telemetry => write!(f, "Telemetry"),
+            Self::Derived => write!(f, "Derived"),
+            Self::Unavailable => write!(f, "Unavailable"),
+        }
+    }
+}
+
 impl std::fmt::Display for PositionSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -117,6 +141,15 @@ impl std::fmt::Display for PositionSource {
 /// Contains position, vector data (if available), and metadata about
 /// the source and accuracy of the data.
 ///
+/// # Track vs Heading
+///
+/// - **Track** (`track`): The actual ground path direction - where the aircraft
+///   is moving over the ground. Comes from XGPS2's track field or derived from
+///   position history. Used by prefetch for band calculation.
+///
+/// - **Heading** (`heading`): Where the aircraft nose is pointing. Comes from
+///   XATT2's heading field. Differs from track due to wind (crosswind correction).
+///
 /// # Timestamp
 ///
 /// The `timestamp` field indicates when this data was measured or inferred.
@@ -131,8 +164,19 @@ pub struct AircraftState {
     /// Longitude in degrees (-180 to 180).
     pub longitude: f64,
 
+    /// Ground track in degrees (0-360).
+    ///
+    /// The actual direction of movement over the ground.
+    /// From XGPS2's track field or derived from position history.
+    /// `None` if not available (e.g., stationary or from non-telemetry source).
+    pub track: Option<f32>,
+
+    /// How the track value was determined.
+    pub track_source: TrackSource,
+
     /// True heading in degrees (0-360).
     ///
+    /// Where the aircraft nose is pointing (from XATT2).
     /// Set to 0.0 if unknown (e.g., from scene inference).
     pub heading: f32,
 
@@ -160,9 +204,21 @@ pub struct AircraftState {
 
 impl AircraftState {
     /// Create a new aircraft state from telemetry.
+    ///
+    /// # Arguments
+    ///
+    /// * `latitude` - Latitude in degrees
+    /// * `longitude` - Longitude in degrees
+    /// * `track` - Ground track in degrees (from XGPS2), or None if not available
+    /// * `track_source` - How the track was determined
+    /// * `heading` - True heading in degrees (from XATT2)
+    /// * `ground_speed` - Ground speed in knots
+    /// * `altitude` - Altitude MSL in feet
     pub fn from_telemetry(
         latitude: f64,
         longitude: f64,
+        track: Option<f32>,
+        track_source: TrackSource,
         heading: f32,
         ground_speed: f32,
         altitude: f32,
@@ -170,6 +226,8 @@ impl AircraftState {
         Self {
             latitude,
             longitude,
+            track,
+            track_source,
             heading,
             ground_speed,
             altitude,
@@ -187,6 +245,8 @@ impl AircraftState {
         Self {
             latitude,
             longitude,
+            track: None,
+            track_source: TrackSource::Unavailable,
             heading: 0.0,
             ground_speed: 0.0,
             altitude: 0.0,
@@ -201,6 +261,8 @@ impl AircraftState {
         Self {
             latitude,
             longitude,
+            track: None,
+            track_source: TrackSource::Unavailable,
             heading: 0.0,
             ground_speed: 0.0,
             altitude: 0.0,
@@ -208,6 +270,29 @@ impl AircraftState {
             source: PositionSource::SceneInference,
             accuracy: PositionAccuracy::SCENE_INFERENCE,
         }
+    }
+
+    /// Get the effective track for prefetch calculations.
+    ///
+    /// Returns the ground track if available, otherwise falls back to heading.
+    /// For non-telemetry sources, returns None.
+    pub fn effective_track(&self) -> Option<f32> {
+        if !self.has_vectors() {
+            return None;
+        }
+        // Prefer track if available, fall back to heading
+        self.track.or(Some(self.heading))
+    }
+
+    /// Update track with derived value if no authoritative track available.
+    ///
+    /// Used by the aggregator to enrich state with position-derived track.
+    pub fn with_derived_track(mut self, track: f32) -> Self {
+        if self.track.is_none() {
+            self.track = Some(track);
+            self.track_source = TrackSource::Derived;
+        }
+        self
     }
 
     /// Get the age of this state (time since it was created).
@@ -295,16 +380,102 @@ mod tests {
 
     #[test]
     fn test_aircraft_state_from_telemetry() {
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            Some(88.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
 
         assert_eq!(state.latitude, 53.5);
         assert_eq!(state.longitude, 10.0);
-        assert_eq!(state.heading, 90.0);
+        assert_eq!(state.track, Some(88.0)); // Ground track from XGPS2
+        assert_eq!(state.track_source, TrackSource::Telemetry);
+        assert_eq!(state.heading, 90.0); // Heading from XATT2
         assert_eq!(state.ground_speed, 120.0);
         assert_eq!(state.altitude, 10000.0);
         assert_eq!(state.source, PositionSource::Telemetry);
         assert_eq!(state.accuracy, PositionAccuracy::TELEMETRY);
         assert!(state.has_vectors());
+    }
+
+    #[test]
+    fn test_effective_track_prefers_track_over_heading() {
+        // With track available
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            Some(88.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
+        assert_eq!(state.effective_track(), Some(88.0)); // Prefers track
+
+        // Without track, falls back to heading
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            None,
+            TrackSource::Unavailable,
+            90.0,
+            120.0,
+            10000.0,
+        );
+        assert_eq!(state.effective_track(), Some(90.0)); // Falls back to heading
+    }
+
+    #[test]
+    fn test_effective_track_none_for_non_telemetry() {
+        let state = AircraftState::from_manual_reference(43.6, 1.4);
+        assert_eq!(state.effective_track(), None);
+        assert_eq!(state.track_source, TrackSource::Unavailable);
+
+        let state = AircraftState::from_inference(53.5, 10.0);
+        assert_eq!(state.effective_track(), None);
+        assert_eq!(state.track_source, TrackSource::Unavailable);
+    }
+
+    #[test]
+    fn test_with_derived_track() {
+        // State without track
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            None,
+            TrackSource::Unavailable,
+            90.0,
+            120.0,
+            10000.0,
+        );
+
+        // Enrich with derived track
+        let enriched = state.with_derived_track(85.0);
+        assert_eq!(enriched.track, Some(85.0));
+        assert_eq!(enriched.track_source, TrackSource::Derived);
+    }
+
+    #[test]
+    fn test_with_derived_track_preserves_authoritative() {
+        // State with authoritative track
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            Some(88.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
+
+        // Derived track should NOT overwrite authoritative track
+        let enriched = state.with_derived_track(85.0);
+        assert_eq!(enriched.track, Some(88.0)); // Preserved
+        assert_eq!(enriched.track_source, TrackSource::Telemetry); // Preserved
     }
 
     #[test]
@@ -354,11 +525,26 @@ mod tests {
 
     #[test]
     fn test_aircraft_position_status_from_state() {
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = AircraftState::from_telemetry(
+            53.5,
+            10.0,
+            Some(88.0),
+            TrackSource::Telemetry,
+            90.0,
+            120.0,
+            10000.0,
+        );
         let status = AircraftPositionStatus::from_state(state, TelemetryStatus::Connected);
 
         assert!(status.state.is_some());
         assert_eq!(status.telemetry_status, TelemetryStatus::Connected);
         assert!(status.vectors_available);
+    }
+
+    #[test]
+    fn test_track_source_display() {
+        assert_eq!(TrackSource::Telemetry.to_string(), "Telemetry");
+        assert_eq!(TrackSource::Derived.to_string(), "Derived");
+        assert_eq!(TrackSource::Unavailable.to_string(), "Unavailable");
     }
 }

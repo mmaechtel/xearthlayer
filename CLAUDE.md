@@ -96,17 +96,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - `Ortho4XPProcessor` for ortho tiles, `OverlayProcessor` for overlays
 
 11. **Predictive Tile Caching** (`xearthlayer/src/prefetch/`)
-    - `Prefetcher` trait - Strategy pattern for swappable prefetch algorithms
-    - `RadialPrefetcher` (recommended) - Ring-based prefetching (85-180nm around aircraft)
-    - `HeadingAwarePrefetcher` - Direction-aware cone prefetching with telemetry
+    - `AdaptivePrefetchCoordinator` - Self-calibrating prefetch with flight phase detection
+    - `GroundStrategy` - Ring-based prefetching for ground operations (GS < 40kt)
+    - `CruiseStrategy` - Track-based band prefetching for cruise (band ahead of aircraft)
+    - `PhaseDetector` - Ground/Cruise flight phase state machine
+    - `PerformanceCalibrator` - Measures throughput during initial load for mode selection
     - `TelemetryListener` - Receives X-Plane/ForeFlight UDP telemetry (position, heading, speed)
     - `FuseLoadMonitor` trait - Abstraction for FUSE request tracking (ISP)
-    - `PrefetchThrottler` trait - Abstraction for throttle decisions (DIP)
     - `CircuitBreaker` - Pauses prefetch during X-Plane scene loading
     - Submits jobs to shared job executor daemon via `DdsClient` trait
-    - 10-second timeout per prefetch request via `CancellationToken`
-    - TTL tracking prevents re-requesting failed tiles for 60 seconds
-    - See `docs/dev/predictive-caching.md` for design details
+    - Mode selection: Aggressive (>30 tiles/sec), Opportunistic (10-30), or Disabled
+    - See `docs/dev/adaptive-prefetch-design.md` for design details
 
 12. **Ortho Union Index** (`xearthlayer/src/ortho_union/`)
     - `OrthoUnionIndex` - Merged index of all ortho sources (patches + packages)
@@ -134,7 +134,7 @@ xearthlayer-cli
             ├─→ fuse/fuse3 (async multi-threaded FUSE) ─────────────────┤
             │       └─→ uses DdsClient for tile requests                │
             │                                                            │
-            ├─→ prefetch (RadialPrefetcher) ────────────────────────────┘
+            ├─→ prefetch (AdaptivePrefetchCoordinator) ────────────────┘
             │       └─→ uses DdsClient for background prefetch
             │
             ├─→ provider (Bing, Go2, Google - async variants)
@@ -259,9 +259,10 @@ xearthlayer publish gaps --region <code> [--tile <lat,lon>] [--format <fmt>] [-o
 | `xearthlayer/src/publisher/` | Package publisher library |
 | `xearthlayer/src/publisher/dedupe/` | Zoom level overlap detection and gap analysis |
 | `xearthlayer/src/prefetch/strategy.rs` | Prefetcher trait (strategy pattern) |
-| `xearthlayer/src/prefetch/radial.rs` | RadialPrefetcher (recommended prefetch strategy) |
+| `xearthlayer/src/prefetch/adaptive/coordinator.rs` | AdaptivePrefetchCoordinator (self-calibrating prefetch) |
+| `xearthlayer/src/prefetch/adaptive/cruise_strategy.rs` | CruiseStrategy (track-based band prefetch) |
+| `xearthlayer/src/prefetch/adaptive/ground_strategy.rs` | GroundStrategy (ring-based for ground ops) |
 | `xearthlayer/src/prefetch/load_monitor.rs` | FuseLoadMonitor trait + SharedFuseLoadMonitor |
-| `xearthlayer/src/prefetch/throttler.rs` | PrefetchThrottler trait + ThrottleState |
 | `xearthlayer/src/prefetch/circuit_breaker.rs` | CircuitBreaker for X-Plane load detection |
 | `xearthlayer/src/service/cache_layer.rs` | CacheLayer - service-owned cache lifecycle (memory + disk) |
 | `xearthlayer/src/cache/providers/disk.rs` | DiskCacheProvider with internal GC daemon |

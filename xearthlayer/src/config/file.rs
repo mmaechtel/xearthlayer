@@ -184,21 +184,20 @@ pub struct LoggingSettings {
 pub struct PrefetchSettings {
     /// Enable predictive tile prefetching based on X-Plane telemetry
     pub enabled: bool,
-    /// Prefetch strategy: "auto", "heading-aware", or "radial" (default: "auto")
+    /// Prefetch strategy: "auto" or "adaptive" (both use adaptive prefetch)
     ///
-    /// - "auto": Uses heading-aware with graceful degradation to radial
-    /// - "heading-aware": Direction-aware cone prefetching (requires telemetry)
-    /// - "radial": Simple radius-based prefetching (no heading data required)
+    /// The adaptive prefetch system automatically selects the best strategy
+    /// based on flight phase (ground/cruise) and system throughput.
     pub strategy: String,
+    /// Adaptive prefetch mode: "auto", "aggressive", "opportunistic", or "disabled"
+    ///
+    /// - "auto": Select mode based on calibration results (recommended)
+    /// - "aggressive": Position-based triggers (fast connections)
+    /// - "opportunistic": Circuit breaker triggers (moderate connections)
+    /// - "disabled": Disable prefetch
+    pub mode: String,
     /// UDP port for X-Plane telemetry (default: 49002 for ForeFlight protocol)
     pub udp_port: u16,
-    /// Prediction cone half-angle in degrees (default: 80)
-    pub cone_angle: f32,
-    /// Inner radius where prefetch zone starts (nautical miles).
-    /// This is just inside X-Plane's ~90nm loaded zone. Default: 85nm.
-    pub inner_radius_nm: f32,
-    /// Outer radius where prefetch zone ends (nautical miles). Default: 120nm.
-    pub outer_radius_nm: f32,
     /// Maximum tiles to submit per prefetch cycle. Default: 200.
     /// Lower values reduce bandwidth competition with on-demand requests.
     pub max_tiles_per_cycle: usize,
@@ -214,13 +213,21 @@ pub struct PrefetchSettings {
     /// Cooloff time (seconds) before trying to close the circuit.
     /// Default: 5 seconds.
     pub circuit_breaker_half_open_secs: u64,
-    /// Radial prefetcher tile radius (number of tiles in each direction).
-    /// Default: 120 tiles. Maximum: 255.
-    pub radial_radius: u8,
-    /// Tile-based prefetcher: number of DSF tile rows to prefetch ahead.
-    /// Higher values prefetch more aggressively but use more bandwidth.
-    /// Default: 1 (prefetch the immediate next row).
-    pub tile_based_rows_ahead: u32,
+
+    // Adaptive prefetch calibration settings
+    /// Minimum throughput for aggressive mode (tiles/sec).
+    /// If measured throughput exceeds this, aggressive (position-based) prefetch is enabled.
+    /// Default: 30.0
+    pub calibration_aggressive_threshold: f64,
+    /// Minimum throughput for opportunistic mode (tiles/sec).
+    /// If measured throughput is between this and aggressive_threshold,
+    /// opportunistic (circuit breaker) prefetch is enabled.
+    /// Below this threshold, prefetch is disabled.
+    /// Default: 10.0
+    pub calibration_opportunistic_threshold: f64,
+    /// How long to measure throughput during initial calibration (seconds).
+    /// Default: 60
+    pub calibration_sample_duration: u64,
 }
 
 /// Control plane configuration for job management and health monitoring.
@@ -346,18 +353,17 @@ impl Default for ConfigFile {
             },
             prefetch: PrefetchSettings {
                 enabled: true,
-                strategy: "auto".to_string(),
+                strategy: "adaptive".to_string(),
+                mode: "auto".to_string(),
                 udp_port: DEFAULT_PREFETCH_UDP_PORT,
-                cone_angle: DEFAULT_PREFETCH_CONE_ANGLE,
-                inner_radius_nm: DEFAULT_PREFETCH_INNER_RADIUS_NM,
-                outer_radius_nm: DEFAULT_PREFETCH_OUTER_RADIUS_NM,
                 max_tiles_per_cycle: DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
                 cycle_interval_ms: DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
                 circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
                 circuit_breaker_open_ms: DEFAULT_CIRCUIT_BREAKER_OPEN_MS,
                 circuit_breaker_half_open_secs: DEFAULT_CIRCUIT_BREAKER_HALF_OPEN_SECS,
-                radial_radius: DEFAULT_PREFETCH_RADIAL_RADIUS,
-                tile_based_rows_ahead: DEFAULT_TILE_BASED_ROWS_AHEAD,
+                calibration_aggressive_threshold: DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD,
+                calibration_opportunistic_threshold: DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD,
+                calibration_sample_duration: DEFAULT_CALIBRATION_SAMPLE_DURATION,
             },
             control_plane: ControlPlaneSettings {
                 max_concurrent_jobs: default_max_concurrent_jobs(),
@@ -493,18 +499,6 @@ pub const DEFAULT_GENERATION_TIMEOUT_SECS: u64 = 10;
 /// Default UDP port for X-Plane telemetry (ForeFlight protocol).
 pub const DEFAULT_PREFETCH_UDP_PORT: u16 = 49002;
 
-/// Default prediction cone half-angle in degrees.
-/// Wider angle (80°) covers more area ahead of aircraft.
-pub const DEFAULT_PREFETCH_CONE_ANGLE: f32 = 80.0;
-
-/// Default inner radius where prefetch zone starts (nautical miles).
-/// Just inside X-Plane's ~90nm loaded zone boundary.
-pub const DEFAULT_PREFETCH_INNER_RADIUS_NM: f32 = 85.0;
-
-/// Default outer radius where prefetch zone ends (nautical miles).
-/// Extended to 180nm for better look-ahead coverage.
-pub const DEFAULT_PREFETCH_OUTER_RADIUS_NM: f32 = 180.0;
-
 /// Default maximum tiles to submit per prefetch cycle.
 /// Increased to 200 for faster cache warming.
 pub const DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE: usize = 200;
@@ -525,13 +519,22 @@ pub const DEFAULT_CIRCUIT_BREAKER_OPEN_MS: u64 = 500;
 /// Set to 2 seconds for faster recovery after load drops.
 pub const DEFAULT_CIRCUIT_BREAKER_HALF_OPEN_SECS: u64 = 2;
 
-/// Default radial prefetcher tile radius.
-/// 120 tiles provides wide coverage around aircraft position.
-pub const DEFAULT_PREFETCH_RADIAL_RADIUS: u8 = 120;
+// =============================================================================
+// Adaptive prefetch calibration defaults
+// =============================================================================
 
-/// Default tile-based prefetcher rows ahead.
-/// 1 row means prefetch the immediate next row of DSF tiles.
-pub const DEFAULT_TILE_BASED_ROWS_AHEAD: u32 = 1;
+/// Default aggressive threshold: 30 tiles/sec.
+/// Systems exceeding this use position-based prefetch triggers.
+pub const DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD: f64 = 30.0;
+
+/// Default opportunistic threshold: 10 tiles/sec.
+/// Systems between this and aggressive use circuit breaker triggers.
+/// Below this, prefetch is disabled.
+pub const DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD: f64 = 10.0;
+
+/// Default calibration sample duration: 60 seconds.
+/// How long to measure throughput during initial calibration.
+pub const DEFAULT_CALIBRATION_SAMPLE_DURATION: u64 = 60;
 
 // =============================================================================
 // Control plane defaults
@@ -892,15 +895,40 @@ impl ConfigFile {
             if let Some(v) = section.get("strategy") {
                 let v = v.trim().to_lowercase();
                 match v.as_str() {
-                    "auto" | "heading-aware" | "radial" | "tile-based" => {
-                        config.prefetch.strategy = v;
+                    "auto" | "adaptive" => {
+                        config.prefetch.strategy = "adaptive".to_string();
+                    }
+                    // Legacy strategies - map to adaptive with warning (deprecated in v0.4.0)
+                    "heading-aware" | "radial" | "tile-based" => {
+                        tracing::warn!(
+                            "Prefetch strategy '{}' is deprecated and will be removed in a future version. \
+                             Using 'adaptive' instead. Please update your config file.",
+                            v
+                        );
+                        config.prefetch.strategy = "adaptive".to_string();
                     }
                     _ => {
                         return Err(ConfigFileError::InvalidValue {
                             section: "prefetch".to_string(),
                             key: "strategy".to_string(),
                             value: v.to_string(),
-                            reason: "must be 'auto', 'heading-aware', 'radial', or 'tile-based'"
+                            reason: "must be 'auto' or 'adaptive'".to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(v) = section.get("mode") {
+                let v = v.trim().to_lowercase();
+                match v.as_str() {
+                    "auto" | "aggressive" | "opportunistic" | "disabled" => {
+                        config.prefetch.mode = v;
+                    }
+                    _ => {
+                        return Err(ConfigFileError::InvalidValue {
+                            section: "prefetch".to_string(),
+                            key: "mode".to_string(),
+                            value: v.to_string(),
+                            reason: "must be 'auto', 'aggressive', 'opportunistic', or 'disabled'"
                                 .to_string(),
                         });
                     }
@@ -915,37 +943,8 @@ impl ConfigFile {
                         reason: "must be a valid port number (1-65535)".to_string(),
                     })?;
             }
-            if let Some(v) = section.get("cone_angle") {
-                config.prefetch.cone_angle =
-                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "cone_angle".to_string(),
-                        value: v.to_string(),
-                        reason: "must be a positive number (degrees)".to_string(),
-                    })?;
-            }
-            // Deprecated: cone_distance_nm, radial_radius_nm, batch_size, max_in_flight, radial_radius
-            // These are ignored if present in config file (removed in v0.2.9/v0.2.11)
-            if let Some(v) = section.get("inner_radius_nm") {
-                config.prefetch.inner_radius_nm =
-                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "inner_radius_nm".to_string(),
-                        value: v.to_string(),
-                        reason: "must be a positive number (nautical miles)".to_string(),
-                    })?;
-            }
-            if let Some(v) = section.get("outer_radius_nm") {
-                config.prefetch.outer_radius_nm =
-                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "outer_radius_nm".to_string(),
-                        value: v.to_string(),
-                        reason: "must be a positive number (nautical miles)".to_string(),
-                    })?;
-            }
-            // Deprecated: radial_outer_radius_nm, cone_outer_radius_nm, cone_half_angle
-            // These are ignored if present in config file (removed in v0.2.9)
+            // Legacy settings cone_angle, inner_radius_nm, outer_radius_nm are deprecated (v0.4.0)
+            // They are ignored if present in config file (use 'xearthlayer config upgrade')
             if let Some(v) = section.get("max_tiles_per_cycle") {
                 config.prefetch.max_tiles_per_cycle =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
@@ -991,22 +990,34 @@ impl ConfigFile {
                         reason: "must be a positive integer (seconds)".to_string(),
                     })?;
             }
-            if let Some(v) = section.get("radial_radius") {
-                config.prefetch.radial_radius =
+            // Legacy settings radial_radius, tile_based_rows_ahead are deprecated (v0.4.0)
+            // They are ignored if present in config file (use 'xearthlayer config upgrade')
+            // Adaptive prefetch calibration settings
+            if let Some(v) = section.get("calibration_aggressive_threshold") {
+                config.prefetch.calibration_aggressive_threshold =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
                         section: "prefetch".to_string(),
-                        key: "radial_radius".to_string(),
+                        key: "calibration_aggressive_threshold".to_string(),
                         value: v.to_string(),
-                        reason: "must be a positive integer (tiles)".to_string(),
+                        reason: "must be a positive number (tiles/sec)".to_string(),
                     })?;
             }
-            if let Some(v) = section.get("tile_based_rows_ahead") {
-                config.prefetch.tile_based_rows_ahead =
+            if let Some(v) = section.get("calibration_opportunistic_threshold") {
+                config.prefetch.calibration_opportunistic_threshold =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
                         section: "prefetch".to_string(),
-                        key: "tile_based_rows_ahead".to_string(),
+                        key: "calibration_opportunistic_threshold".to_string(),
                         value: v.to_string(),
-                        reason: "must be a positive integer (rows)".to_string(),
+                        reason: "must be a positive number (tiles/sec)".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("calibration_sample_duration") {
+                config.prefetch.calibration_sample_duration =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "prefetch".to_string(),
+                        key: "calibration_sample_duration".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer (seconds)".to_string(),
                     })?;
             }
         }
@@ -1316,30 +1327,18 @@ file = {}
 enabled = {}
 ; Prefetch strategy (default: auto)
 ;   auto         - Uses heading-aware with graceful degradation to radial
-;   heading-aware - Direction-aware cone prefetching (requires telemetry)
-;   radial       - Simple radius-based prefetching (no heading data required)
+;   adaptive     - Self-calibrating DSF-aligned prefetch (recommended)
+; Legacy strategies (radial, heading-aware, tile-based) are deprecated
+; and will automatically use adaptive instead.
 strategy = {}
+; Adaptive prefetch mode (default: auto)
+;   auto         - Select mode based on throughput calibration (recommended)
+;   aggressive   - Position-based triggers (fast connections)
+;   opportunistic - Circuit breaker triggers (moderate connections)
+;   disabled     - Disable prefetch entirely
+mode = {}
 ; UDP port for telemetry (default: 49002 for ForeFlight protocol)
 udp_port = {}
-
-; Zone boundaries (nautical miles)
-; Inner radius where prefetch zone starts (default: 85)
-; Just inside X-Plane's ~90nm loaded zone boundary
-inner_radius_nm = {}
-; Outer radius where prefetch zone ends (default: 180)
-outer_radius_nm = {}
-
-; Radial prefetcher tile radius (default: 120)
-; Higher values prefetch more tiles around aircraft position
-radial_radius = {}
-
-; Tile-based prefetcher rows ahead (default: 1)
-; Number of DSF tile rows (1° each) to prefetch ahead of aircraft
-tile_based_rows_ahead = {}
-
-; Heading-aware cone (prediction cone half-angle in degrees, default: 80)
-; Wider angles prefetch more tiles but use more bandwidth
-cone_angle = {}
 
 ; Cycle limits
 ; Maximum tiles to submit per prefetch cycle (default: 200)
@@ -1357,6 +1356,17 @@ circuit_breaker_threshold = {}
 circuit_breaker_open_ms = {}
 ; Cooloff time (seconds) before trying to close the circuit (default: 5)
 circuit_breaker_half_open_secs = {}
+
+; Adaptive prefetch calibration (for strategy = adaptive)
+; Minimum throughput for aggressive mode (tiles/sec, default: 30)
+; Systems exceeding this use position-based prefetch triggers
+calibration_aggressive_threshold = {}
+; Minimum throughput for opportunistic mode (tiles/sec, default: 10)
+; Systems between this and aggressive use circuit breaker triggers
+; Below this, prefetch is disabled
+calibration_opportunistic_threshold = {}
+; How long to measure throughput during initial calibration (seconds, default: 60)
+calibration_sample_duration = {}
 
 [control_plane]
 ; Advanced settings for job management and health monitoring.
@@ -1429,17 +1439,16 @@ directory = {}
             path_to_string(&self.logging.file),
             self.prefetch.enabled,
             self.prefetch.strategy,
+            self.prefetch.mode,
             self.prefetch.udp_port,
-            self.prefetch.inner_radius_nm,
-            self.prefetch.outer_radius_nm,
-            self.prefetch.radial_radius,
-            self.prefetch.tile_based_rows_ahead,
-            self.prefetch.cone_angle,
             self.prefetch.max_tiles_per_cycle,
             self.prefetch.cycle_interval_ms,
             self.prefetch.circuit_breaker_threshold,
             self.prefetch.circuit_breaker_open_ms,
             self.prefetch.circuit_breaker_half_open_secs,
+            self.prefetch.calibration_aggressive_threshold,
+            self.prefetch.calibration_opportunistic_threshold,
+            self.prefetch.calibration_sample_duration,
             self.control_plane.max_concurrent_jobs,
             self.control_plane.stall_threshold_secs,
             self.control_plane.health_check_interval_secs,

@@ -72,6 +72,14 @@ pub const DEPRECATED_KEYS: &[&str] = &[
     // Removed in v0.3.1 - Prewarm now uses tile-based (DSF grid) instead of radius
     // The new grid_size setting aligns prewarm with X-Plane's DSF tile boundaries.
     "prewarm.radius_nm",
+    // Removed in v0.4.0 - Legacy prefetch strategies replaced by adaptive prefetch
+    // RadialPrefetcher, HeadingAwarePrefetcher, and TileBasedPrefetcher are superseded
+    // by the adaptive prefetch system with phase detection (ground/cruise).
+    "prefetch.radial_radius",
+    "prefetch.tile_based_rows_ahead",
+    "prefetch.cone_angle",
+    "prefetch.inner_radius_nm",
+    "prefetch.outer_radius_nm",
 ];
 
 /// Result of analyzing a configuration file for upgrade needs.

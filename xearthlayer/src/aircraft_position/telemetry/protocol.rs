@@ -61,6 +61,9 @@ pub fn parse_packet(data: &[u8]) -> Option<PartialStateUpdate> {
 /// Parse ForeFlight XGPS message.
 ///
 /// Format: `XGPSSimName,lon,lat,alt_m,track,gs_m/s`
+///
+/// Note: The `track` field is the ground track (actual direction of movement),
+/// NOT the heading (where the nose points). We store it separately.
 fn parse_foreflight_xgps(data: &[u8]) -> Option<PartialStateUpdate> {
     let text = std::str::from_utf8(data).ok()?;
 
@@ -80,9 +83,10 @@ fn parse_foreflight_xgps(data: &[u8]) -> Option<PartialStateUpdate> {
     Some(PartialStateUpdate {
         latitude: Some(latitude),
         longitude: Some(longitude),
-        heading: Some(normalize_heading(track)),
+        track: Some(normalize_heading(track)), // Ground track from GPS
         ground_speed: Some(groundspeed_ms * MS_TO_KNOTS),
         altitude: Some(altitude_m * METERS_TO_FEET),
+        ..Default::default()
     })
 }
 
@@ -164,10 +168,16 @@ fn normalize_heading(heading: f32) -> f32 {
 }
 
 /// Partial state update from a single packet.
+///
+/// # Track vs Heading
+///
+/// - `track`: Ground track from XGPS2 - actual direction of movement
+/// - `heading`: True heading from XATT2 - where the nose points
 #[derive(Default)]
 pub struct PartialStateUpdate {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    pub track: Option<f32>,
     pub heading: Option<f32>,
     pub ground_speed: Option<f32>,
     pub altitude: Option<f32>,
@@ -177,6 +187,7 @@ impl PartialStateUpdate {
     pub fn has_any(&self) -> bool {
         self.latitude.is_some()
             || self.longitude.is_some()
+            || self.track.is_some()
             || self.heading.is_some()
             || self.ground_speed.is_some()
             || self.altitude.is_some()
@@ -185,12 +196,20 @@ impl PartialStateUpdate {
 
 /// Accumulated state from multiple packets.
 ///
-/// The legacy DATA protocol sends position, heading, and speed in separate
+/// ForeFlight sends position/track (XGPS2) and heading (XATT2) in separate
 /// packets. This struct accumulates updates until we have a complete state.
+///
+/// # Track vs Heading
+///
+/// - `track`: From XGPS2 - actual direction of movement over ground
+/// - `heading`: From XATT2 - where the aircraft nose points
+///
+/// We need both for accurate prefetch (track for direction, heading for display).
 #[derive(Default)]
 pub struct PartialState {
     latitude: Option<f64>,
     longitude: Option<f64>,
+    track: Option<f32>,
     heading: Option<f32>,
     ground_speed: Option<f32>,
     altitude: Option<f32>,
@@ -205,6 +224,9 @@ impl PartialState {
         if let Some(v) = update.longitude {
             self.longitude = Some(v);
         }
+        if let Some(v) = update.track {
+            self.track = Some(v);
+        }
         if let Some(v) = update.heading {
             self.heading = Some(v);
         }
@@ -217,20 +239,42 @@ impl PartialState {
     }
 
     /// Check if we have all required fields for a complete state.
+    ///
+    /// Note: We require heading OR track (preferably both, but either works).
+    /// Track comes from XGPS2, heading from XATT2.
     pub fn is_complete(&self) -> bool {
         self.latitude.is_some()
             && self.longitude.is_some()
-            && self.heading.is_some()
+            && (self.heading.is_some() || self.track.is_some())
             && self.ground_speed.is_some()
     }
 
     /// Convert to an AircraftState if complete.
     pub fn to_aircraft_state(&self) -> Option<AircraftState> {
+        use super::super::state::TrackSource;
+
+        // We need at least position and speed
+        let latitude = self.latitude?;
+        let longitude = self.longitude?;
+        let ground_speed = self.ground_speed?;
+
+        // For heading, fall back to track if heading not available
+        let heading = self.heading.or(self.track).unwrap_or(0.0);
+
+        // Track source is Telemetry if we got track from XGPS2, otherwise Unavailable
+        let track_source = if self.track.is_some() {
+            TrackSource::Telemetry
+        } else {
+            TrackSource::Unavailable
+        };
+
         Some(AircraftState::from_telemetry(
-            self.latitude?,
-            self.longitude?,
-            self.heading?,
-            self.ground_speed?,
+            latitude,
+            longitude,
+            self.track, // Track from XGPS2 (may be None)
+            track_source,
+            heading, // Heading from XATT2 (or fallback to track)
+            ground_speed,
             self.altitude.unwrap_or(0.0),
         ))
     }
@@ -327,7 +371,8 @@ mod tests {
         assert!((updates.latitude.unwrap() - 45.5).abs() < 0.001);
         assert!((updates.longitude.unwrap() - (-122.5)).abs() < 0.001);
         assert!((updates.altitude.unwrap() - 10000.0).abs() < 10.0); // 3048m ≈ 10000ft
-        assert!((updates.heading.unwrap() - 270.5).abs() < 0.1);
+        assert!((updates.track.unwrap() - 270.5).abs() < 0.1); // Track from XGPS2
+        assert!(updates.heading.is_none()); // Heading comes from XATT2, not XGPS2
         assert!((updates.ground_speed.unwrap() - 300.0).abs() < 1.0); // 154.3 m/s ≈ 300kt
     }
 

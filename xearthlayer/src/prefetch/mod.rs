@@ -6,31 +6,24 @@
 //!
 //! # Prefetch Strategies
 //!
-//! ## Radial Prefetcher (Recommended)
+//! ## Adaptive Prefetcher (Recommended)
 //!
-//! Simple, cache-aware prefetching that maintains a buffer of tiles around
-//! the current position:
+//! Self-calibrating prefetch with flight phase detection (ground/cruise):
 //!
 //! ```text
-//! X-Plane UDP (49003) → TelemetryListener → AircraftState
-//!                                               ↓
-//!                                        RadialPrefetcher
-//!                                          ├─ Check memory cache
-//!                                          ├─ Skip cached tiles
-//!                                          ├─ Skip recently-attempted
-//!                                          └─ Submit missing tiles
-//!                                               ↓
-//!                                        DdsHandler (existing pipeline)
+//! X-Plane Telemetry → TelemetryListener → AircraftState
+//!                                              ↓
+//!                                    AdaptivePrefetchCoordinator
+//!                                      ├─ PhaseDetector (ground/cruise)
+//!                                      ├─ GroundStrategy (ring prefetch)
+//!                                      ├─ CruiseStrategy (band prefetch)
+//!                                      └─ CircuitBreaker (load detection)
+//!                                              ↓
+//!                                       DdsClient → Executor
 //! ```
 //!
-//! ## Heading-Aware Prefetcher (Coming Soon)
-//!
-//! Direction-aware prefetching with forward cone and turn detection.
-//! See [`config::HeadingAwarePrefetchConfig`] for configuration options.
-//!
-//! ## Legacy Scheduler
-//!
-//! Complex flight-path prediction (cone + radial). Use RadialPrefetcher instead.
+//! The adaptive system automatically calibrates based on measured throughput
+//! and selects the appropriate prefetch mode (aggressive/opportunistic/disabled).
 //!
 //! # X-Plane Setup
 //!
@@ -41,25 +34,19 @@
 //! 4. Set port (default 49003)
 //! 5. Enable data indices: 3 (speeds), 17 (heading), 20 (position)
 
-mod buffer;
+pub mod adaptive;
 mod builder;
 mod circuit_breaker;
 mod condition;
-pub mod cone;
 pub mod config;
 pub mod coordinates;
 mod error;
-mod heading_aware;
 pub mod inference;
-pub mod intersection;
 mod listener;
 mod load_monitor;
-mod predictor;
 mod prewarm;
-mod radial;
 pub mod scenery_cache;
 mod scenery_index;
-mod scheduler;
 mod state;
 mod strategy;
 mod throttler;
@@ -73,31 +60,20 @@ pub use condition::{
 pub use error::PrefetchError;
 pub use listener::TelemetryListener;
 pub use load_monitor::{FuseLoadMonitor, SharedFuseLoadMonitor};
-pub use predictor::{PredictedTile, TilePredictor};
-pub use radial::{
-    RadialPrefetchConfig, RadialPrefetchStats, RadialPrefetchStatsSnapshot, RadialPrefetcher,
-};
-pub use scheduler::{PrefetchScheduler, PrefetchStats, PrefetchStatsSnapshot, SchedulerConfig};
 pub use state::{
     AircraftSnapshot, AircraftState, DetailedPrefetchStats, GpsStatus, PrefetchMode,
-    PrefetchStatusSnapshot, SharedPrefetchStatus,
+    PrefetchStatsSnapshot, PrefetchStatusSnapshot, SharedPrefetchStatus,
 };
 pub use strategy::Prefetcher;
 pub use throttler::{AlwaysThrottle, NeverThrottle, PrefetchThrottler, ThrottleState};
 
-// Heading-aware prefetch exports
-pub use buffer::{merge_prefetch_tiles, BufferGenerator};
-pub use cone::ConeGenerator;
-pub use config::{FuseInferenceConfig, HeadingAwarePrefetchConfig};
-pub use heading_aware::{
-    HeadingAwarePrefetchStats, HeadingAwarePrefetchStatsSnapshot, HeadingAwarePrefetcher,
-    HeadingAwarePrefetcherConfig,
-};
+// FUSE inference (still used by FUSE layer for position callbacks)
+pub use config::FuseInferenceConfig;
 pub use inference::{Direction, FuseRequestAnalyzer, LoadedEnvelope, TileRequestCallback};
 pub use types::{InputMode, PrefetchTile, PrefetchZone, TurnDirection, TurnState};
 
-// Builder for prefetcher strategy creation
-pub use builder::{PrefetchStrategy, PrefetcherBuilder};
+// Legacy strategy migration utilities
+pub use builder::{is_legacy_strategy, warn_if_legacy};
 
 // Scenery-aware prefetch
 pub use scenery_index::{
@@ -116,8 +92,8 @@ pub use scenery_cache::{
     CacheStatus,
 };
 
-// Tile-based prefetch (DSF-aligned)
-pub use tile_based::{
-    DdsAccessEvent, DsfTileCoord, TileBasedConfig, TileBasedPrefetcher, TileBurstTracker,
-    TilePredictor as DsfTilePredictor,
-};
+// DSF tile types (used by FUSE layer and adaptive prefetch)
+pub use tile_based::{DdsAccessEvent, DsfTileCoord};
+
+// Adaptive prefetch (self-calibrating DSF-aligned)
+pub use adaptive::{AdaptivePrefetchConfig, AdaptivePrefetchCoordinator};

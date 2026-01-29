@@ -3,7 +3,22 @@
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use super::scheduler::PrefetchStatsSnapshot;
+/// Snapshot of prefetch statistics for UI display.
+///
+/// This struct tracks cumulative prefetch activity metrics that are
+/// displayed in the dashboard to give users visibility into prefetch
+/// performance.
+#[derive(Debug, Clone, Default)]
+pub struct PrefetchStatsSnapshot {
+    /// Number of prediction cycles completed.
+    pub prediction_cycles: u64,
+    /// Total tiles submitted for prefetch.
+    pub tiles_submitted: u64,
+    /// Tiles skipped because they were already in-flight.
+    pub tiles_in_flight_skipped: u64,
+    /// Total tiles predicted (may exceed submitted due to filtering).
+    pub tiles_predicted: u64,
+}
 
 /// GPS/telemetry connection status for UI display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

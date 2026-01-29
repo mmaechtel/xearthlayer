@@ -70,23 +70,14 @@ pub struct PrefetchConfig {
     /// Whether prefetch is enabled.
     pub enabled: bool,
 
-    /// Prefetch strategy name (e.g., "auto", "radial", "heading-aware").
+    /// Prefetch strategy name ("auto" or "adaptive").
     pub strategy: String,
+
+    /// Adaptive prefetch mode: "auto", "aggressive", "opportunistic", or "disabled".
+    pub mode: String,
 
     /// UDP port for telemetry reception.
     pub udp_port: u16,
-
-    /// Cone half-angle for heading-aware prefetch (degrees).
-    pub cone_angle: f32,
-
-    /// Inner radius for radial prefetch (nautical miles).
-    pub inner_radius_nm: f32,
-
-    /// Outer radius for radial prefetch (nautical miles).
-    pub outer_radius_nm: f32,
-
-    /// Radial radius for simple radial prefetch (tiles).
-    pub radial_radius: u8,
 
     /// Maximum tiles to prefetch per cycle.
     pub max_tiles_per_cycle: usize,
@@ -97,8 +88,14 @@ pub struct PrefetchConfig {
     /// Circuit breaker configuration.
     pub circuit_breaker: CircuitBreakerConfig,
 
-    /// Rows ahead for tile-based prefetch strategy.
-    pub tile_based_rows_ahead: u32,
+    /// Calibration: aggressive mode threshold (tiles/sec).
+    pub calibration_aggressive_threshold: f64,
+
+    /// Calibration: opportunistic mode threshold (tiles/sec).
+    pub calibration_opportunistic_threshold: f64,
+
+    /// Calibration: sample duration (seconds).
+    pub calibration_sample_duration: u64,
 }
 
 /// Prewarm-specific configuration extracted from ConfigFile.
@@ -150,11 +147,8 @@ impl OrchestratorConfig {
         let prefetch = PrefetchConfig {
             enabled: config.prefetch.enabled,
             strategy: config.prefetch.strategy.clone(),
+            mode: config.prefetch.mode.clone(),
             udp_port: config.prefetch.udp_port,
-            cone_angle: config.prefetch.cone_angle,
-            inner_radius_nm: config.prefetch.inner_radius_nm,
-            outer_radius_nm: config.prefetch.outer_radius_nm,
-            radial_radius: config.prefetch.radial_radius,
             max_tiles_per_cycle: config.prefetch.max_tiles_per_cycle,
             cycle_interval_ms: config.prefetch.cycle_interval_ms,
             circuit_breaker: CircuitBreakerConfig {
@@ -164,7 +158,11 @@ impl OrchestratorConfig {
                     config.prefetch.circuit_breaker_half_open_secs,
                 ),
             },
-            tile_based_rows_ahead: config.prefetch.tile_based_rows_ahead,
+            calibration_aggressive_threshold: config.prefetch.calibration_aggressive_threshold,
+            calibration_opportunistic_threshold: config
+                .prefetch
+                .calibration_opportunistic_threshold,
+            calibration_sample_duration: config.prefetch.calibration_sample_duration,
         };
 
         // Extract prewarm configuration

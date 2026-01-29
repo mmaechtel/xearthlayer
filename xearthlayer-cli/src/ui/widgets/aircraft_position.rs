@@ -4,11 +4,11 @@
 //!
 //! Layout:
 //! ```text
-//! ┌─ Aircraft Position ─────────────────────────────────────────────────┐
-//! │ Position : 9.99°E, 53.63°N | Hdg: 090° | GS: 489kt | Alt: 33532ft   │
-//! │ Accuracy : 10m (GPS)                                                │
-//! │ GPS: * Connected | VATSIM: x Disconnected | PILOTEDGE: * Connected │
-//! └────────────────────────────────────────────────────────────────────┘
+//! ┌─ Aircraft Position ──────────────────────────────────────────────────────────────┐
+//! │ Position : 9.99°E, 53.63°N | Trk: 088° | Hdg: 090° | GS: 489kt | Alt: 33532ft    │
+//! │ Accuracy : 10m (GPS) | Track: Telemetry                                          │
+//! │ GPS: * Connected | VATSIM: x Disconnected | PILOTEDGE: * Connected               │
+//! └──────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! The provider status line is extensible for future VATSIM/PilotEdge integration.
@@ -21,7 +21,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 use xearthlayer::aircraft_position::{
-    AircraftPositionStatus, PositionAccuracy, PositionSource, TelemetryStatus,
+    AircraftPositionStatus, PositionAccuracy, PositionSource, TelemetryStatus, TrackSource,
 };
 
 /// Widget displaying aircraft position from APT module.
@@ -100,6 +100,27 @@ impl<'a> AircraftPositionWidget<'a> {
 
                 // Add vectors if available (only from telemetry)
                 if self.status.vectors_available {
+                    // Track (ground path direction)
+                    spans.extend([
+                        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("Trk: ", Style::default().fg(Color::DarkGray)),
+                    ]);
+                    if let Some(track) = state.track {
+                        // Color code by track source
+                        let track_color = match state.track_source {
+                            TrackSource::Telemetry => Color::Green, // Authoritative
+                            TrackSource::Derived => Color::Yellow,  // Calculated
+                            TrackSource::Unavailable => Color::DarkGray,
+                        };
+                        spans.push(Span::styled(
+                            format!("{:03.0}°", track),
+                            Style::default().fg(track_color),
+                        ));
+                    } else {
+                        spans.push(Span::styled("---", Style::default().fg(Color::DarkGray)));
+                    }
+
+                    // Heading (nose direction)
                     spans.extend([
                         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
                         Span::styled("Hdg: ", Style::default().fg(Color::DarkGray)),
@@ -283,13 +304,21 @@ mod tests {
 
     #[test]
     fn test_widget_with_telemetry() {
-        let state = AircraftState::from_telemetry(53.63, 9.99, 90.0, 489.0, 33532.0);
+        let state = AircraftState::from_telemetry(
+            53.63,
+            9.99,
+            Some(88.0), // track
+            TrackSource::Telemetry,
+            90.0, // heading
+            489.0,
+            33532.0,
+        );
         let status = AircraftPositionStatus::from_state(state, TelemetryStatus::Connected);
         let widget = AircraftPositionWidget::new(&status);
 
-        // Should have vectors
+        // Should have vectors including track
         let position_line = widget.build_position_line();
-        // Position + separators + Hdg + GS + Alt
+        // Position + separators + Trk + Hdg + GS + Alt
         assert!(position_line.spans.len() > 4);
 
         let accuracy_line = widget.build_accuracy_line();

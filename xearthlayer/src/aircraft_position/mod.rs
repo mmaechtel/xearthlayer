@@ -54,14 +54,16 @@
 //!
 //! # Components
 //!
-//! - [`state`] - Core types: `AircraftState`, `PositionAccuracy`, `TelemetryStatus`, `PositionSource`
+//! - [`state`] - Core types: `AircraftState`, `PositionAccuracy`, `TelemetryStatus`, `PositionSource`, `TrackSource`
 //! - [`model`] - `PositionModel` with accuracy-based selection logic
 //! - [`telemetry`] - `TelemetryReceiver` for X-Plane UDP telemetry (XGPS2/ForeFlight)
 //! - [`inference`] - `InferenceAdapter` for Scene Tracker-based position inference
 //! - [`aggregator`] - `StateAggregator` that combines all sources and broadcasts updates
 //! - [`provider`] - `AircraftPositionProvider` and `AircraftPositionBroadcaster` traits
+//! - [`flight_path`] - `FlightPathHistory` for position history and track derivation
 
 mod aggregator;
+mod flight_path;
 mod inference;
 mod logger;
 mod model;
@@ -70,11 +72,13 @@ mod state;
 mod telemetry;
 
 pub use aggregator::{StateAggregator, StateAggregatorConfig};
+pub use flight_path::{FlightPathConfig, FlightPathHistory, PositionSample};
 pub use inference::{InferenceAdapter, InferenceAdapterConfig};
 pub use model::PositionModel;
 pub use provider::{AircraftPositionBroadcaster, AircraftPositionProvider, SharedAircraftPosition};
 pub use state::{
     AircraftPositionStatus, AircraftState, PositionAccuracy, PositionSource, TelemetryStatus,
+    TrackSource,
 };
 pub use telemetry::{TelemetryError, TelemetryReceiver, TelemetryReceiverConfig};
 

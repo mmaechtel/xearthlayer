@@ -33,8 +33,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
+use super::flight_path::FlightPathHistory;
 use super::model::PositionModel;
-use super::state::{AircraftPositionStatus, AircraftState, TelemetryStatus};
+use super::state::{AircraftPositionStatus, AircraftState, TelemetryStatus, TrackSource};
 
 /// Configuration for the state aggregator.
 #[derive(Debug, Clone)]
@@ -59,6 +60,9 @@ impl Default for StateAggregatorConfig {
 struct AggregatorState {
     /// Position model.
     model: PositionModel,
+
+    /// Flight path history for track derivation.
+    flight_path: FlightPathHistory,
 
     /// Last broadcast time (for rate limiting).
     last_broadcast: Option<Instant>,
@@ -93,6 +97,7 @@ impl StateAggregator {
         Self {
             state: Arc::new(RwLock::new(AggregatorState {
                 model: PositionModel::new(),
+                flight_path: FlightPathHistory::new(),
                 last_broadcast: None,
                 last_telemetry: None,
             })),
@@ -128,12 +133,25 @@ impl StateAggregator {
     }
 
     /// Receive a position update from telemetry.
-    pub fn receive_telemetry(&self, aircraft_state: AircraftState) {
+    pub fn receive_telemetry(&self, mut aircraft_state: AircraftState) {
         let mut state = self.state.write().unwrap();
 
         // Update telemetry tracking
         state.last_telemetry = Some(Instant::now());
         state.model.set_telemetry_status(TelemetryStatus::Connected);
+
+        // Record position in flight path history
+        state
+            .flight_path
+            .record_position(aircraft_state.latitude, aircraft_state.longitude);
+
+        // Enrich with derived track if authoritative track unavailable
+        if aircraft_state.track.is_none() {
+            if let Some(derived_track) = state.flight_path.calculate_track() {
+                aircraft_state.track = Some(derived_track);
+                aircraft_state.track_source = TrackSource::Derived;
+            }
+        }
 
         // Apply update
         if state.model.apply_update(aircraft_state) {
@@ -235,6 +253,30 @@ mod tests {
     use super::super::state::PositionSource;
     use super::*;
 
+    fn make_telemetry_state(lat: f64, lon: f64, heading: f32) -> AircraftState {
+        AircraftState::from_telemetry(
+            lat,
+            lon,
+            Some(heading), // Track from XGPS2
+            TrackSource::Telemetry,
+            heading,
+            120.0,
+            10000.0,
+        )
+    }
+
+    fn make_telemetry_state_no_track(lat: f64, lon: f64, heading: f32) -> AircraftState {
+        AircraftState::from_telemetry(
+            lat,
+            lon,
+            None, // No track - needs derivation
+            TrackSource::Unavailable,
+            heading,
+            120.0,
+            10000.0,
+        )
+    }
+
     #[test]
     fn test_receive_manual_reference() {
         let (tx, _rx) = broadcast::channel(16);
@@ -250,7 +292,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let aggregator = StateAggregator::new(tx);
 
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = make_telemetry_state(53.5, 10.0, 90.0);
         aggregator.receive_telemetry(state);
 
         assert!(aggregator.has_position());
@@ -275,7 +317,7 @@ mod tests {
         );
 
         // Telemetry should replace it (higher accuracy)
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = make_telemetry_state(53.5, 10.0, 90.0);
         aggregator.receive_telemetry(state);
 
         assert_eq!(
@@ -290,7 +332,7 @@ mod tests {
         let aggregator = StateAggregator::new(tx);
 
         // Start with telemetry (10m accuracy)
-        let telemetry = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let telemetry = make_telemetry_state(53.5, 10.0, 90.0);
         aggregator.receive_telemetry(telemetry);
 
         // Manual reference (100m) should be rejected - telemetry is more accurate
@@ -304,7 +346,7 @@ mod tests {
         let aggregator = StateAggregator::new(tx);
 
         // Start with telemetry
-        let telemetry = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let telemetry = make_telemetry_state(53.5, 10.0, 90.0);
         aggregator.receive_telemetry(telemetry);
 
         // Inference should be rejected
@@ -326,7 +368,7 @@ mod tests {
         let aggregator = StateAggregator::with_config(tx, config);
 
         // Receive telemetry
-        let state = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state = make_telemetry_state(53.5, 10.0, 90.0);
         aggregator.receive_telemetry(state);
         assert_eq!(aggregator.telemetry_status(), TelemetryStatus::Connected);
 
@@ -347,19 +389,68 @@ mod tests {
         let aggregator = StateAggregator::with_config(tx, config);
 
         // First update - should broadcast
-        let state1 = AircraftState::from_telemetry(53.5, 10.0, 90.0, 120.0, 10000.0);
+        let state1 = make_telemetry_state(53.5, 10.0, 90.0);
         aggregator.receive_telemetry(state1);
         assert!(rx.try_recv().is_ok());
 
         // Immediate second update - should NOT broadcast (rate limited)
-        let state2 = AircraftState::from_telemetry(53.6, 10.1, 91.0, 121.0, 10001.0);
+        let state2 = make_telemetry_state(53.6, 10.1, 91.0);
         aggregator.receive_telemetry(state2);
         assert!(rx.try_recv().is_err());
 
         // Wait and update - should broadcast
         std::thread::sleep(Duration::from_millis(110));
-        let state3 = AircraftState::from_telemetry(53.7, 10.2, 92.0, 122.0, 10002.0);
+        let state3 = make_telemetry_state(53.7, 10.2, 92.0);
         aggregator.receive_telemetry(state3);
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn test_derived_track_when_no_authoritative_track() {
+        let config = StateAggregatorConfig {
+            min_broadcast_interval: Duration::from_millis(1),
+            ..Default::default()
+        };
+        let (tx, _rx) = broadcast::channel(16);
+        let aggregator = StateAggregator::with_config(tx, config);
+
+        // Send multiple positions without track (simulating legacy protocol)
+        // Moving north: lat increases
+        aggregator.receive_telemetry(make_telemetry_state_no_track(53.0, 10.0, 0.0));
+        std::thread::sleep(Duration::from_millis(5));
+        aggregator.receive_telemetry(make_telemetry_state_no_track(53.1, 10.0, 0.0));
+
+        // After enough samples, track should be derived
+        let status = aggregator.status();
+        let state = status.state.unwrap();
+
+        // Either still Unavailable (not enough samples) or Derived
+        if state.track.is_some() {
+            assert_eq!(state.track_source, TrackSource::Derived);
+            // Should be approximately north (0°)
+            let track = state.track.unwrap();
+            assert!(
+                track < 10.0 || track > 350.0,
+                "Expected ~0°, got {}°",
+                track
+            );
+        }
+    }
+
+    #[test]
+    fn test_authoritative_track_preserved() {
+        let (tx, _rx) = broadcast::channel(16);
+        let aggregator = StateAggregator::new(tx);
+
+        // Send telemetry with authoritative track
+        let state = make_telemetry_state(53.5, 10.0, 90.0);
+        aggregator.receive_telemetry(state);
+
+        let status = aggregator.status();
+        let received = status.state.unwrap();
+
+        // Track should be from telemetry, not derived
+        assert_eq!(received.track, Some(90.0));
+        assert_eq!(received.track_source, TrackSource::Telemetry);
     }
 }
