@@ -1,133 +1,31 @@
-//! Adaptive prefetch coordinator.
+//! Core adaptive prefetch coordinator implementation.
 //!
-//! Central orchestrator that ties together all adaptive prefetch components:
-//! - Performance calibration for mode selection
-//! - Flight phase detection (ground/cruise)
-//! - Turn detection for prefetch pausing
-//! - Strategy selection and execution
-//!
-//! # Architecture
-//!
-//! ```text
-//!                    ┌─────────────────────┐
-//!                    │    Coordinator      │
-//!                    │  (main loop)        │
-//!                    └─────────┬───────────┘
-//!                              │
-//!      ┌───────────┬──────────┼──────────┬───────────┐
-//!      ▼           ▼          ▼          ▼           ▼
-//! ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-//! │ Phase   │ │ Turn    │ │ Ground  │ │ Cruise  │ │ Circuit │
-//! │Detector │ │Detector │ │Strategy │ │Strategy │ │ Breaker │
-//! └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
-//! ```
-//!
-//! # Trigger Modes
-//!
-//! The coordinator supports two trigger modes:
-//!
-//! - **Aggressive**: Position-based trigger at 0.3° into DSF tile
-//! - **Opportunistic**: Circuit breaker trigger when X-Plane is idle
-//!
-//! # Track Data
-//!
-//! **Important**: The coordinator requires ground **track** (direction of travel),
-//! not heading (nose direction). XGPS2 telemetry only provides heading, so track
-//! must be derived from successive GPS positions:
-//!
-//! ```ignore
-//! // Track derivation from position deltas
-//! let track = atan2(delta_lon, delta_lat).to_degrees();
-//! ```
-//!
-//! Until track derivation is implemented, heading can be used as a fallback
-//! (less accurate in crosswind conditions).
-//!
-//! # Example
-//!
-//! ```ignore
-//! let coordinator = AdaptivePrefetchCoordinator::builder()
-//!     .with_config(config)
-//!     .with_calibration(calibration)
-//!     .with_circuit_breaker(circuit_breaker)
-//!     .with_dds_client(dds_client)
-//!     .build()?;
-//!
-//! // Run the coordinator loop
-//! coordinator.run(shutdown_token).await;
-//! ```
+//! This module contains the [`AdaptivePrefetchCoordinator`] struct and its
+//! implementation. The async run loop (`Prefetcher` trait impl) is in the
+//! separate [`super::runner`] module.
 
 use std::collections::HashSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::coord::TileCoord;
 use crate::executor::DdsClient;
 use crate::prefetch::state::{AircraftState, DetailedPrefetchStats, SharedPrefetchStatus};
-use crate::prefetch::strategy::Prefetcher;
 use crate::prefetch::throttler::{PrefetchThrottler, ThrottleState};
 use crate::prefetch::CircuitState;
 use crate::prefetch::SceneryIndex;
 
-use super::calibration::{PerformanceCalibration, StrategyMode};
-use super::config::{AdaptivePrefetchConfig, PrefetchMode};
-use super::cruise_strategy::CruiseStrategy;
-use super::ground_strategy::GroundStrategy;
-use super::phase_detector::{FlightPhase, PhaseDetector};
-use super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
-use super::turn_detector::{TurnDetector, TurnState};
+use super::super::calibration::{PerformanceCalibration, StrategyMode};
+use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
+use super::super::cruise_strategy::CruiseStrategy;
+use super::super::ground_strategy::GroundStrategy;
+use super::super::phase_detector::{FlightPhase, PhaseDetector};
+use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
+use super::super::turn_detector::TurnDetector;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Coordinator state
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Current coordinator state for status reporting.
-#[derive(Debug, Clone)]
-pub struct CoordinatorStatus {
-    /// Whether prefetch is currently enabled.
-    pub enabled: bool,
-
-    /// Current strategy mode (from calibration or config).
-    pub mode: StrategyMode,
-
-    /// Current flight phase.
-    pub phase: FlightPhase,
-
-    /// Current turn state.
-    pub turn_state: TurnState,
-
-    /// Name of active strategy.
-    pub active_strategy: &'static str,
-
-    /// Last stable track (if known).
-    pub stable_track: Option<f64>,
-
-    /// Tiles prefetched in the last cycle.
-    pub last_prefetch_count: usize,
-
-    /// Whether throttled by circuit breaker.
-    pub throttled: bool,
-}
-
-impl Default for CoordinatorStatus {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            mode: StrategyMode::Opportunistic,
-            phase: FlightPhase::Ground,
-            turn_state: TurnState::Initializing,
-            active_strategy: "none",
-            stable_track: None,
-            last_prefetch_count: 0,
-            throttled: false,
-        }
-    }
-}
+use super::status::CoordinatorStatus;
+use super::telemetry::extract_track;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Coordinator
@@ -137,12 +35,33 @@ impl Default for CoordinatorStatus {
 ///
 /// Orchestrates all prefetch components and manages the prefetch lifecycle.
 /// Thread-safe for shared access from telemetry and status queries.
+///
+/// # Architecture
+///
+/// ```text
+///                    ┌─────────────────────┐
+///                    │    Coordinator      │
+///                    │  (main loop)        │
+///                    └─────────┬───────────┘
+///                              │
+///      ┌───────────┬──────────┼──────────┬───────────┐
+///      ▼           ▼          ▼          ▼           ▼
+/// ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+/// │ Phase   │ │ Turn    │ │ Ground  │ │ Cruise  │ │ Circuit │
+/// │Detector │ │Detector │ │Strategy │ │Strategy │ │ Breaker │
+/// └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
+/// ```
+///
+/// # Trigger Modes
+///
+/// - **Aggressive**: Position-based trigger at 0.3° into DSF tile
+/// - **Opportunistic**: Circuit breaker trigger when X-Plane is idle
 pub struct AdaptivePrefetchCoordinator {
     /// Configuration.
-    config: AdaptivePrefetchConfig,
+    pub(super) config: AdaptivePrefetchConfig,
 
     /// Performance calibration (determines mode).
-    calibration: Option<PerformanceCalibration>,
+    pub(super) calibration: Option<PerformanceCalibration>,
 
     /// Flight phase detector.
     phase_detector: PhaseDetector,
@@ -157,24 +76,24 @@ pub struct AdaptivePrefetchCoordinator {
     cruise_strategy: CruiseStrategy,
 
     /// Circuit breaker for throttling.
-    throttler: Option<Arc<dyn PrefetchThrottler>>,
+    pub(super) throttler: Option<Arc<dyn PrefetchThrottler>>,
 
     /// DDS client for submitting prefetch requests.
-    dds_client: Option<Arc<dyn DdsClient>>,
+    pub(super) dds_client: Option<Arc<dyn DdsClient>>,
 
     /// Tiles currently in cache (for filtering).
-    cached_tiles: HashSet<TileCoord>,
+    pub(super) cached_tiles: HashSet<TileCoord>,
 
     /// Current status.
-    status: CoordinatorStatus,
+    pub(super) status: CoordinatorStatus,
 
     /// Shared status for TUI display.
-    shared_status: Option<Arc<SharedPrefetchStatus>>,
+    pub(super) shared_status: Option<Arc<SharedPrefetchStatus>>,
 
     /// Cumulative prefetch statistics.
-    total_cycles: u64,
-    total_tiles_submitted: u64,
-    total_cache_hits: u64,
+    pub(super) total_cycles: u64,
+    pub(super) total_tiles_submitted: u64,
+    pub(super) total_cache_hits: u64,
 }
 
 impl std::fmt::Debug for AdaptivePrefetchCoordinator {
@@ -513,76 +432,15 @@ impl AdaptivePrefetchCoordinator {
         }
     }
 
-    /// Validate that a plan can complete in time.
-    ///
-    /// Uses position within DSF tile and ground speed to estimate
-    /// available time before X-Plane triggers.
-    #[allow(dead_code)] // Will be used in future phase
-    fn can_complete_in_time(
-        &self,
-        plan: &PrefetchPlan,
-        position: (f64, f64),
-        ground_speed_kt: f32,
-    ) -> bool {
-        // Convert ground speed to degrees per second
-        // 1 knot ≈ 1.852 km/h, 1° ≈ 111 km at equator
-        let speed_deg_per_sec = (ground_speed_kt as f64 * 1.852) / (111.0 * 3600.0);
-
-        if speed_deg_per_sec < 0.0001 {
-            // Stationary or very slow - no time constraint
-            return true;
-        }
-
-        // Estimate distance to X-Plane's trigger (0.6° from DSF boundary)
-        let (lat, _lon) = position;
-        let current_dsf_lat = lat.floor();
-        let position_in_dsf = lat - current_dsf_lat;
-
-        // X-Plane triggers at 0.6° into the next DSF
-        // So we have: (1.0 - position_in_dsf) + 0.6 = distance to trigger
-        let distance_to_trigger = (1.0 - position_in_dsf) + 0.6;
-        let time_available_secs = distance_to_trigger / speed_deg_per_sec;
-
-        let time_required_secs = plan.estimated_completion_ms as f64 / 1000.0;
-        let margin = self.config.time_budget_margin;
-
-        let can_complete = time_required_secs <= time_available_secs * margin;
-
-        tracing::debug!(
-            time_required_secs = format!("{:.1}", time_required_secs),
-            time_available_secs = format!("{:.1}", time_available_secs),
-            margin = format!("{:.0}%", margin * 100.0),
-            can_complete = can_complete,
-            "Time budget check"
-        );
-
-        can_complete
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
-    // Telemetry processing (extracted for testability)
+    // Telemetry processing
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// Check if enough time has passed since the last cycle.
-    pub fn should_run_cycle(&self, last_cycle: Instant, min_interval: Duration) -> bool {
-        Instant::now().duration_since(last_cycle) >= min_interval
-    }
-
-    /// Extract track from aircraft state.
-    ///
-    /// Uses heading as track fallback until track derivation is fully integrated.
-    /// The design doc notes: "heading can be used as a fallback (less accurate
-    /// in crosswind conditions)".
-    pub fn extract_track(state: &AircraftState) -> f64 {
-        // Use heading as track (fallback)
-        state.heading as f64
-    }
 
     /// Process a single telemetry update and execute prefetch if appropriate.
     ///
     /// Returns the number of tiles submitted, or None if no prefetch was performed.
     pub fn process_telemetry(&mut self, state: &AircraftState) -> Option<usize> {
-        let track = Self::extract_track(state);
+        let track = extract_track(state);
         let position = (state.latitude, state.longitude);
 
         // Note: We don't have true AGL from telemetry, only MSL altitude.
@@ -598,6 +456,11 @@ impl AdaptivePrefetchCoordinator {
             let cancellation = CancellationToken::new();
             self.execute(&plan, cancellation)
         };
+
+        // Mark submitted tiles as cached to avoid re-submitting
+        if submitted > 0 {
+            self.mark_cached(plan.tiles.iter().cloned());
+        }
 
         // Update statistics
         self.total_cycles += 1;
@@ -666,62 +529,9 @@ impl AdaptivePrefetchCoordinator {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Prefetcher trait implementation
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Minimum interval between prefetch cycles.
-const MIN_CYCLE_INTERVAL: Duration = Duration::from_secs(2);
-
-impl Prefetcher for AdaptivePrefetchCoordinator {
-    fn run(
-        mut self: Box<Self>,
-        mut state_rx: mpsc::Receiver<AircraftState>,
-        cancellation_token: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            tracing::info!(mode = ?self.effective_mode(), "Adaptive prefetcher started");
-
-            let mut last_cycle = Instant::now();
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = cancellation_token.cancelled() => break,
-
-                    state_opt = state_rx.recv() => {
-                        let Some(state) = state_opt else { break };
-
-                        if !self.should_run_cycle(last_cycle, MIN_CYCLE_INTERVAL) {
-                            continue;
-                        }
-
-                        self.process_telemetry(&state);
-                        last_cycle = Instant::now();
-                    }
-                }
-            }
-
-            tracing::info!("Adaptive prefetcher stopped");
-        })
-    }
-
-    fn name(&self) -> &'static str {
-        "adaptive"
-    }
-
-    fn description(&self) -> &'static str {
-        "Self-calibrating adaptive prefetch with phase detection and turn handling"
-    }
-
-    fn startup_info(&self) -> String {
-        self.startup_info_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::super::turn_detector::TurnState;
     use super::*;
     use std::time::Instant;
 
@@ -836,13 +646,8 @@ mod tests {
             AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
 
         // Cruise conditions: high speed
-        // First update starts the phase transition (hysteresis)
         coord.update((53.5, 9.5), 45.0, 200.0, 10000.0);
         // Phase detector has hysteresis, so first update may not transition
-        // The phase will still be Ground due to hysteresis delay
-
-        // Wait for hysteresis duration (default 2s, but we can't wait that long in tests)
-        // Just verify the update doesn't panic and phase is tracked
         assert!(
             coord.status.phase == FlightPhase::Ground || coord.status.phase == FlightPhase::Cruise
         );
@@ -926,22 +731,25 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Time budget tests
+    // Time budget tests (using the module function)
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_time_budget_stationary() {
-        let coord = AdaptivePrefetchCoordinator::with_defaults();
         let plan = PrefetchPlan::empty("test");
 
         // Stationary - should always be OK
-        assert!(coord.can_complete_in_time(&plan, (53.5, 9.5), 0.0));
+        assert!(super::super::time_budget::can_complete_in_time(
+            &plan,
+            (53.5, 9.5),
+            0.0,
+            0.7
+        ));
     }
 
     #[test]
     fn test_time_budget_fast_flight() {
-        let coord =
-            AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
+        let cal = test_calibration();
 
         // Create a large plan
         let mut plan = PrefetchPlan::with_tiles(
@@ -953,7 +761,7 @@ mod tests {
                 };
                 100
             ],
-            coord.calibration.as_ref().unwrap(),
+            &cal,
             "test",
             0,
             100,
@@ -962,48 +770,13 @@ mod tests {
 
         // At 450 knots, time budget is tight
         // This test just verifies the calculation runs
-        let _can_complete = coord.can_complete_in_time(&plan, (53.1, 9.5), 450.0);
+        let _can_complete =
+            super::super::time_budget::can_complete_in_time(&plan, (53.1, 9.5), 450.0, 0.7);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Status tests
+    // Telemetry processing tests
     // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_status_default() {
-        let status = CoordinatorStatus::default();
-        assert!(status.enabled);
-        assert_eq!(status.mode, StrategyMode::Opportunistic);
-        assert_eq!(status.phase, FlightPhase::Ground);
-        assert_eq!(status.turn_state, TurnState::Initializing);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Telemetry processing tests (extracted methods)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_should_run_cycle_respects_interval() {
-        let coord = AdaptivePrefetchCoordinator::with_defaults();
-
-        // Just started - should not run yet
-        let now = Instant::now();
-        assert!(!coord.should_run_cycle(now, Duration::from_secs(2)));
-
-        // After interval - should run
-        let past = Instant::now() - Duration::from_secs(3);
-        assert!(coord.should_run_cycle(past, Duration::from_secs(2)));
-    }
-
-    #[test]
-    fn test_extract_track() {
-        let state = AircraftState::new(53.5, 9.5, 90.0, 250.0, 35000.0);
-
-        let track = AdaptivePrefetchCoordinator::extract_track(&state);
-
-        // Track should be heading as f64
-        assert!((track - 90.0).abs() < 0.001);
-    }
 
     #[test]
     fn test_process_telemetry_disabled() {

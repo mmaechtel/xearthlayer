@@ -238,19 +238,21 @@ impl GroundStrategy {
     /// Returns (tiles, bounds, bounds_source) where:
     /// - tiles: DSF tiles in the ring, ordered by distance from center
     /// - bounds: The loaded area bounds used for calculation
-    /// - bounds_source: How bounds were determined ("explicit", "cached_tiles", "default")
+    /// - bounds_source: How bounds were determined ("explicit", "default")
     fn calculate_ring(
         &self,
         position: (f64, f64),
-        cached: &HashSet<TileCoord>,
+        _cached: &HashSet<TileCoord>,
     ) -> (Vec<DsfTileCoord>, LoadedAreaBounds, &'static str) {
         let (lat, lon) = position;
 
-        // Determine loaded area bounds and track source
+        // Determine loaded area bounds
+        // NOTE: We do NOT derive bounds from cached tiles because that set includes
+        // prefetched tiles, which would cause the bounds to grow exponentially!
+        // Until we have proper X-Plane loaded area tracking (via DdsAccessEvent),
+        // we use explicit bounds or position-centered defaults.
         let (bounds, bounds_source) = if let Some(explicit) = self.loaded_bounds {
             (explicit, "explicit")
-        } else if let Some(derived) = LoadedAreaBounds::from_dds_tiles(cached) {
-            (derived, "cached_tiles")
         } else {
             (LoadedAreaBounds::default_centered_on(lat, lon), "default")
         };
@@ -604,6 +606,88 @@ mod tests {
         // With no explicit bounds and no cached tiles, should use default
         let (_, _, source) = strategy.calculate_ring((53.5, 9.5), &HashSet::new());
         assert_eq!(source, "default");
+    }
+
+    /// Regression test: Bounds must NOT expand based on cached tiles.
+    ///
+    /// Bug: cached_tiles includes prefetched tiles, which caused the "loaded area"
+    /// bounds to expand to cover the entire globe (lat -85 to 84, lon spanning 160°).
+    /// This resulted in 670 DSF tiles instead of 18, and 56,000+ tiles being considered.
+    ///
+    /// Fix: Bounds are always position-centered defaults, never derived from cached tiles.
+    #[test]
+    fn test_ring_bounds_ignore_cached_tiles_regression() {
+        use crate::coord::to_tile_coords;
+
+        let strategy = GroundStrategy::with_defaults();
+        let position = (51.47, -0.46); // EGLL
+
+        // Simulate cached tiles spanning a HUGE area (what the bug produced)
+        let mut cached_tiles_global = HashSet::new();
+
+        // Add tiles from vastly different locations (simulating prefetch gone wrong)
+        // Melbourne, Australia
+        if let Ok(tile) = to_tile_coords(-37.67, 144.85, 14) {
+            cached_tiles_global.insert(tile);
+        }
+        // Tokyo, Japan
+        if let Ok(tile) = to_tile_coords(35.68, 139.69, 14) {
+            cached_tiles_global.insert(tile);
+        }
+        // New York, USA
+        if let Ok(tile) = to_tile_coords(40.71, -74.01, 14) {
+            cached_tiles_global.insert(tile);
+        }
+        // London (near position)
+        if let Ok(tile) = to_tile_coords(51.5, -0.1, 14) {
+            cached_tiles_global.insert(tile);
+        }
+
+        // Calculate ring with globally-distributed cached tiles
+        let (ring_with_global_cache, bounds_global, source_global) =
+            strategy.calculate_ring(position, &cached_tiles_global);
+
+        // Calculate ring with empty cache
+        let (ring_empty_cache, bounds_empty, source_empty) =
+            strategy.calculate_ring(position, &HashSet::new());
+
+        // CRITICAL: Both should produce the same bounds (position-centered defaults)
+        assert_eq!(
+            bounds_global, bounds_empty,
+            "Bounds must NOT be affected by cached tiles! \
+             Got {:?} with global cache vs {:?} with empty cache",
+            bounds_global, bounds_empty
+        );
+
+        // Both should use "default" source (not "cached_tiles")
+        assert_eq!(source_global, "default");
+        assert_eq!(source_empty, "default");
+
+        // Ring size should be the same (~18 tiles for default 3×4 area)
+        assert_eq!(
+            ring_with_global_cache.len(),
+            ring_empty_cache.len(),
+            "Ring size must not change based on cached tiles"
+        );
+
+        // Sanity check: ring should be small (not 670 DSF tiles!)
+        assert!(
+            ring_with_global_cache.len() <= 30,
+            "Ring has {} tiles, expected ~18 for default bounds",
+            ring_with_global_cache.len()
+        );
+
+        // Bounds should be centered on position, not spanning the globe
+        assert!(
+            bounds_global.lat_max - bounds_global.lat_min < 10,
+            "Lat extent {} is too large (should be ~3°)",
+            bounds_global.lat_max - bounds_global.lat_min
+        );
+        assert!(
+            bounds_global.lon_max - bounds_global.lon_min < 10,
+            "Lon extent {} is too large (should be ~4°)",
+            bounds_global.lon_max - bounds_global.lon_min
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
