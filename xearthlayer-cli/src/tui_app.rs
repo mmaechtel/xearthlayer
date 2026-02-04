@@ -157,6 +157,11 @@ pub fn run_tui(config: TuiAppConfig) -> Result<CancellationToken, CliError> {
         dashboard = dashboard.with_runtime_health(runtime_health, max_concurrent_jobs);
     }
 
+    // Wire in tile progress tracker for active tile display
+    if let Some(tile_progress_tracker) = orchestrator.tile_progress_tracker() {
+        dashboard = dashboard.with_tile_progress_tracker(tile_progress_tracker);
+    }
+
     // Transition to Running state
     tracing::info!("Transitioning to Running state");
     dashboard.transition_to_running();

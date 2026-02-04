@@ -15,7 +15,7 @@ use crate::log::Logger;
 use crate::metrics::{MetricsSystem, TelemetrySnapshot, TuiReporter};
 use crate::prefetch::{FuseLoadMonitor, TileRequestCallback};
 use crate::provider::ProviderConfig;
-use crate::runtime::{SharedRuntimeHealth, XEarthLayerRuntime};
+use crate::runtime::{SharedRuntimeHealth, SharedTileProgressTracker, XEarthLayerRuntime};
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -665,6 +665,18 @@ impl XEarthLayerService {
     pub fn runtime_health(&self) -> Option<SharedRuntimeHealth> {
         // Not yet implemented - will be connected during TUI update
         None
+    }
+
+    /// Get the tile progress tracker for TUI display.
+    ///
+    /// Returns the shared tile progress tracker from the runtime,
+    /// which tracks active tile generation with task completion counts.
+    ///
+    /// Returns `None` if the runtime is not yet started.
+    pub fn tile_progress_tracker(&self) -> Option<SharedTileProgressTracker> {
+        self.xearthlayer_runtime
+            .as_ref()
+            .map(|r| r.tile_progress_tracker())
     }
 
     /// Get the DDS format used by this service.

@@ -19,6 +19,7 @@ pub mod network;
 mod prefetch_system;
 pub mod primitives;
 mod scenery_system;
+mod tile_progress;
 
 // Core widget exports
 pub use cache::{CacheConfig, CacheWidgetCompact};
@@ -29,6 +30,7 @@ pub use aircraft_position::AircraftPositionWidget;
 pub use input_output::{DiskHistory, InputOutputWidget};
 pub use prefetch_system::PrefetchSystemWidget;
 pub use scenery_system::{SceneryHistory, ScenerySystemWidget};
+pub use tile_progress::TileProgressWidget;
 
 // Legacy widgets (deprecated in v0.3.0, still used in render_sections.rs)
 #[deprecated(since = "0.3.0", note = "Use ScenerySystemWidget instead")]

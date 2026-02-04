@@ -31,7 +31,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use xearthlayer::aircraft_position::{AircraftPositionProvider, SharedAircraftPosition};
 use xearthlayer::metrics::TelemetrySnapshot;
 use xearthlayer::prefetch::SharedPrefetchStatus;
-use xearthlayer::runtime::SharedRuntimeHealth;
+use xearthlayer::runtime::{SharedRuntimeHealth, SharedTileProgressTracker};
 
 use crate::ui::widgets::{CacheConfig, DiskHistory, NetworkHistory, SceneryHistory};
 
@@ -72,6 +72,8 @@ pub struct Dashboard {
     prewarm_status: Option<PrewarmProgress>,
     /// Aircraft position provider from APT module.
     aircraft_position: Option<SharedAircraftPosition>,
+    /// Tile progress tracker for active tile generation display.
+    tile_progress_tracker: Option<SharedTileProgressTracker>,
 }
 
 impl Dashboard {
@@ -111,6 +113,7 @@ impl Dashboard {
             quit_confirmation: None,
             prewarm_status: None,
             aircraft_position: None,
+            tile_progress_tracker: None,
         })
     }
 
@@ -134,6 +137,12 @@ impl Dashboard {
     /// Set the aircraft position provider from APT module.
     pub fn with_aircraft_position(mut self, apt: SharedAircraftPosition) -> Self {
         self.aircraft_position = Some(apt);
+        self
+    }
+
+    /// Set the tile progress tracker for active tile display.
+    pub fn with_tile_progress_tracker(mut self, tracker: SharedTileProgressTracker) -> Self {
+        self.tile_progress_tracker = Some(tracker);
         self
     }
 
@@ -257,6 +266,13 @@ impl Dashboard {
             .map(|apt| apt.status())
             .unwrap_or_default();
 
+        // Get tile progress snapshot for active tile display
+        let tile_progress_entries = self
+            .tile_progress_tracker
+            .as_ref()
+            .map(|t| t.snapshot())
+            .unwrap_or_default();
+
         self.terminal.draw(|frame| {
             render::render_ui(
                 frame,
@@ -274,6 +290,7 @@ impl Dashboard {
                 confirmation_remaining,
                 prewarm_status.as_ref(),
                 prewarm_spinner,
+                &tile_progress_entries,
             );
         })?;
 
