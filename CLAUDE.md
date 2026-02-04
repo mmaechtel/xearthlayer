@@ -106,6 +106,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - `CircuitBreaker` - Pauses prefetch during X-Plane scene loading
     - Submits jobs to shared job executor daemon via `DdsClient` trait
     - Mode selection: Aggressive (>30 tiles/sec), Opportunistic (10-30), or Disabled
+    - **Three-tier filtering**: Local tracking → Memory cache → Disk existence (via `OrthoUnionIndex`)
     - See `docs/dev/adaptive-prefetch-design.md` for design details
 
 12. **Ortho Union Index** (`xearthlayer/src/ortho_union/`)
@@ -116,6 +117,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - Index caching with mtime-based invalidation
     - `IndexBuildProgress` - Progress reporting with factory methods
     - Priority resolution: patches (`_patches/*`) sort before regional packages
+    - `dds_tile_exists(row, col, zoom)` - Checks if DDS tile exists on disk (used by prefetch)
 
 ### Module Dependencies
 
