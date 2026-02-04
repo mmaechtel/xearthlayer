@@ -181,6 +181,37 @@ This ensures:
 2. Patches automatically have highest priority within ortho layer
 3. Regional orthos fill in everywhere else
 
+## Prefetch Integration
+
+When the prefetch system is enabled, XEL automatically detects existing tiles in your patches and **skips downloading them**. This means:
+
+- **No duplicate downloads**: If your patch already contains DDS textures (e.g., from Ortho4XP), XEL won't re-download those tiles
+- **Bandwidth savings**: Only tiles that don't exist locally are fetched
+- **Works with any format**: Detects tiles regardless of naming convention (ZL, BI, GO2, GO prefixes)
+
+This happens automatically - no configuration needed.
+
+### How It Works
+
+1. When XEL starts, it builds an index of all ortho sources (patches + packages)
+2. During prefetch, before submitting a tile for download, XEL checks:
+   - Is the tile already in memory cache?
+   - Is the tile already on disk (in patches or packages)?
+3. Only tiles not found in either location are downloaded
+
+### Debug Logging
+
+To see which tiles are being filtered, enable debug logging:
+
+```bash
+RUST_LOG=xearthlayer::prefetch=debug xearthlayer run
+```
+
+You'll see messages like:
+```
+DEBUG Filtered tiles already on disk  skipped=42 remaining=158
+```
+
 ## Troubleshooting
 
 ### Patches Not Detected

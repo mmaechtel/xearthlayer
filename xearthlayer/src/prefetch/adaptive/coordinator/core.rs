@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coord::TileCoord;
 use crate::executor::{DaemonMemoryCache, DdsClient};
+use crate::ortho_union::OrthoUnionIndex;
 use crate::prefetch::state::{AircraftState, DetailedPrefetchStats, SharedPrefetchStatus};
 use crate::prefetch::throttler::{PrefetchThrottler, ThrottleState};
 use crate::prefetch::CircuitState;
@@ -104,6 +105,11 @@ pub struct AdaptivePrefetchCoordinator {
     pub(super) total_cycles: u64,
     pub(super) total_tiles_submitted: u64,
     pub(super) total_cache_hits: u64,
+
+    /// Ortho union index for checking if tiles already exist on disk.
+    /// When set, prefetch will skip tiles that are already installed
+    /// in local ortho packages or patches.
+    ortho_union_index: Option<Arc<OrthoUnionIndex>>,
 }
 
 impl std::fmt::Debug for AdaptivePrefetchCoordinator {
@@ -144,6 +150,7 @@ impl AdaptivePrefetchCoordinator {
             total_cycles: 0,
             total_tiles_submitted: 0,
             total_cache_hits: 0,
+            ortho_union_index: None,
         }
     }
 
@@ -190,6 +197,27 @@ impl AdaptivePrefetchCoordinator {
     /// Set the shared status for TUI display.
     pub fn with_shared_status(mut self, status: Arc<SharedPrefetchStatus>) -> Self {
         self.shared_status = Some(status);
+        self
+    }
+
+    /// Set the ortho union index for disk-based tile existence checking.
+    ///
+    /// When configured, prefetch will skip tiles that already exist in
+    /// installed ortho packages or patches. This addresses Issue #39 where
+    /// prefetch would download tiles that users already have on disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The ortho union index containing all ortho sources
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let coordinator = AdaptivePrefetchCoordinator::with_defaults()
+    ///     .with_ortho_union_index(Arc::clone(&ortho_index));
+    /// ```
+    pub fn with_ortho_union_index(mut self, index: Arc<OrthoUnionIndex>) -> Self {
+        self.ortho_union_index = Some(index);
         self
     }
 
@@ -510,6 +538,26 @@ impl AdaptivePrefetchCoordinator {
             0
         };
 
+        // Filter out tiles that already exist on disk (ortho packages, patches)
+        // This addresses Issue #39: Skip installed ortho tiles during prefetch
+        let disk_filtered = if let Some(ref index) = self.ortho_union_index {
+            let tiles_before = plan.tiles.len();
+            plan.tiles
+                .retain(|tile| !index.dds_tile_exists(tile.row, tile.col, tile.zoom));
+            let skipped_disk = tiles_before - plan.tiles.len();
+
+            if skipped_disk > 0 {
+                tracing::debug!(
+                    skipped = skipped_disk,
+                    remaining = plan.tiles.len(),
+                    "Filtered tiles already on disk"
+                );
+            }
+            skipped_disk
+        } else {
+            0
+        };
+
         let submitted = if plan.is_empty() {
             0
         } else {
@@ -525,7 +573,8 @@ impl AdaptivePrefetchCoordinator {
         // Update statistics
         self.total_cycles += 1;
         self.total_tiles_submitted += submitted as u64;
-        self.total_cache_hits += (plan.skipped_cached as usize + cache_filtered) as u64;
+        self.total_cache_hits +=
+            (plan.skipped_cached as usize + cache_filtered + disk_filtered) as u64;
 
         // Update shared status for TUI
         self.update_shared_status(position, &plan, submitted);
@@ -627,6 +676,14 @@ mod tests {
         let coord = AdaptivePrefetchCoordinator::with_defaults().with_calibration(cal);
         assert!(coord.calibration.is_some());
         assert_eq!(coord.status.mode, StrategyMode::Opportunistic);
+    }
+
+    #[test]
+    fn test_coordinator_with_ortho_union_index() {
+        let index = Arc::new(OrthoUnionIndex::new());
+        let coord =
+            AdaptivePrefetchCoordinator::with_defaults().with_ortho_union_index(Arc::clone(&index));
+        assert!(coord.ortho_union_index.is_some());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -872,5 +929,45 @@ mod tests {
         let info = coord.startup_info_string();
         assert!(info.contains("adaptive"));
         assert!(info.contains("mode="));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Disk-based filtering tests (Issue #39)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_coordinator_ortho_union_index_starts_none() {
+        let coord = AdaptivePrefetchCoordinator::with_defaults();
+        assert!(coord.ortho_union_index.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_telemetry_with_ortho_union_index() {
+        use crate::ortho_union::{OrthoSource, OrthoUnionIndex};
+        use tempfile::TempDir;
+
+        // Create a temp directory with a DDS file
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("test_ortho");
+        std::fs::create_dir_all(pkg_dir.join("textures")).unwrap();
+        // Create a DDS file that matches tile (100, 200, 16)
+        std::fs::write(pkg_dir.join("textures/100_200_BI16.dds"), b"dds content").unwrap();
+
+        let source = OrthoSource::new_package("test", &pkg_dir);
+        let index = Arc::new(OrthoUnionIndex::with_sources(vec![source]));
+
+        // Verify the index can find the tile
+        assert!(
+            index.dds_tile_exists(100, 200, 16),
+            "Index should find the DDS file"
+        );
+
+        // Create coordinator with the index
+        let coord = AdaptivePrefetchCoordinator::with_defaults()
+            .with_calibration(test_calibration())
+            .with_ortho_union_index(index);
+
+        // Verify the index is set
+        assert!(coord.ortho_union_index.is_some());
     }
 }

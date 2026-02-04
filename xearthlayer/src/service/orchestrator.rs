@@ -770,6 +770,15 @@ impl ServiceOrchestrator {
             coordinator = coordinator.with_scenery_index(Arc::clone(&self.scenery_index));
         }
 
+        // Wire ortho union index for disk-based tile filtering (Issue #39)
+        // This prevents prefetch from downloading tiles that already exist on disk
+        if let Some(ortho_index) = self.mount_manager.ortho_union_index() {
+            coordinator = coordinator.with_ortho_union_index(ortho_index);
+            tracing::info!(
+                "Ortho union index wired to prefetch (disk-based tile filtering enabled)"
+            );
+        }
+
         // Wire shared status for TUI display
         coordinator = coordinator.with_shared_status(Arc::clone(&self.prefetch_status));
 

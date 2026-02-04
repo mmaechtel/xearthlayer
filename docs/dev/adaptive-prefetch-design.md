@@ -546,6 +546,61 @@ let tiles = scenery_index.tiles_in_dsf(
 );
 ```
 
+### Ortho Union Index Integration (Issue #39)
+
+The `OrthoUnionIndex` enables disk-based tile filtering, preventing prefetch from downloading tiles that already exist in installed ortho packages or user patches. This addresses Issue #39.
+
+#### Three-Tier Filter Chain
+
+When calculating tiles to prefetch, the coordinator applies filters in order of speed (fastest first):
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Prefetch Filter Chain                            │
+│                                                                         │
+│  1. LOCAL TRACKING (HashSet)                                            │
+│     • O(1) lookup for tiles submitted this session                      │
+│     • Prevents re-submitting tiles already in prefetch queue            │
+│                                                                         │
+│  2. MEMORY CACHE (async)                                                │
+│     • Queries moka-based LRU cache                                      │
+│     • Skips tiles already generated this session                        │
+│                                                                         │
+│  3. DISK EXISTENCE (filesystem probe)                                   │
+│     • Queries OrthoUnionIndex.dds_tile_exists(row, col, zoom)           │
+│     • Skips tiles from installed packages and patches                   │
+│     • Checks all filename patterns: ZL, BI, GO2, GO                     │
+│                                                                         │
+│  Only tiles that pass ALL three filters are submitted for download      │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### DDS Filename Patterns
+
+The `dds_tile_exists()` method checks all known DDS filename patterns:
+
+| Pattern | Example | Source |
+|---------|---------|--------|
+| `{row}_{col}_ZL{zoom}.dds` | `100_200_ZL16.dds` | Generic/Ortho4XP/third-party |
+| `{row}_{col}_BI{zoom}.dds` | `100_200_BI16.dds` | Bing Maps (XEL-generated) |
+| `{row}_{col}_GO2{zoom}.dds` | `100_200_GO218.dds` | Google GO2 (XEL-generated) |
+| `{row}_{col}_GO{zoom}.dds` | `100_200_GO16.dds` | Google legacy (XEL-generated) |
+
+This ensures tiles are skipped regardless of which provider or tool originally created them.
+
+#### Wiring
+
+The `OrthoUnionIndex` is wired into the coordinator during service startup:
+
+```rust
+// In ServiceOrchestrator::start_prefetch_with_cache()
+if let Some(ortho_index) = self.mount_manager.ortho_union_index() {
+    coordinator = coordinator.with_ortho_union_index(ortho_index);
+}
+```
+
+The index is built during consolidated ortho mounting and contains all sources (patches + regional packages).
+
 ### Metrics Integration
 
 New metrics for prefetch monitoring:
