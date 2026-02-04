@@ -75,16 +75,18 @@ pub enum ConfigKey {
     // Prefetch settings
     PrefetchEnabled,
     PrefetchStrategy,
+    PrefetchMode,
     PrefetchUdpPort,
-    PrefetchConeAngle,
-    PrefetchInnerRadiusNm,
-    PrefetchOuterRadiusNm,
     PrefetchMaxTilesPerCycle,
     PrefetchCycleIntervalMs,
     PrefetchCircuitBreakerThreshold,
     PrefetchCircuitBreakerOpenMs,
     PrefetchCircuitBreakerHalfOpenSecs,
-    PrefetchRadialRadius,
+
+    // Adaptive prefetch calibration settings
+    PrefetchCalibrationAggressiveThreshold,
+    PrefetchCalibrationOpportunisticThreshold,
+    PrefetchCalibrationSampleDuration,
 
     // Control plane settings
     ControlPlaneMaxConcurrentJobs,
@@ -93,11 +95,22 @@ pub enum ConfigKey {
     ControlPlaneSemaphoreTimeoutSecs,
 
     // Prewarm settings
-    PrewarmRadiusNm,
+    PrewarmGridSize,
 
     // Patches settings
     PatchesEnabled,
     PatchesDirectory,
+
+    // Executor settings
+    ExecutorNetworkConcurrent,
+    ExecutorCpuConcurrent,
+    ExecutorDiskIoConcurrent,
+    ExecutorMaxConcurrentTasks,
+    ExecutorJobChannelCapacity,
+    ExecutorRequestChannelCapacity,
+    ExecutorRequestTimeoutSecs,
+    ExecutorMaxRetries,
+    ExecutorRetryBaseDelayMs,
 }
 
 impl FromStr for ConfigKey {
@@ -141,10 +154,8 @@ impl FromStr for ConfigKey {
 
             "prefetch.enabled" => Ok(ConfigKey::PrefetchEnabled),
             "prefetch.strategy" => Ok(ConfigKey::PrefetchStrategy),
+            "prefetch.mode" => Ok(ConfigKey::PrefetchMode),
             "prefetch.udp_port" => Ok(ConfigKey::PrefetchUdpPort),
-            "prefetch.cone_angle" => Ok(ConfigKey::PrefetchConeAngle),
-            "prefetch.inner_radius_nm" => Ok(ConfigKey::PrefetchInnerRadiusNm),
-            "prefetch.outer_radius_nm" => Ok(ConfigKey::PrefetchOuterRadiusNm),
             "prefetch.max_tiles_per_cycle" => Ok(ConfigKey::PrefetchMaxTilesPerCycle),
             "prefetch.cycle_interval_ms" => Ok(ConfigKey::PrefetchCycleIntervalMs),
             "prefetch.circuit_breaker_threshold" => Ok(ConfigKey::PrefetchCircuitBreakerThreshold),
@@ -152,7 +163,15 @@ impl FromStr for ConfigKey {
             "prefetch.circuit_breaker_half_open_secs" => {
                 Ok(ConfigKey::PrefetchCircuitBreakerHalfOpenSecs)
             }
-            "prefetch.radial_radius" => Ok(ConfigKey::PrefetchRadialRadius),
+            "prefetch.calibration_aggressive_threshold" => {
+                Ok(ConfigKey::PrefetchCalibrationAggressiveThreshold)
+            }
+            "prefetch.calibration_opportunistic_threshold" => {
+                Ok(ConfigKey::PrefetchCalibrationOpportunisticThreshold)
+            }
+            "prefetch.calibration_sample_duration" => {
+                Ok(ConfigKey::PrefetchCalibrationSampleDuration)
+            }
 
             "control_plane.max_concurrent_jobs" => Ok(ConfigKey::ControlPlaneMaxConcurrentJobs),
             "control_plane.stall_threshold_secs" => Ok(ConfigKey::ControlPlaneStallThresholdSecs),
@@ -164,11 +183,22 @@ impl FromStr for ConfigKey {
             }
 
             // Prewarm settings
-            "prewarm.radius_nm" => Ok(ConfigKey::PrewarmRadiusNm),
+            "prewarm.grid_size" => Ok(ConfigKey::PrewarmGridSize),
 
             // Patches settings
             "patches.enabled" => Ok(ConfigKey::PatchesEnabled),
             "patches.directory" => Ok(ConfigKey::PatchesDirectory),
+
+            // Executor settings
+            "executor.network_concurrent" => Ok(ConfigKey::ExecutorNetworkConcurrent),
+            "executor.cpu_concurrent" => Ok(ConfigKey::ExecutorCpuConcurrent),
+            "executor.disk_io_concurrent" => Ok(ConfigKey::ExecutorDiskIoConcurrent),
+            "executor.max_concurrent_tasks" => Ok(ConfigKey::ExecutorMaxConcurrentTasks),
+            "executor.job_channel_capacity" => Ok(ConfigKey::ExecutorJobChannelCapacity),
+            "executor.request_channel_capacity" => Ok(ConfigKey::ExecutorRequestChannelCapacity),
+            "executor.request_timeout_secs" => Ok(ConfigKey::ExecutorRequestTimeoutSecs),
+            "executor.max_retries" => Ok(ConfigKey::ExecutorMaxRetries),
+            "executor.retry_base_delay_ms" => Ok(ConfigKey::ExecutorRetryBaseDelayMs),
 
             _ => Err(ConfigKeyError::UnknownKey(s.to_string())),
         }
@@ -206,10 +236,8 @@ impl ConfigKey {
             ConfigKey::LoggingFile => "logging.file",
             ConfigKey::PrefetchEnabled => "prefetch.enabled",
             ConfigKey::PrefetchStrategy => "prefetch.strategy",
+            ConfigKey::PrefetchMode => "prefetch.mode",
             ConfigKey::PrefetchUdpPort => "prefetch.udp_port",
-            ConfigKey::PrefetchConeAngle => "prefetch.cone_angle",
-            ConfigKey::PrefetchInnerRadiusNm => "prefetch.inner_radius_nm",
-            ConfigKey::PrefetchOuterRadiusNm => "prefetch.outer_radius_nm",
             ConfigKey::PrefetchMaxTilesPerCycle => "prefetch.max_tiles_per_cycle",
             ConfigKey::PrefetchCycleIntervalMs => "prefetch.cycle_interval_ms",
             ConfigKey::PrefetchCircuitBreakerThreshold => "prefetch.circuit_breaker_threshold",
@@ -217,7 +245,13 @@ impl ConfigKey {
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs => {
                 "prefetch.circuit_breaker_half_open_secs"
             }
-            ConfigKey::PrefetchRadialRadius => "prefetch.radial_radius",
+            ConfigKey::PrefetchCalibrationAggressiveThreshold => {
+                "prefetch.calibration_aggressive_threshold"
+            }
+            ConfigKey::PrefetchCalibrationOpportunisticThreshold => {
+                "prefetch.calibration_opportunistic_threshold"
+            }
+            ConfigKey::PrefetchCalibrationSampleDuration => "prefetch.calibration_sample_duration",
             ConfigKey::ControlPlaneMaxConcurrentJobs => "control_plane.max_concurrent_jobs",
             ConfigKey::ControlPlaneStallThresholdSecs => "control_plane.stall_threshold_secs",
             ConfigKey::ControlPlaneHealthCheckIntervalSecs => {
@@ -226,11 +260,22 @@ impl ConfigKey {
             ConfigKey::ControlPlaneSemaphoreTimeoutSecs => "control_plane.semaphore_timeout_secs",
 
             // Prewarm settings
-            ConfigKey::PrewarmRadiusNm => "prewarm.radius_nm",
+            ConfigKey::PrewarmGridSize => "prewarm.grid_size",
 
             // Patches settings
             ConfigKey::PatchesEnabled => "patches.enabled",
             ConfigKey::PatchesDirectory => "patches.directory",
+
+            // Executor settings
+            ConfigKey::ExecutorNetworkConcurrent => "executor.network_concurrent",
+            ConfigKey::ExecutorCpuConcurrent => "executor.cpu_concurrent",
+            ConfigKey::ExecutorDiskIoConcurrent => "executor.disk_io_concurrent",
+            ConfigKey::ExecutorMaxConcurrentTasks => "executor.max_concurrent_tasks",
+            ConfigKey::ExecutorJobChannelCapacity => "executor.job_channel_capacity",
+            ConfigKey::ExecutorRequestChannelCapacity => "executor.request_channel_capacity",
+            ConfigKey::ExecutorRequestTimeoutSecs => "executor.request_timeout_secs",
+            ConfigKey::ExecutorMaxRetries => "executor.max_retries",
+            ConfigKey::ExecutorRetryBaseDelayMs => "executor.retry_base_delay_ms",
         }
     }
 
@@ -310,10 +355,8 @@ impl ConfigKey {
             ConfigKey::LoggingFile => path_to_display(&config.logging.file),
             ConfigKey::PrefetchEnabled => config.prefetch.enabled.to_string(),
             ConfigKey::PrefetchStrategy => config.prefetch.strategy.clone(),
+            ConfigKey::PrefetchMode => config.prefetch.mode.clone(),
             ConfigKey::PrefetchUdpPort => config.prefetch.udp_port.to_string(),
-            ConfigKey::PrefetchConeAngle => config.prefetch.cone_angle.to_string(),
-            ConfigKey::PrefetchInnerRadiusNm => config.prefetch.inner_radius_nm.to_string(),
-            ConfigKey::PrefetchOuterRadiusNm => config.prefetch.outer_radius_nm.to_string(),
             ConfigKey::PrefetchMaxTilesPerCycle => config.prefetch.max_tiles_per_cycle.to_string(),
             ConfigKey::PrefetchCycleIntervalMs => config.prefetch.cycle_interval_ms.to_string(),
             ConfigKey::PrefetchCircuitBreakerThreshold => {
@@ -325,7 +368,16 @@ impl ConfigKey {
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs => {
                 config.prefetch.circuit_breaker_half_open_secs.to_string()
             }
-            ConfigKey::PrefetchRadialRadius => config.prefetch.radial_radius.to_string(),
+            ConfigKey::PrefetchCalibrationAggressiveThreshold => {
+                config.prefetch.calibration_aggressive_threshold.to_string()
+            }
+            ConfigKey::PrefetchCalibrationOpportunisticThreshold => config
+                .prefetch
+                .calibration_opportunistic_threshold
+                .to_string(),
+            ConfigKey::PrefetchCalibrationSampleDuration => {
+                config.prefetch.calibration_sample_duration.to_string()
+            }
             ConfigKey::ControlPlaneMaxConcurrentJobs => {
                 config.control_plane.max_concurrent_jobs.to_string()
             }
@@ -340,7 +392,7 @@ impl ConfigKey {
             }
 
             // Prewarm settings
-            ConfigKey::PrewarmRadiusNm => config.prewarm.radius_nm.to_string(),
+            ConfigKey::PrewarmGridSize => config.prewarm.grid_size.to_string(),
 
             // Patches settings
             ConfigKey::PatchesEnabled => config.patches.enabled.to_string(),
@@ -350,6 +402,25 @@ impl ConfigKey {
                 .as_ref()
                 .map(|p| path_to_display(p))
                 .unwrap_or_default(),
+
+            // Executor settings
+            ConfigKey::ExecutorNetworkConcurrent => config.executor.network_concurrent.to_string(),
+            ConfigKey::ExecutorCpuConcurrent => config.executor.cpu_concurrent.to_string(),
+            ConfigKey::ExecutorDiskIoConcurrent => config.executor.disk_io_concurrent.to_string(),
+            ConfigKey::ExecutorMaxConcurrentTasks => {
+                config.executor.max_concurrent_tasks.to_string()
+            }
+            ConfigKey::ExecutorJobChannelCapacity => {
+                config.executor.job_channel_capacity.to_string()
+            }
+            ConfigKey::ExecutorRequestChannelCapacity => {
+                config.executor.request_channel_capacity.to_string()
+            }
+            ConfigKey::ExecutorRequestTimeoutSecs => {
+                config.executor.request_timeout_secs.to_string()
+            }
+            ConfigKey::ExecutorMaxRetries => config.executor.max_retries.to_string(),
+            ConfigKey::ExecutorRetryBaseDelayMs => config.executor.retry_base_delay_ms.to_string(),
         }
     }
 
@@ -454,17 +525,11 @@ impl ConfigKey {
             ConfigKey::PrefetchStrategy => {
                 config.prefetch.strategy = value.to_lowercase();
             }
+            ConfigKey::PrefetchMode => {
+                config.prefetch.mode = value.to_lowercase();
+            }
             ConfigKey::PrefetchUdpPort => {
                 config.prefetch.udp_port = value.parse().unwrap();
-            }
-            ConfigKey::PrefetchConeAngle => {
-                config.prefetch.cone_angle = value.parse().unwrap();
-            }
-            ConfigKey::PrefetchInnerRadiusNm => {
-                config.prefetch.inner_radius_nm = value.parse().unwrap();
-            }
-            ConfigKey::PrefetchOuterRadiusNm => {
-                config.prefetch.outer_radius_nm = value.parse().unwrap();
             }
             ConfigKey::PrefetchMaxTilesPerCycle => {
                 config.prefetch.max_tiles_per_cycle = value.parse().unwrap();
@@ -481,8 +546,14 @@ impl ConfigKey {
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs => {
                 config.prefetch.circuit_breaker_half_open_secs = value.parse().unwrap();
             }
-            ConfigKey::PrefetchRadialRadius => {
-                config.prefetch.radial_radius = value.parse().unwrap();
+            ConfigKey::PrefetchCalibrationAggressiveThreshold => {
+                config.prefetch.calibration_aggressive_threshold = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchCalibrationOpportunisticThreshold => {
+                config.prefetch.calibration_opportunistic_threshold = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchCalibrationSampleDuration => {
+                config.prefetch.calibration_sample_duration = value.parse().unwrap();
             }
             ConfigKey::ControlPlaneMaxConcurrentJobs => {
                 config.control_plane.max_concurrent_jobs = value.parse().unwrap();
@@ -498,8 +569,8 @@ impl ConfigKey {
             }
 
             // Prewarm settings
-            ConfigKey::PrewarmRadiusNm => {
-                config.prewarm.radius_nm = value.parse().unwrap();
+            ConfigKey::PrewarmGridSize => {
+                config.prewarm.grid_size = value.parse().unwrap();
             }
 
             // Patches settings
@@ -509,6 +580,35 @@ impl ConfigKey {
             }
             ConfigKey::PatchesDirectory => {
                 config.patches.directory = optional_path(value);
+            }
+
+            // Executor settings
+            ConfigKey::ExecutorNetworkConcurrent => {
+                config.executor.network_concurrent = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorCpuConcurrent => {
+                config.executor.cpu_concurrent = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorDiskIoConcurrent => {
+                config.executor.disk_io_concurrent = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorMaxConcurrentTasks => {
+                config.executor.max_concurrent_tasks = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorJobChannelCapacity => {
+                config.executor.job_channel_capacity = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorRequestChannelCapacity => {
+                config.executor.request_channel_capacity = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorRequestTimeoutSecs => {
+                config.executor.request_timeout_secs = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorMaxRetries => {
+                config.executor.max_retries = value.parse().unwrap();
+            }
+            ConfigKey::ExecutorRetryBaseDelayMs => {
+                config.executor.retry_base_delay_ms = value.parse().unwrap();
             }
         }
     }
@@ -556,34 +656,52 @@ impl ConfigKey {
             ConfigKey::PackagesTempDir => Box::new(OptionalPathSpec),
             ConfigKey::LoggingFile => Box::new(PathSpec),
             ConfigKey::PrefetchEnabled => Box::new(BooleanSpec),
-            ConfigKey::PrefetchStrategy => {
-                Box::new(OneOfSpec::new(&["auto", "heading-aware", "radial"]))
-            }
+            ConfigKey::PrefetchStrategy => Box::new(OneOfSpec::new(&["auto", "adaptive"])),
+            ConfigKey::PrefetchMode => Box::new(OneOfSpec::new(&[
+                "auto",
+                "aggressive",
+                "opportunistic",
+                "disabled",
+            ])),
             ConfigKey::PrefetchUdpPort => Box::new(PositiveIntegerSpec),
-            ConfigKey::PrefetchConeAngle => Box::new(PositiveNumberSpec),
-            ConfigKey::PrefetchInnerRadiusNm => Box::new(PositiveNumberSpec),
-            ConfigKey::PrefetchOuterRadiusNm => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchMaxTilesPerCycle => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCycleIntervalMs => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCircuitBreakerThreshold => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchCircuitBreakerOpenMs => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs => Box::new(PositiveIntegerSpec),
-            ConfigKey::PrefetchRadialRadius => Box::new(PositiveIntegerSpec),
+            ConfigKey::PrefetchCalibrationAggressiveThreshold => Box::new(PositiveNumberSpec),
+            ConfigKey::PrefetchCalibrationOpportunisticThreshold => Box::new(PositiveNumberSpec),
+            ConfigKey::PrefetchCalibrationSampleDuration => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneMaxConcurrentJobs => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneStallThresholdSecs => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneHealthCheckIntervalSecs => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneSemaphoreTimeoutSecs => Box::new(PositiveIntegerSpec),
 
             // Prewarm settings
-            ConfigKey::PrewarmRadiusNm => Box::new(PositiveNumberSpec),
+            ConfigKey::PrewarmGridSize => Box::new(PositiveIntegerSpec),
 
             // Patches settings
             ConfigKey::PatchesEnabled => Box::new(BooleanSpec),
             ConfigKey::PatchesDirectory => Box::new(OptionalPathSpec),
+
+            // Executor settings
+            ConfigKey::ExecutorNetworkConcurrent => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorCpuConcurrent => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorDiskIoConcurrent => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorMaxConcurrentTasks => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorJobChannelCapacity => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorRequestChannelCapacity => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorRequestTimeoutSecs => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorMaxRetries => Box::new(PositiveIntegerSpec),
+            ConfigKey::ExecutorRetryBaseDelayMs => Box::new(PositiveIntegerSpec),
         }
     }
 
     /// Get all supported configuration keys.
+    ///
+    /// Note: Deprecated keys (like pipeline.*) are NOT included here.
+    /// They remain parseable for backwards compatibility but are not
+    /// expected in new configs. See upgrade.rs DEPRECATED_KEYS for the list.
     pub fn all() -> &'static [ConfigKey] {
         &[
             ConfigKey::ProviderType,
@@ -597,13 +715,7 @@ impl ConfigKey {
             ConfigKey::DownloadTimeout,
             ConfigKey::GenerationThreads,
             ConfigKey::GenerationTimeout,
-            ConfigKey::PipelineMaxHttpConcurrent,
-            ConfigKey::PipelineMaxCpuConcurrent,
-            ConfigKey::PipelineMaxPrefetchInFlight,
-            ConfigKey::PipelineRequestTimeoutSecs,
-            ConfigKey::PipelineMaxRetries,
-            ConfigKey::PipelineRetryBaseDelayMs,
-            ConfigKey::PipelineCoalesceChannelCapacity,
+            // Note: pipeline.* keys are deprecated - use executor.* instead
             ConfigKey::XplaneSceneryDir,
             ConfigKey::PackagesLibraryUrl,
             ConfigKey::PackagesInstallLocation,
@@ -613,25 +725,35 @@ impl ConfigKey {
             ConfigKey::LoggingFile,
             ConfigKey::PrefetchEnabled,
             ConfigKey::PrefetchStrategy,
+            ConfigKey::PrefetchMode,
             ConfigKey::PrefetchUdpPort,
-            ConfigKey::PrefetchConeAngle,
-            ConfigKey::PrefetchInnerRadiusNm,
-            ConfigKey::PrefetchOuterRadiusNm,
             ConfigKey::PrefetchMaxTilesPerCycle,
             ConfigKey::PrefetchCycleIntervalMs,
             ConfigKey::PrefetchCircuitBreakerThreshold,
             ConfigKey::PrefetchCircuitBreakerOpenMs,
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs,
-            ConfigKey::PrefetchRadialRadius,
+            ConfigKey::PrefetchCalibrationAggressiveThreshold,
+            ConfigKey::PrefetchCalibrationOpportunisticThreshold,
+            ConfigKey::PrefetchCalibrationSampleDuration,
             ConfigKey::ControlPlaneMaxConcurrentJobs,
             ConfigKey::ControlPlaneStallThresholdSecs,
             ConfigKey::ControlPlaneHealthCheckIntervalSecs,
             ConfigKey::ControlPlaneSemaphoreTimeoutSecs,
             // Prewarm settings
-            ConfigKey::PrewarmRadiusNm,
+            ConfigKey::PrewarmGridSize,
             // Patches settings
             ConfigKey::PatchesEnabled,
             ConfigKey::PatchesDirectory,
+            // Executor settings
+            ConfigKey::ExecutorNetworkConcurrent,
+            ConfigKey::ExecutorCpuConcurrent,
+            ConfigKey::ExecutorDiskIoConcurrent,
+            ConfigKey::ExecutorMaxConcurrentTasks,
+            ConfigKey::ExecutorJobChannelCapacity,
+            ConfigKey::ExecutorRequestChannelCapacity,
+            ConfigKey::ExecutorRequestTimeoutSecs,
+            ConfigKey::ExecutorMaxRetries,
+            ConfigKey::ExecutorRetryBaseDelayMs,
         ]
     }
 }

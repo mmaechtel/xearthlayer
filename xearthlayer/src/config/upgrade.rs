@@ -59,6 +59,27 @@ pub const DEPRECATED_KEYS: &[&str] = &[
     "prefetch.cone_half_angle",
     // Removed in v0.2.11 - Circuit breaker now uses milliseconds instead of seconds
     "prefetch.circuit_breaker_open_secs",
+    // Removed in v0.3.0 - Pipeline module replaced by executor daemon architecture
+    // These settings were parsed but never wired through to the new executor.
+    // The executor uses its own internal defaults via ResourcePoolConfig.
+    "pipeline.max_http_concurrent",
+    "pipeline.max_cpu_concurrent",
+    "pipeline.max_prefetch_in_flight",
+    "pipeline.request_timeout_secs",
+    "pipeline.max_retries",
+    "pipeline.retry_base_delay_ms",
+    "pipeline.coalesce_channel_capacity",
+    // Removed in v0.3.1 - Prewarm now uses tile-based (DSF grid) instead of radius
+    // The new grid_size setting aligns prewarm with X-Plane's DSF tile boundaries.
+    "prewarm.radius_nm",
+    // Removed in v0.4.0 - Legacy prefetch strategies replaced by adaptive prefetch
+    // RadialPrefetcher, HeadingAwarePrefetcher, and TileBasedPrefetcher are superseded
+    // by the adaptive prefetch system with phase detection (ground/cruise).
+    "prefetch.radial_radius",
+    "prefetch.tile_based_rows_ahead",
+    "prefetch.cone_angle",
+    "prefetch.inner_radius_nm",
+    "prefetch.outer_radius_nm",
 ];
 
 /// Result of analyzing a configuration file for upgrade needs.
@@ -394,7 +415,17 @@ memory_size = 2GB
 
         let analysis = analyze_config(&config_path).unwrap();
 
-        assert!(!analysis.needs_upgrade);
+        // Debug output (always print)
+        eprintln!("Missing keys: {:?}", analysis.missing_keys);
+        eprintln!("Unknown keys: {:?}", analysis.unknown_keys);
+        eprintln!("Deprecated keys: {:?}", analysis.deprecated_keys);
+        eprintln!("Needs upgrade: {}", analysis.needs_upgrade);
+
+        assert!(
+            !analysis.needs_upgrade,
+            "Expected no upgrade needed but missing={:?} unknown={:?} deprecated={:?}",
+            analysis.missing_keys, analysis.unknown_keys, analysis.deprecated_keys
+        );
         assert!(analysis.missing_keys.is_empty());
     }
 

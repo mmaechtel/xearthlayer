@@ -6,23 +6,25 @@
 //!
 //! # Available Strategies
 //!
-//! - [`RadialPrefetcher`](super::RadialPrefetcher): Simple cache-aware radial
-//!   expansion around current position (recommended)
-//! - [`PrefetchScheduler`](super::PrefetchScheduler): Complex flight-path
-//!   prediction with cone and radial calculations
+//! - [`AdaptivePrefetchCoordinator`](super::AdaptivePrefetchCoordinator): Self-calibrating
+//!   adaptive prefetch with flight phase detection (ground/cruise). This is the only
+//!   available strategy as of v0.4.0.
+//!
+//! The adaptive prefetcher automatically selects the appropriate mode (aggressive,
+//! opportunistic, or disabled) based on measured throughput, and uses track-based
+//! band calculation for cruise and ring-based for ground operations.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use xearthlayer::prefetch::{Prefetcher, RadialPrefetcher, RadialPrefetchConfig};
+//! use xearthlayer::prefetch::{Prefetcher, AdaptivePrefetchCoordinator};
 //!
-//! // Create a prefetcher strategy
-//! let strategy: Box<dyn Prefetcher> = Box::new(
-//!     RadialPrefetcher::new(memory_cache, dds_handler, config)
-//! );
+//! // The adaptive prefetcher is created by the service orchestrator
+//! // and is not typically constructed directly.
+//! let coordinator = AdaptivePrefetchCoordinator::new(config, services);
 //!
-//! // Run the prefetcher
-//! strategy.run(state_rx, cancellation_token).await;
+//! // Run the coordinator
+//! coordinator.run(state_rx, cancellation_token).await;
 //! ```
 
 use std::future::Future;
@@ -44,14 +46,12 @@ use super::state::AircraftState;
 /// # Example
 ///
 /// ```ignore
-/// // Create a prefetcher strategy
-/// let prefetcher: Box<dyn Prefetcher> = Box::new(
-///     RadialPrefetcher::new(memory_cache, dds_handler, config)
-///         .with_shared_status(shared_status)
-/// );
+/// // Create a prefetcher strategy via the service orchestrator
+/// let coordinator = AdaptivePrefetchCoordinator::new(config, services);
 ///
-/// // Run the prefetcher (consumes the boxed prefetcher)
-/// prefetcher.run(state_rx, cancellation_token).await;
+/// // Run the coordinator (consumes the boxed prefetcher)
+/// let boxed: Box<dyn Prefetcher> = Box::new(coordinator);
+/// boxed.run(state_rx, cancellation_token).await;
 /// ```
 pub trait Prefetcher: Send {
     /// Run the prefetcher, processing state updates until cancelled.
@@ -85,7 +85,6 @@ pub trait Prefetcher: Send {
     ///
     /// # Example output
     ///
-    /// - RadialPrefetcher: "radial, 3-tile radius, zoom 14"
-    /// - PrefetchScheduler: "flight-path, 45° cone, 10nm distance"
+    /// - AdaptivePrefetchCoordinator: "adaptive (aggressive), cruise + ground"
     fn startup_info(&self) -> String;
 }

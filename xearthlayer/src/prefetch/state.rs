@@ -3,7 +3,22 @@
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use super::scheduler::PrefetchStatsSnapshot;
+/// Snapshot of prefetch statistics for UI display.
+///
+/// This struct tracks cumulative prefetch activity metrics that are
+/// displayed in the dashboard to give users visibility into prefetch
+/// performance.
+#[derive(Debug, Clone, Default)]
+pub struct PrefetchStatsSnapshot {
+    /// Number of prediction cycles completed.
+    pub prediction_cycles: u64,
+    /// Total tiles submitted for prefetch.
+    pub tiles_submitted: u64,
+    /// Tiles skipped because they were already in-flight.
+    pub tiles_in_flight_skipped: u64,
+    /// Total tiles predicted (may exceed submitted due to filtering).
+    pub tiles_predicted: u64,
+}
 
 /// GPS/telemetry connection status for UI display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,6 +51,8 @@ pub enum PrefetchMode {
     FuseInference,
     /// Fallback to simple radial prefetch (no heading data).
     Radial,
+    /// Tile-based prefetch aligned with X-Plane's DSF loading behavior.
+    TileBased,
     /// Prefetch system is idle (no data received yet).
     #[default]
     Idle,
@@ -66,6 +83,9 @@ pub struct DetailedPrefetchStats {
     /// Circuit breaker state (None if circuit breaker is disabled).
     /// Used by TUI to show prefetch pause status.
     pub circuit_state: Option<super::circuit_breaker::CircuitState>,
+    /// Tile coordinates currently being prefetched (limited to 10 for display).
+    /// Each tuple is (latitude, longitude) of the tile's southwest corner.
+    pub loading_tiles: Vec<(i32, i32)>,
 }
 
 impl std::fmt::Display for PrefetchMode {
@@ -74,6 +94,7 @@ impl std::fmt::Display for PrefetchMode {
             Self::Telemetry => write!(f, "Heading-Aware (Telemetry)"),
             Self::FuseInference => write!(f, "Heading-Aware (Inferred)"),
             Self::Radial => write!(f, "Radial"),
+            Self::TileBased => write!(f, "Tile-Based"),
             Self::Idle => write!(f, "Idle"),
             Self::CircuitOpen => write!(f, "Paused"),
         }
@@ -125,6 +146,27 @@ impl SharedPrefetchStatus {
     pub fn update_gps_status(&self, status: GpsStatus) {
         if let Ok(mut inner) = self.inner.write() {
             inner.gps_status = status;
+        }
+    }
+
+    /// Update the aircraft position from FUSE inference.
+    ///
+    /// This is a fallback when telemetry is unavailable - we infer
+    /// approximate position from DSF tile loading patterns.
+    /// Sets GPS status to Inferred.
+    pub fn update_inferred_position(&self, latitude: f64, longitude: f64) {
+        if let Ok(mut inner) = self.inner.write() {
+            // Only update if we don't have real telemetry
+            if inner.gps_status != GpsStatus::Connected {
+                inner.aircraft = Some(AircraftSnapshot {
+                    latitude,
+                    longitude,
+                    heading: 0.0,      // Unknown without telemetry
+                    ground_speed: 0.0, // Unknown without telemetry
+                    altitude: 0.0,     // Unknown without telemetry
+                });
+                inner.gps_status = GpsStatus::Inferred;
+            }
         }
     }
 

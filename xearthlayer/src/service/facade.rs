@@ -1,36 +1,33 @@
 //! XEarthLayer service facade implementation.
 
-use super::builder::{self, CacheComponents, GeneratorComponents, ProviderComponents};
+use super::builder::{self, AsyncProviderComponents, CacheComponents, ProviderComponents};
+use super::cache_layer::CacheLayer;
 use super::config::ServiceConfig;
-use super::dds_handler::DdsHandlerBuilder;
 use super::error::ServiceError;
 use super::fuse_mount::{FuseMountConfig, FuseMountService};
-use super::network_logger::NetworkStatsLogger;
-use crate::cache::MemoryCache;
-use crate::coord::to_tile_coords;
-use crate::fuse::{DdsHandler, MountHandle, SpawnedMountHandle};
+use super::runtime_builder::RuntimeBuilder;
+use crate::cache::adapters::{DiskCacheBridge, MemoryCacheBridge};
+use crate::cache::{disk_cache_stats, GcSchedulerDaemon, MemoryCache};
+use crate::config::DiskIoProfile;
+use crate::executor::{DdsClient, MemoryCacheAdapter};
+use crate::fuse::{MountHandle, SpawnedMountHandle};
 use crate::log::Logger;
-use crate::pipeline::adapters::MemoryCacheAdapter;
-use crate::pipeline::control_plane::{
-    ControlPlaneConfig, ControlPlaneHealth, PipelineControlPlane,
-};
-use crate::pipeline::{DiskIoProfile, RequestCoalescer, StorageConcurrencyLimiter};
+use crate::metrics::{MetricsSystem, TelemetrySnapshot, TuiReporter};
 use crate::prefetch::{FuseLoadMonitor, TileRequestCallback};
-use crate::provider::{AsyncProviderType, Provider, ProviderConfig};
-use crate::telemetry::{PipelineMetrics, TelemetrySnapshot};
+use crate::provider::ProviderConfig;
+use crate::runtime::{SharedRuntimeHealth, XEarthLayerRuntime};
 use crate::texture::{DdsTextureEncoder, TextureEncoder};
-use crate::tile::{TileGenerator, TileRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// High-level facade for XEarthLayer operations.
 ///
 /// Encapsulates all component creation and wiring, providing a simplified
-/// API for common operations like serving tiles via FUSE or downloading
-/// individual tiles.
+/// API for serving satellite imagery tiles via FUSE.
 ///
 /// # Runtime Management
 ///
@@ -57,8 +54,8 @@ use tokio::task::JoinHandle;
 /// let config = ServiceConfig::default();
 /// let service = XEarthLayerService::new(config, ProviderConfig::bing(), logger)?;
 ///
-/// // Download a tile
-/// let data = service.download_tile(37.7749, -122.4194, 15)?;
+/// // Mount FUSE filesystem
+/// let handle = service.mount_package_async(package_path).await?;
 /// ```
 pub struct XEarthLayerService {
     /// Service configuration
@@ -67,44 +64,47 @@ pub struct XEarthLayerService {
     provider_name: String,
     /// Provider's maximum supported zoom level
     max_zoom: u8,
-    /// Tile generator (handles download + encoding)
-    generator: Arc<dyn TileGenerator>,
     /// Logger for diagnostic output
     logger: Arc<dyn Logger>,
-    /// Network stats logger (keeps logger thread alive)
-    #[allow(dead_code)]
-    network_stats_logger: Option<NetworkStatsLogger>,
-    /// Owned Tokio runtime (when created via `new()`)
-    #[allow(dead_code)]
-    owned_runtime: Option<Runtime>,
+    // -------------------------------------------------------------------------
+    // RAII Fields: Kept alive for ownership semantics, not read after construction.
+    // Dropping these would stop background threads/resources.
+    // Prefixed with underscore to indicate intentional ownership-only storage.
+    // -------------------------------------------------------------------------
+    /// Owned Tokio runtime (when created via `new()`).
+    _owned_runtime: Option<Runtime>,
+    /// Cache layer with internal GC daemon (when created via `start()`).
+    /// Use `shutdown_cache()` for graceful shutdown.
+    cache_layer: Option<CacheLayer>,
+
     /// Handle to the Tokio runtime
     runtime_handle: Handle,
-    /// Sync provider for legacy pipeline (TileOrchestrator)
-    provider: Arc<dyn Provider>,
-    /// Async provider for async pipeline (non-blocking I/O)
-    async_provider: Option<Arc<AsyncProviderType>>,
-    /// Texture encoder for async pipeline (concrete type for adapter compatibility)
+
+    /// Texture encoder for DDS generation
     dds_encoder: Arc<DdsTextureEncoder>,
-    /// Shared memory cache for async pipeline (tile-level)
+    /// Shared memory cache for tile-level caching
     memory_cache: Option<Arc<MemoryCache>>,
-    /// Shared memory cache adapter (implements pipeline::MemoryCache trait)
+    /// Shared memory cache adapter (implements executor::MemoryCache trait)
     memory_cache_adapter: Option<Arc<MemoryCacheAdapter>>,
-    /// Cache directory for disk cache
-    cache_dir: Option<PathBuf>,
-    /// Pipeline telemetry metrics
-    metrics: Arc<PipelineMetrics>,
-    /// Shared disk I/O concurrency limiter (for global limiting across packages)
-    disk_io_limiter: Option<Arc<StorageConcurrencyLimiter>>,
-    /// Pipeline control plane for job management and health monitoring
-    control_plane: Arc<PipelineControlPlane>,
-    /// Health monitor join handle (runs in background)
-    #[allow(dead_code)]
-    health_monitor_handle: Option<JoinHandle<()>>,
+    /// Metrics system for event-based telemetry
+    metrics_system: Option<MetricsSystem>,
+    /// XEarthLayer runtime (job executor daemon)
+    xearthlayer_runtime: Option<XEarthLayerRuntime>,
+    /// DDS client for requesting tile generation
+    dds_client: Option<Arc<dyn DdsClient>>,
     /// Tile request callback for FUSE-based position inference
     tile_request_callback: Option<TileRequestCallback>,
     /// Load monitor for circuit breaker integration.
     /// When set, records FUSE-originated requests for aggregate load tracking.
     load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
+    /// Memory cache bridge from new cache service architecture.
+    /// Used by prefetch system when cache bridges are enabled.
+    memory_cache_bridge: Option<Arc<MemoryCacheBridge>>,
+    /// GC scheduler daemon handle (when started via `start()`).
+    /// Kept alive for ownership - dropping would stop the scheduler.
+    gc_scheduler_handle: Option<JoinHandle<()>>,
+    /// GC scheduler shutdown token for graceful shutdown.
+    gc_scheduler_shutdown: Option<CancellationToken>,
 }
 
 impl XEarthLayerService {
@@ -156,9 +156,10 @@ impl XEarthLayerService {
         disk_profile: DiskIoProfile,
     ) -> Result<Self, ServiceError> {
         // Get CPU count for worker threads
+        const DEFAULT_CPU_FALLBACK: usize = 4;
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(crate::pipeline::DEFAULT_CPU_FALLBACK);
+            .unwrap_or(DEFAULT_CPU_FALLBACK);
 
         // Get max blocking threads based on disk profile
         let max_blocking_threads = disk_profile.max_blocking_threads();
@@ -207,6 +208,179 @@ impl XEarthLayerService {
         Self::build(config, provider_config, logger, runtime_handle, None)
     }
 
+    /// Create a new XEarthLayer service with cache bridges from the new cache service.
+    ///
+    /// This constructor uses the new `CacheService` architecture where:
+    /// - `MemoryCacheBridge` implements `executor::MemoryCache`
+    /// - `DiskCacheBridge` implements `executor::DiskCache` with **internal GC daemon**
+    ///
+    /// This eliminates the need for external GC daemon management and ensures
+    /// garbage collection runs regardless of how the application is started
+    /// (TUI vs non-TUI modes).
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Service configuration
+    /// * `provider_config` - Provider-specific configuration
+    /// * `logger` - Logger implementation
+    /// * `runtime_handle` - Handle to an existing Tokio runtime
+    /// * `memory_bridge` - Memory cache bridge from `CacheLayer`
+    /// * `disk_bridge` - Disk cache bridge from `CacheLayer`
+    ///
+    /// # Note
+    ///
+    /// This method is primarily for internal use. Prefer using
+    /// [`XEarthLayerService::start()`] which handles cache lifecycle automatically.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::service::XEarthLayerService;
+    /// use xearthlayer::cache::adapters::{MemoryCacheBridge, DiskCacheBridge};
+    ///
+    /// let service = XEarthLayerService::with_cache_bridges(
+    ///     service_config,
+    ///     provider_config,
+    ///     logger,
+    ///     runtime_handle,
+    ///     memory_bridge,
+    ///     disk_bridge,
+    /// )?;
+    /// ```
+    pub fn with_cache_bridges(
+        config: ServiceConfig,
+        provider_config: ProviderConfig,
+        logger: Arc<dyn Logger>,
+        runtime_handle: Handle,
+        memory_bridge: Arc<MemoryCacheBridge>,
+        disk_bridge: Arc<DiskCacheBridge>,
+    ) -> Result<Self, ServiceError> {
+        Self::build_with_bridges(
+            config,
+            provider_config,
+            logger,
+            runtime_handle,
+            None,
+            memory_bridge,
+            disk_bridge,
+        )
+    }
+
+    /// Start a new XEarthLayerService with integrated cache and metrics.
+    ///
+    /// This is the recommended way to create a service. It ensures:
+    /// 1. MetricsSystem is created first
+    /// 2. CacheLayer is created with MetricsClient (enables GC reporting)
+    /// 3. All components are properly wired
+    ///
+    /// The service owns the CacheLayer, ensuring GC continues running
+    /// for the lifetime of the service.
+    ///
+    /// # Note
+    ///
+    /// This async method uses the current runtime via `Handle::current()`.
+    /// Use `start_with_owned_runtime()` if you need the service to own
+    /// its own runtime (e.g., when calling from a sync context).
+    pub async fn start(
+        config: ServiceConfig,
+        provider_config: ProviderConfig,
+        logger: Arc<dyn Logger>,
+    ) -> Result<Self, ServiceError> {
+        // Use the current runtime - caller is responsible for keeping it alive
+        let runtime_handle = Handle::current();
+
+        tracing::info!("Creating XEarthLayerService using current runtime");
+
+        // 1. Create MetricsSystem FIRST (so we can inject client into caches)
+        let metrics_system = MetricsSystem::new(&runtime_handle);
+        let metrics_client = metrics_system.client();
+
+        // 2. Create async provider (no sync provider needed - legacy pipeline removed)
+        let AsyncProviderComponents {
+            async_provider,
+            name: provider_name,
+            max_zoom,
+        } = builder::create_async_provider(&provider_config).await?;
+
+        // 3. Create CacheLayer WITH metrics for GC reporting
+        let cache_layer = CacheLayer::new(&config, &provider_name, metrics_client.clone()).await?;
+
+        // 4. Scan initial disk cache size and report to metrics
+        let initial_disk_size = cache_layer.scan_disk_cache_size().await;
+        metrics_client.disk_cache_initial_size(initial_disk_size);
+
+        tracing::info!(
+            initial_disk_size_bytes = initial_disk_size,
+            "Disk cache initial size scanned"
+        );
+
+        // 5. Create texture encoder
+        let dds_encoder = builder::create_encoder(&config);
+
+        // 6. Create XEarthLayer runtime with cache bridges
+        let xel_runtime = RuntimeBuilder::new(
+            &provider_name,
+            config.texture().format(),
+            Arc::clone(&dds_encoder),
+        )
+        .with_async_provider(Arc::clone(&async_provider))
+        .with_runtime_handle(runtime_handle.clone())
+        .with_metrics_client(metrics_client)
+        .build_with_cache_service(cache_layer.memory_bridge(), cache_layer.disk_bridge());
+
+        let dds_client = xel_runtime.dds_client();
+
+        // 7. Create and spawn GC scheduler daemon
+        let (gc_scheduler_handle, gc_scheduler_shutdown) = if let Some(disk_provider) =
+            cache_layer.disk_provider()
+        {
+            let gc_shutdown = CancellationToken::new();
+            let job_submitter = xel_runtime.job_submitter();
+            let lru_index = disk_provider.lru_index();
+            let cache_dir = disk_provider.directory().to_path_buf();
+            let max_size = disk_provider.max_size_bytes();
+
+            let gc_daemon = GcSchedulerDaemon::new(lru_index, cache_dir, max_size, job_submitter);
+
+            let gc_shutdown_clone = gc_shutdown.clone();
+            let gc_handle = runtime_handle.spawn(async move {
+                gc_daemon.run(gc_shutdown_clone).await;
+            });
+
+            tracing::info!("GC scheduler daemon started");
+            (Some(gc_handle), Some(gc_shutdown))
+        } else {
+            tracing::warn!("No disk provider available, GC scheduler not started");
+            (None, None)
+        };
+
+        tracing::info!(
+            provider = %provider_name,
+            "XEarthLayerService started with integrated cache and metrics"
+        );
+
+        Ok(Self {
+            config,
+            provider_name,
+            max_zoom,
+            logger,
+            _owned_runtime: None, // Caller owns the runtime
+            runtime_handle,
+            dds_encoder,
+            memory_cache: None,
+            memory_cache_adapter: None,
+            metrics_system: Some(metrics_system),
+            xearthlayer_runtime: Some(xel_runtime),
+            dds_client: Some(dds_client),
+            tile_request_callback: None,
+            load_monitor: None,
+            memory_cache_bridge: Some(cache_layer.memory_bridge()),
+            cache_layer: Some(cache_layer),
+            gc_scheduler_handle,
+            gc_scheduler_shutdown,
+        })
+    }
+
     /// Internal builder that does the actual construction.
     ///
     /// This method delegates to focused builder functions in the `builder` module
@@ -218,9 +392,9 @@ impl XEarthLayerService {
         runtime_handle: Handle,
         owned_runtime: Option<Runtime>,
     ) -> Result<Self, ServiceError> {
-        // 1. Create providers (sync for legacy pipeline, async for new pipeline)
+        // 1. Create providers
         let ProviderComponents {
-            sync_provider: provider,
+            sync_provider: _,
             async_provider,
             name: provider_name,
             max_zoom,
@@ -228,21 +402,14 @@ impl XEarthLayerService {
 
         // 2. Create texture encoder
         let dds_encoder = builder::create_encoder(&config);
-        let encoder: Arc<dyn TextureEncoder> = Arc::clone(&dds_encoder) as Arc<dyn TextureEncoder>;
 
-        // 3. Create tile generator pipeline
-        let GeneratorComponents {
-            generator,
-            network_stats,
-        } = builder::create_generator(&config, Arc::clone(&provider), encoder, logger.clone());
-
-        // 4. Create cache components
+        // 3. Create cache components
         let CacheComponents {
             memory_cache,
             cache_dir,
-        } = builder::create_cache(&config, &provider_name, logger.clone())?;
+        } = builder::create_cache(&config, &provider_name)?;
 
-        // 5. Create shared memory cache adapter (used by both pipeline and prefetcher)
+        // 4. Create shared memory cache adapter (used by prefetcher for cache checks)
         let memory_cache_adapter = memory_cache.as_ref().map(|cache| {
             Arc::new(MemoryCacheAdapter::new(
                 Arc::clone(cache),
@@ -251,59 +418,164 @@ impl XEarthLayerService {
             ))
         });
 
-        // 6. Create network stats logger (if not in quiet mode)
-        let network_stats_logger =
-            builder::create_network_logger(&config, network_stats, logger.clone());
+        // 5. Create metrics system for event-based telemetry
+        let metrics_system = MetricsSystem::new(&runtime_handle);
 
-        // 7. Create pipeline telemetry metrics
-        let metrics = Arc::new(PipelineMetrics::new());
-
-        // 8. Initialize disk cache size from existing cache (async background task)
-        builder::init_disk_cache_metrics(cache_dir.as_ref(), &metrics, &runtime_handle);
-
-        // 9. Create pipeline control plane for job management and health monitoring
-        let control_plane_config = ControlPlaneConfig {
-            max_concurrent_jobs: config.control_plane().max_concurrent_jobs,
-            stall_threshold: Duration::from_secs(config.control_plane().stall_threshold_secs),
-            health_check_interval: Duration::from_secs(
-                config.control_plane().health_check_interval_secs,
-            ),
-            semaphore_timeout: Duration::from_secs(config.control_plane().semaphore_timeout_secs),
-        };
-
-        // Create coalescer for the control plane (used for recovery operations)
-        let coalescer = Arc::new(RequestCoalescer::new());
-        let control_plane = Arc::new(PipelineControlPlane::new(control_plane_config, coalescer));
-
-        // 10. Start the health monitor in the background (using runtime handle since we're not in async context)
-        let health_monitor_handle = {
-            let cp = Arc::clone(&control_plane);
+        // 6. Scan existing disk cache in background to initialize size metrics
+        // This avoids blocking service creation with potentially slow directory walk
+        if let Some(ref cache_dir_path) = cache_dir {
+            let cache_path = cache_dir_path.clone();
+            let metrics_client = metrics_system.client();
             runtime_handle.spawn(async move {
-                cp.run_health_monitor_loop().await;
-            })
+                let path = cache_path;
+                let result = tokio::task::spawn_blocking(move || disk_cache_stats(&path)).await;
+                match result {
+                    Ok(Ok((_files, bytes))) => {
+                        metrics_client.disk_cache_initial_size(bytes);
+                        tracing::debug!(
+                            bytes = bytes,
+                            "Disk cache initial size scanned (background)"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "Failed to scan disk cache size");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Disk cache scan task panicked");
+                    }
+                }
+            });
+        }
+
+        // 7. Create XEarthLayer runtime with job executor daemon
+        // Note: The runtime is created lazily when needed (when async_provider is available)
+        let (xearthlayer_runtime, dds_client) = if let Some(ref async_prov) = async_provider {
+            if memory_cache.is_some() {
+                let runtime = RuntimeBuilder::new(
+                    &provider_name,
+                    config.texture().format(),
+                    Arc::clone(&dds_encoder),
+                )
+                .with_async_provider(Arc::clone(async_prov))
+                .with_memory_cache(
+                    memory_cache
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(MemoryCache::new(0))),
+                )
+                .with_cache_dir(
+                    cache_dir
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("/tmp/xearthlayer")),
+                )
+                .with_runtime_handle(runtime_handle.clone())
+                .with_metrics_client(metrics_system.client()) // Wire metrics for dashboard UI
+                .build();
+
+                let client = runtime.dds_client();
+                (Some(runtime), Some(client))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
         };
 
         Ok(Self {
             config,
             provider_name,
             max_zoom,
-            generator,
             logger,
-            network_stats_logger,
-            owned_runtime,
+            _owned_runtime: owned_runtime,
             runtime_handle,
-            provider,
-            async_provider,
             dds_encoder,
             memory_cache,
             memory_cache_adapter,
-            cache_dir,
-            metrics,
-            disk_io_limiter: None,
-            control_plane,
-            health_monitor_handle: Some(health_monitor_handle),
+            metrics_system: Some(metrics_system),
+            xearthlayer_runtime,
+            dds_client,
             tile_request_callback: None,
             load_monitor: None,
+            memory_cache_bridge: None,
+            cache_layer: None,
+            gc_scheduler_handle: None,
+            gc_scheduler_shutdown: None,
+        })
+    }
+
+    /// Build the service using cache bridges from the new cache service architecture.
+    ///
+    /// This method is similar to `build()` but uses `MemoryCacheBridge` and `DiskCacheBridge`
+    /// instead of the legacy cache system. The key difference is that:
+    /// - The runtime is created using `RuntimeBuilder::build_with_cache_service()`
+    /// - No external GC daemon is needed (DiskCacheBridge has internal GC)
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_bridges(
+        config: ServiceConfig,
+        provider_config: ProviderConfig,
+        logger: Arc<dyn Logger>,
+        runtime_handle: Handle,
+        owned_runtime: Option<Runtime>,
+        memory_bridge: Arc<MemoryCacheBridge>,
+        disk_bridge: Arc<DiskCacheBridge>,
+    ) -> Result<Self, ServiceError> {
+        // 1. Create providers
+        let ProviderComponents {
+            sync_provider: _,
+            async_provider,
+            name: provider_name,
+            max_zoom,
+        } = builder::create_providers(&provider_config, &runtime_handle)?;
+
+        // 2. Create texture encoder
+        let dds_encoder = builder::create_encoder(&config);
+
+        // 3. Create metrics system
+        let metrics_system = MetricsSystem::new(&runtime_handle);
+
+        // 4. Create XEarthLayer runtime with cache bridges
+        let (xearthlayer_runtime, dds_client) = if let Some(ref async_prov) = async_provider {
+            let runtime = RuntimeBuilder::new(
+                &provider_name,
+                config.texture().format(),
+                Arc::clone(&dds_encoder),
+            )
+            .with_async_provider(Arc::clone(async_prov))
+            .with_runtime_handle(runtime_handle.clone())
+            .with_metrics_client(metrics_system.client())
+            .build_with_cache_service(Arc::clone(&memory_bridge), Arc::clone(&disk_bridge));
+
+            let client = runtime.dds_client();
+            (Some(runtime), Some(client))
+        } else {
+            (None, None)
+        };
+
+        tracing::info!(
+            provider = %provider_name,
+            "XEarthLayerService created with cache bridges (internal GC enabled)"
+        );
+
+        Ok(Self {
+            config,
+            provider_name,
+            max_zoom,
+            logger,
+            _owned_runtime: owned_runtime,
+            runtime_handle,
+            dds_encoder,
+            // Legacy cache fields are None when using bridges
+            memory_cache: None,
+            memory_cache_adapter: None,
+            metrics_system: Some(metrics_system),
+            xearthlayer_runtime,
+            dds_client,
+            tile_request_callback: None,
+            load_monitor: None,
+            // Store bridge for prefetch system access
+            memory_cache_bridge: Some(memory_bridge),
+            cache_layer: None,
+            gc_scheduler_handle: None,
+            gc_scheduler_shutdown: None,
         })
     }
 
@@ -327,11 +599,6 @@ impl XEarthLayerService {
         &self.config
     }
 
-    /// Get the tile generator.
-    pub fn generator(&self) -> &Arc<dyn TileGenerator> {
-        &self.generator
-    }
-
     /// Get the runtime handle.
     pub fn runtime_handle(&self) -> &Handle {
         &self.runtime_handle
@@ -348,70 +615,61 @@ impl XEarthLayerService {
     ///
     /// The snapshot is safe to use for display without blocking the pipeline.
     ///
-    /// Note: This automatically updates cache size metrics before taking
-    /// the snapshot, ensuring accurate cache utilization data.
+    /// Get a telemetry snapshot for dashboard display.
+    ///
+    /// Note: Memory cache size is updated by tasks when they write to the cache,
+    /// providing accurate real-time data. This method only reads the current state.
     pub fn telemetry_snapshot(&self) -> TelemetrySnapshot {
-        // Update cache sizes from the cache system
-        self.update_cache_sizes();
-        self.metrics.snapshot()
-    }
-
-    /// Update cache size metrics from the cache systems.
-    ///
-    /// This is called automatically by `telemetry_snapshot()`, but can also
-    /// be called manually if you need to update metrics without taking a
-    /// snapshot.
-    fn update_cache_sizes(&self) {
-        // Get memory cache size from the shared async pipeline cache
-        if let Some(ref mem_cache) = self.memory_cache {
-            self.metrics
-                .set_memory_cache_size(mem_cache.size_bytes() as u64);
+        // Generate snapshot using TuiReporter
+        match &self.metrics_system {
+            Some(system) => {
+                let reporter = TuiReporter::new();
+                system.snapshot(&reporter)
+            }
+            None => TelemetrySnapshot::default(),
         }
-
-        // Note: Disk cache size (chunk-level) is tracked incrementally in the
-        // download stage via add_disk_cache_bytes(). The ParallelDiskCache stores
-        // chunks directly, and the download stage updates metrics as chunks are written.
     }
 
-    /// Get a reference to the pipeline metrics for direct access.
+    /// Get the metrics client for external metric emission.
     ///
-    /// This allows external code to record metrics or get raw metric values.
-    /// For display purposes, prefer `telemetry_snapshot()` which provides
-    /// computed rates and formatted values.
-    pub fn metrics(&self) -> &Arc<PipelineMetrics> {
-        &self.metrics
+    /// Returns None if the metrics system is not initialized.
+    /// This allows external components to emit metrics events.
+    pub fn metrics_client(&self) -> Option<crate::metrics::MetricsClient> {
+        self.metrics_system.as_ref().map(|s| s.client())
     }
 
-    /// Get a reference to the control plane health for dashboard display.
+    /// Check if the XEarthLayer runtime is running.
     ///
-    /// The control plane health provides real-time status including:
-    /// - Jobs in progress
-    /// - Jobs recovered (stall detection)
-    /// - Semaphore timeouts
-    /// - Health status (healthy, degraded, critical)
-    pub fn control_plane_health(&self) -> Arc<ControlPlaneHealth> {
-        Arc::clone(self.control_plane.health())
+    /// Returns true if the job executor daemon is running and accepting requests.
+    pub fn is_runtime_running(&self) -> bool {
+        self.xearthlayer_runtime
+            .as_ref()
+            .map(|r| r.is_running())
+            .unwrap_or(false)
     }
 
-    /// Get the maximum concurrent jobs configured for the control plane.
+    /// Get the maximum concurrent jobs configured for the executor.
     ///
     /// This is used by the dashboard to display capacity utilization.
+    /// Returns the configured value from the control plane settings.
     pub fn max_concurrent_jobs(&self) -> usize {
-        self.control_plane.max_concurrent_jobs()
+        self.config.control_plane().max_concurrent_jobs
+    }
+
+    /// Get the runtime health monitor for dashboard display.
+    ///
+    /// Returns `None` if the runtime is not yet started or health tracking
+    /// is not available. The TUI can handle this gracefully.
+    ///
+    /// TODO: Wire up to actual runtime health tracking.
+    pub fn runtime_health(&self) -> Option<SharedRuntimeHealth> {
+        // Not yet implemented - will be connected during TUI update
+        None
     }
 
     /// Get the DDS format used by this service.
     pub fn dds_format(&self) -> crate::dds::DdsFormat {
         self.config.texture().format()
-    }
-
-    /// Create a DDS handler for prefetch operations.
-    ///
-    /// This returns a handler that can be used by the prefetch scheduler
-    /// to submit background tile requests. The handler uses the same
-    /// pipeline as FUSE requests, enabling automatic request coalescing.
-    pub fn create_prefetch_handler(&self) -> DdsHandler {
-        self.create_dds_handler()
     }
 
     /// Get the raw memory cache for size queries.
@@ -425,8 +683,8 @@ impl XEarthLayerService {
 
     /// Get the shared memory cache adapter.
     ///
-    /// Returns the adapter that implements `pipeline::MemoryCache` trait.
-    /// This is the same adapter instance used by the pipeline, ensuring
+    /// Returns the adapter that implements `executor::MemoryCache` trait.
+    /// This is the same adapter instance used by the executor daemon, ensuring
     /// the prefetcher sees the same cached tiles.
     ///
     /// Returns `None` if caching is disabled.
@@ -434,17 +692,59 @@ impl XEarthLayerService {
         self.memory_cache_adapter.clone()
     }
 
-    /// Set the shared disk I/O concurrency limiter.
+    /// Get the memory cache bridge from the new cache service architecture.
     ///
-    /// When multiple packages are mounted, sharing a single limiter across
-    /// all disk cache instances prevents the combined I/O from overwhelming
-    /// the system. This should be called before mounting the filesystem.
+    /// Returns the `MemoryCacheBridge` that implements `executor::MemoryCache` trait.
+    /// This is available when the service is created with cache bridges
+    /// (via `with_cache_bridges()` constructor).
     ///
-    /// # Arguments
+    /// Returns `None` if using legacy cache system.
+    pub fn memory_cache_bridge(&self) -> Option<Arc<MemoryCacheBridge>> {
+        self.memory_cache_bridge.clone()
+    }
+
+    /// Shutdown the cache layer gracefully.
     ///
-    /// * `limiter` - The shared concurrency limiter for disk I/O operations
-    pub fn set_disk_io_limiter(&mut self, limiter: Arc<StorageConcurrencyLimiter>) {
-        self.disk_io_limiter = Some(limiter);
+    /// This stops the GC daemon and flushes pending operations.
+    /// Only has effect when created via `start()` constructor; otherwise no-op.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut service = XEarthLayerService::start(config, provider_config, logger, disk_profile).await?;
+    /// // ... use service ...
+    /// service.shutdown_cache().await;
+    /// ```
+    pub async fn shutdown_cache(&mut self) {
+        // Shutdown GC scheduler first (before shutting down cache)
+        if let Some(shutdown_token) = self.gc_scheduler_shutdown.take() {
+            tracing::info!("Shutting down GC scheduler");
+            shutdown_token.cancel();
+
+            // Wait for GC scheduler task to complete
+            if let Some(handle) = self.gc_scheduler_handle.take() {
+                match handle.await {
+                    Ok(()) => tracing::info!("GC scheduler shut down cleanly"),
+                    Err(e) => tracing::warn!(error = %e, "GC scheduler task failed"),
+                }
+            }
+        }
+
+        // Then shutdown cache layer
+        if let Some(cache_layer) = self.cache_layer.take() {
+            cache_layer.shutdown().await;
+        }
+    }
+
+    /// Get the DDS client for requesting tile generation.
+    ///
+    /// Returns the `DdsClient` that FUSE handlers use to request DDS generation
+    /// from the job executor daemon. This is the modern architecture that replaces
+    /// the legacy `DdsHandler` callback pattern.
+    ///
+    /// Returns `None` if the async provider is not configured (sync-only mode).
+    pub fn dds_client(&self) -> Option<Arc<dyn DdsClient>> {
+        self.dds_client.clone()
     }
 
     /// Set the tile request callback for FUSE-based position inference.
@@ -471,6 +771,18 @@ impl XEarthLayerService {
         self.load_monitor = Some(monitor);
     }
 
+    /// Set the owned Tokio runtime.
+    ///
+    /// When the service is created via `start()`, the caller's runtime is used
+    /// but the service doesn't own it. Call this method to transfer ownership
+    /// of a runtime to the service, ensuring it stays alive for the service's
+    /// lifetime.
+    ///
+    /// This is typically called by the `MountManager` after creating the service.
+    pub fn set_owned_runtime(&mut self, runtime: Runtime) {
+        self._owned_runtime = Some(runtime);
+    }
+
     /// Set the shared memory cache.
     ///
     /// When multiple packages are mounted, sharing a single memory cache across
@@ -493,116 +805,6 @@ impl XEarthLayerService {
         self.memory_cache_adapter = Some(adapter);
     }
 
-    /// Download a single tile for the given coordinates.
-    ///
-    /// Converts lat/lon coordinates to tile coordinates and generates
-    /// the DDS texture data.
-    ///
-    /// # Arguments
-    ///
-    /// * `lat` - Latitude in decimal degrees
-    /// * `lon` - Longitude in decimal degrees
-    /// * `zoom` - Zoom level (chunk resolution, like Ortho4XP: 12-19 for Bing, 12-22 for Google)
-    ///
-    /// # Returns
-    ///
-    /// DDS texture data as bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Coordinates are invalid
-    /// - Zoom level is out of range for the provider
-    /// - Tile generation fails
-    pub fn download_tile(&self, lat: f64, lon: f64, zoom: u8) -> Result<Vec<u8>, ServiceError> {
-        // Zoom level represents chunk resolution (like Ortho4XP).
-        // Each tile is composed of 16x16 chunks, so tile zoom = chunk zoom - 4.
-        // Valid chunk zoom range: 12 (min usable) to provider's max_zoom.
-        let min_chunk_zoom: u8 = 12;
-
-        if zoom < min_chunk_zoom || zoom > self.max_zoom {
-            return Err(ServiceError::InvalidZoom {
-                zoom,
-                min: min_chunk_zoom,
-                max: self.max_zoom,
-            });
-        }
-
-        // Convert chunk zoom to tile zoom for coordinate conversion
-        let tile_zoom = zoom - 4;
-
-        // Convert lat/lon to tile coordinates at the tile zoom level
-        let tile =
-            to_tile_coords(lat, lon, tile_zoom).map_err(|e| ServiceError::InvalidCoordinates {
-                lat,
-                lon,
-                reason: e.to_string(),
-            })?;
-
-        // Create tile request with tile row/col coordinates and tile zoom
-        // (TileGenerator will add 4 to get chunk zoom for downloads)
-        let request = TileRequest::new(tile.row, tile.col, tile_zoom);
-
-        // Generate tile
-        self.generator
-            .generate(&request)
-            .map_err(ServiceError::from)
-    }
-
-    /// Create the DDS handler for the async pipeline.
-    ///
-    /// This wires up all the pipeline components and returns a handler
-    /// that can be used with `Fuse3PassthroughFS`.
-    ///
-    /// Uses `DdsHandlerBuilder` for clean configuration of the pipeline.
-    fn create_dds_handler(&self) -> DdsHandler {
-        let pipeline = self.config.pipeline();
-        let mut builder = DdsHandlerBuilder::new(&self.provider_name)
-            .with_format(self.config.texture().format())
-            .with_mipmap_count(self.config.texture().mipmap_count())
-            .with_timeout(Duration::from_secs(pipeline.request_timeout_secs))
-            .with_max_retries(pipeline.max_retries)
-            .with_max_global_http_requests(pipeline.max_http_concurrent)
-            .with_max_cpu_concurrent(pipeline.max_cpu_concurrent)
-            .with_max_prefetch_in_flight(pipeline.max_prefetch_in_flight)
-            .with_retry_base_delay_ms(pipeline.retry_base_delay_ms)
-            .with_coalesce_channel_capacity(pipeline.coalesce_channel_capacity)
-            .with_metrics(Arc::clone(&self.metrics));
-
-        // Configure provider (prefer async, fallback to sync)
-        if let Some(ref async_prov) = self.async_provider {
-            builder = builder.with_async_provider(Arc::clone(async_prov));
-        } else {
-            builder = builder.with_sync_provider(Arc::clone(&self.provider));
-        }
-
-        // Configure disk cache if enabled
-        if let Some(ref dir) = self.cache_dir {
-            builder = builder.with_disk_cache(dir.clone());
-        }
-
-        // Configure shared disk I/O limiter if set (for global limiting across packages)
-        if let Some(ref limiter) = self.disk_io_limiter {
-            builder = builder.with_disk_io_limiter(Arc::clone(limiter));
-        }
-
-        // Configure memory cache adapter if enabled (use the shared instance)
-        // This ensures the prefetcher and pipeline share the same adapter
-        if let Some(ref adapter) = self.memory_cache_adapter {
-            builder = builder.with_memory_cache_adapter(Arc::clone(adapter));
-        }
-
-        // Configure control plane for job management and health monitoring
-        builder = builder.with_control_plane(Arc::clone(&self.control_plane));
-
-        // Configure load monitor for circuit breaker integration
-        if let Some(ref monitor) = self.load_monitor {
-            builder = builder.with_load_monitor(Arc::clone(monitor));
-        }
-
-        builder.build(self.runtime_handle.clone())
-    }
-
     /// Calculate the expected DDS file size based on encoder configuration.
     ///
     /// Returns the expected file size for a standard 4096×4096 DDS texture
@@ -612,8 +814,17 @@ impl XEarthLayerService {
     }
 
     /// Create a mount configuration for FUSE filesystem.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the DdsClient is not initialized (requires async provider).
     fn create_mount_config(&self) -> FuseMountConfig {
-        let mut config = FuseMountConfig::new(self.create_dds_handler(), self.expected_dds_size())
+        let client = self
+            .dds_client
+            .as_ref()
+            .expect("DdsClient not initialized - async provider required");
+
+        let mut config = FuseMountConfig::new(Arc::clone(client), self.expected_dds_size())
             .with_timeout(Duration::from_secs(
                 self.config.generation_timeout().unwrap_or(30),
             ))
@@ -772,5 +983,64 @@ mod tests {
         let err = ServiceError::RuntimeError("failed to spawn".to_string());
         assert!(err.to_string().contains("Runtime error"));
         assert!(err.to_string().contains("failed to spawn"));
+    }
+
+    /// Regression test: `start()` must be callable from within a `block_on()` context.
+    ///
+    /// This test verifies that `XEarthLayerService::start()` does NOT try to create
+    /// its own Tokio runtime, which would cause a panic with "Cannot start a runtime
+    /// from within a runtime".
+    ///
+    /// The fix ensures `start()` uses `Handle::current()` instead of creating a new runtime.
+    ///
+    /// Note: This test runs the service creation in a separate thread with its own
+    /// runtime to avoid Tokio's "Cannot drop a runtime in a context where blocking
+    /// is not allowed" error during test cleanup. The separate runtime properly
+    /// isolates the test from the `#[tokio::test]` runtime.
+    #[test]
+    fn test_start_callable_from_block_on() {
+        use crate::log::TracingLogger;
+        use crate::provider::ProviderConfig;
+        use std::thread;
+        use tempfile::tempdir;
+
+        // Run in a separate thread with its own runtime to avoid tokio test cleanup issues
+        let handle = thread::spawn(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let temp_dir = tempdir().unwrap();
+
+                let config = ServiceConfig::builder()
+                    .cache_directory(temp_dir.path().to_path_buf())
+                    .build();
+
+                // This would panic with "Cannot start a runtime from within a runtime"
+                // if start() tries to create its own runtime internally
+                let result = XEarthLayerService::start(
+                    config,
+                    ProviderConfig::bing(),
+                    Arc::new(TracingLogger),
+                )
+                .await;
+
+                // We expect this to succeed (or fail for other reasons like network)
+                // but NOT panic due to nested runtime
+                match result {
+                    Ok(mut service) => {
+                        // Clean shutdown
+                        service.shutdown_cache().await;
+                    }
+                    Err(e) => {
+                        // Network errors are fine, nested runtime panic is not
+                        tracing::debug!("Service creation failed (expected in CI): {}", e);
+                    }
+                }
+            });
+        });
+
+        // If the thread panics, it will be due to nested runtime, which is what we're testing
+        handle
+            .join()
+            .expect("test thread panicked - nested runtime issue");
     }
 }

@@ -7,7 +7,6 @@
 //! - [`cache`] - Cache management (clear, stats)
 //! - [`config`] - Configuration management (get, set, list, path)
 //! - [`diagnostics`] - System diagnostics for bug reports
-//! - [`download`] - Single tile download
 //! - [`init`] - Configuration initialization
 //! - [`packages`] - Package management (install, remove, update)
 //! - [`patches`] - Tile patches management (list, validate, path)
@@ -15,13 +14,11 @@
 //! - [`run`] - Main command (mount all packages)
 //! - [`scenery_index`] - SceneryIndex cache management (update, clear, status)
 //! - [`setup`] - Interactive setup wizard
-//! - [`start`] - Mount single scenery pack
 
 pub mod cache;
 pub mod common;
 pub mod config;
 pub mod diagnostics;
-pub mod download;
 pub mod init;
 pub mod packages;
 pub mod patches;
@@ -29,4 +26,3 @@ pub mod publish;
 pub mod run;
 pub mod scenery_index;
 pub mod setup;
-pub mod start;

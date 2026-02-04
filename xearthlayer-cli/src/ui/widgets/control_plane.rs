@@ -3,6 +3,10 @@
 //! Displays control plane status using a 4-column grid layout:
 //! STATUS | JOBS | CREATED/COMPLETED | PRESSURE
 //! Uses fixed-width columns to prevent layout dancing.
+//!
+//! Note: Deprecated in v0.3.0 - replaced by ScenerySystemWidget.
+
+#![allow(dead_code)] // Deprecated widget, kept for compatibility
 
 use ratatui::{
     buffer::Buffer,
@@ -11,7 +15,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
-use xearthlayer::pipeline::control_plane::{HealthSnapshot, HealthStatus};
+use xearthlayer::runtime::{HealthSnapshot, HealthStatus};
 
 use crate::ui::dashboard::JobRates;
 

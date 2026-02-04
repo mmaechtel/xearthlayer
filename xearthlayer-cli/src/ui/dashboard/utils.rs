@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::metrics::TelemetrySnapshot;
 
 /// Format duration as HH:MM:SS or MM:SS.
 pub fn format_duration(d: Duration) -> String {

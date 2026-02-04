@@ -34,6 +34,7 @@ mod download;
 mod file;
 mod keys;
 mod size;
+mod storage;
 mod texture;
 mod upgrade;
 pub use download::DownloadConfig;
@@ -41,6 +42,8 @@ pub use file::{
     config_directory,
     config_file_path,
     default_cpu_concurrent,
+    // Executor defaults
+    default_executor_cpu_concurrent,
     default_http_concurrent,
     default_max_concurrent_jobs,
     default_prefetch_in_flight,
@@ -50,11 +53,14 @@ pub use file::{
     ConfigFileError,
     ControlPlaneSettings,
     DownloadSettings,
+    ExecutorSettings,
     GenerationSettings,
     LoggingSettings,
     PackagesSettings,
+    PatchesSettings,
     PipelineSettings,
     PrefetchSettings,
+    PrewarmSettings,
     ProviderSettings,
     TextureSettings,
     XPlaneSettings,
@@ -73,6 +79,11 @@ pub use file::{
     DEFAULT_DISK_CACHE_SIZE,
     // Download defaults
     DEFAULT_DOWNLOAD_TIMEOUT_SECS,
+    DEFAULT_EXECUTOR_DISK_IO_CONCURRENT,
+    DEFAULT_EXECUTOR_JOB_CHANNEL_CAPACITY,
+    DEFAULT_EXECUTOR_MAX_CONCURRENT_TASKS,
+    DEFAULT_EXECUTOR_NETWORK_CONCURRENT,
+    DEFAULT_EXECUTOR_REQUEST_CHANNEL_CAPACITY,
     // Generation defaults
     DEFAULT_GENERATION_TIMEOUT_SECS,
     // Package manager defaults
@@ -84,17 +95,20 @@ pub use file::{
     DEFAULT_MIPMAP_COUNT,
     // DownloadConfig defaults
     DEFAULT_PARALLEL_DOWNLOADS,
-    DEFAULT_PREFETCH_CONE_ANGLE,
     DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
-    DEFAULT_PREFETCH_INNER_RADIUS_NM,
     DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
-    DEFAULT_PREFETCH_OUTER_RADIUS_NM,
     DEFAULT_PREFETCH_UDP_PORT,
     DEFAULT_REQUEST_TIMEOUT_SECS,
     DEFAULT_RETRY_BASE_DELAY_MS,
 };
 pub use keys::{ConfigKey, ConfigKeyError};
 pub use size::{format_size, parse_size, Size, SizeParseError};
+pub use storage::{
+    DiskIoProfile, DEFAULT_CPU_FALLBACK, HDD_BLOCKING_CEILING, HDD_BLOCKING_SCALING_FACTOR,
+    HDD_IO_CEILING, HDD_IO_SCALING_FACTOR, NVME_BLOCKING_CEILING, NVME_BLOCKING_SCALING_FACTOR,
+    NVME_IO_CEILING, NVME_IO_SCALING_FACTOR, SSD_BLOCKING_CEILING, SSD_BLOCKING_SCALING_FACTOR,
+    SSD_IO_CEILING, SSD_IO_SCALING_FACTOR,
+};
 pub use texture::TextureConfig;
 pub use upgrade::{
     analyze_config, upgrade_config, ConfigUpgradeAnalysis, UpgradeResult, DEPRECATED_KEYS,

@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::types::DiskCacheConfig;
+use crate::metrics::MetricsClient;
 
 /// Target percentage of limit after eviction (0.9 = 90%).
 /// This leaves 10% headroom for new writes before the next eviction cycle.
@@ -63,7 +64,29 @@ pub struct EvictionResult {
 ///
 /// * `config` - Disk cache configuration with size limits and check interval
 /// * `cancellation` - Token for graceful shutdown
-pub async fn run_eviction_daemon(config: DiskCacheConfig, cancellation: CancellationToken) {
+/// * `metrics` - Optional metrics client for reporting eviction stats
+///
+/// # Deprecation Notice
+///
+/// This external daemon is being replaced by the `CacheService` architecture
+/// where `DiskCacheProvider` owns its GC daemon internally. This ensures GC always
+/// runs regardless of how the application is started (TUI vs non-TUI modes).
+///
+/// **New Architecture:**
+/// ```ignore
+/// use xearthlayer::service::XEarthLayerService;
+///
+/// // XEarthLayerService::start() spawns internal GC daemon automatically
+/// let service = XEarthLayerService::start(config, provider_config, logger).await?;
+/// ```
+///
+/// See `xearthlayer::cache::providers::DiskCacheProvider` for the self-contained
+/// implementation with internal GC.
+pub async fn run_eviction_daemon(
+    config: DiskCacheConfig,
+    cancellation: CancellationToken,
+    metrics: Option<MetricsClient>,
+) {
     info!(
         cache_dir = %config.cache_dir.display(),
         max_size_bytes = config.max_size_bytes,
@@ -74,6 +97,9 @@ pub async fn run_eviction_daemon(config: DiskCacheConfig, cancellation: Cancella
     // Initial eviction check on startup
     if let Some(result) = evict_if_over_limit(&config).await {
         log_eviction_result(&result);
+        if let Some(ref m) = metrics {
+            m.disk_cache_evicted(result.bytes_freed);
+        }
     }
 
     // Periodic eviction loop
@@ -87,6 +113,9 @@ pub async fn run_eviction_daemon(config: DiskCacheConfig, cancellation: Cancella
             _ = tokio::time::sleep(interval) => {
                 if let Some(result) = evict_if_over_limit(&config).await {
                     log_eviction_result(&result);
+                    if let Some(ref m) = metrics {
+                        m.disk_cache_evicted(result.bytes_freed);
+                    }
                 }
             }
         }
@@ -99,12 +128,38 @@ pub async fn run_eviction_daemon(config: DiskCacheConfig, cancellation: Cancella
 async fn evict_if_over_limit(config: &DiskCacheConfig) -> Option<EvictionResult> {
     // Get current cache size (blocking I/O wrapped in spawn_blocking)
     let cache_dir = config.cache_dir.clone();
+    let cache_dir_display = cache_dir.display().to_string();
     let stats_result =
-        tokio::task::spawn_blocking(move || super::path::disk_cache_stats(&cache_dir))
-            .await
-            .ok()?;
+        tokio::task::spawn_blocking(move || super::path::disk_cache_stats(&cache_dir)).await;
 
-    let (file_count, current_size) = stats_result.ok()?;
+    let stats_result = match stats_result {
+        Ok(Ok(stats)) => stats,
+        Ok(Err(e)) => {
+            warn!(
+                cache_dir = %cache_dir_display,
+                error = %e,
+                "Failed to scan disk cache for eviction"
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Failed to spawn blocking task for disk cache scan"
+            );
+            return None;
+        }
+    };
+
+    let (file_count, current_size) = stats_result;
+
+    debug!(
+        cache_dir = %cache_dir_display,
+        file_count = file_count,
+        current_size_bytes = current_size,
+        limit_bytes = config.max_size_bytes,
+        "Disk cache eviction check"
+    );
 
     if current_size <= config.max_size_bytes as u64 {
         debug!(

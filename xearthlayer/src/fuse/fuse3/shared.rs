@@ -17,14 +17,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse3::raw::reply::FileAttr;
 use fuse3::FileType;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+use std::sync::Arc;
+
 use crate::coord::TileCoord;
-use crate::fuse::async_passthrough::{DdsHandler, DdsRequest};
+use crate::executor::DdsClient;
+use crate::fuse::coalesce::{CoalesceResult, CoalescedResult, RequestCoalescer};
 use crate::fuse::{get_default_placeholder, validate_dds_or_placeholder, DdsFilename};
-use crate::pipeline::JobId;
 
 /// Time-to-live for FUSE attribute caching.
 ///
@@ -265,13 +266,22 @@ pub fn chunk_to_tile_coords(coords: &DdsFilename) -> TileCoord {
 ///
 /// The default implementation handles:
 /// 1. Converting chunk coordinates to tile coordinates
-/// 2. Submitting requests to the DDS handler
+/// 2. Submitting requests to the DdsClient (new daemon architecture)
 /// 3. Timeout handling with cancellation
 /// 4. Response validation to prevent X-Plane crashes
+///
+/// # Migration
+///
+/// Implementations should provide `dds_client()`. The legacy `dds_handler()`
+/// method exists for backward compatibility but should not be used in new code.
 #[allow(async_fn_in_trait)] // Internal trait, Send bounds not needed
 pub trait DdsRequestor: FileAttrBuilder {
-    /// Get the DDS handler for submitting requests.
-    fn dds_handler(&self) -> &DdsHandler;
+    /// Get the DdsClient for submitting requests (new daemon architecture).
+    ///
+    /// This is the primary method for DDS generation. Implementations should
+    /// return their DdsClient here. The client sends requests to the job
+    /// executor daemon which handles tile generation asynchronously.
+    fn dds_client(&self) -> &Arc<dyn DdsClient>;
 
     /// Get the timeout duration for DDS generation.
     fn generation_timeout(&self) -> Duration;
@@ -282,13 +292,41 @@ pub trait DdsRequestor: FileAttrBuilder {
     /// Get the optional tile request callback.
     fn tile_request_callback(&self) -> Option<&crate::prefetch::TileRequestCallback>;
 
+    /// Get the optional request coalescer for deduplicating concurrent requests.
+    ///
+    /// When this returns `Some`, requests for the same tile are coalesced at the
+    /// FUSE layer. Only one request is sent to the executor; all others wait for
+    /// the same result. This prevents duplicate work during X-Plane's burst
+    /// loading patterns.
+    ///
+    /// When `None` (default), no coalescing is performed at the FUSE layer.
+    fn request_coalescer(&self) -> Option<&Arc<RequestCoalescer>> {
+        None
+    }
+
+    /// Get the optional metrics client for reporting FUSE-level metrics.
+    ///
+    /// When `Some`, coalesced requests and other FUSE-specific metrics are
+    /// reported to the metrics system.
+    fn metrics_client(&self) -> Option<&crate::metrics::MetricsClient> {
+        None
+    }
+
     /// Request DDS generation from the async pipeline.
     ///
     /// This method handles the full request lifecycle:
     /// 1. Converts coordinates and notifies tile callback
-    /// 2. Submits request to DDS handler
-    /// 3. Awaits response with timeout
-    /// 4. Validates DDS data before returning
+    /// 2. **Coalescing check**: If a coalescer is configured, duplicate requests
+    ///    for the same tile wait for the in-flight result instead of starting new work
+    /// 3. Submits request via DdsClient (daemon architecture)
+    /// 4. Awaits response with timeout
+    /// 5. Validates DDS data before returning
+    ///
+    /// # Request Coalescing
+    ///
+    /// If `request_coalescer()` returns `Some`, requests are deduplicated at the
+    /// FUSE layer. X-Plane commonly requests the same tile multiple times during
+    /// scene loading - coalescing ensures only one actual generation runs.
     ///
     /// # Arguments
     ///
@@ -298,7 +336,6 @@ pub trait DdsRequestor: FileAttrBuilder {
     ///
     /// Generated DDS data, or placeholder on error/timeout
     async fn request_dds_impl(&self, coords: &DdsFilename) -> Vec<u8> {
-        let job_id = JobId::new();
         let tile = chunk_to_tile_coords(coords);
         let context_label = self.context_label();
         let timeout = self.generation_timeout();
@@ -308,8 +345,9 @@ pub trait DdsRequestor: FileAttrBuilder {
             callback(tile);
         }
 
+        let using_coalescer = self.request_coalescer().is_some();
+
         debug!(
-            job_id = %job_id,
             chunk_row = coords.row,
             chunk_col = coords.col,
             chunk_zoom = coords.zoom,
@@ -317,28 +355,92 @@ pub trait DdsRequestor: FileAttrBuilder {
             tile_col = tile.col,
             tile_zoom = tile.zoom,
             context = context_label,
+            using_coalescer,
             "Requesting DDS generation"
         );
 
-        // Create oneshot channel for response
-        let (tx, rx) = oneshot::channel();
+        // Request coalescing: if enabled, check for in-flight requests
+        let data = if let Some(coalescer) = self.request_coalescer() {
+            let coalesce_result = coalescer.register(tile);
 
-        // Create cancellation token to abort pipeline on timeout
-        let cancellation_token = CancellationToken::new();
+            match coalesce_result {
+                CoalesceResult::Coalesced(mut rx) => {
+                    // Another request is in-flight - wait for its result
+                    debug!(
+                        tile = ?tile,
+                        context = context_label,
+                        "Request coalesced - waiting for in-flight result"
+                    );
 
-        let request = DdsRequest {
-            job_id,
-            tile,
-            result_tx: tx,
-            cancellation_token: cancellation_token.clone(),
-            is_prefetch: false,
+                    // Report coalesced request to metrics
+                    if let Some(metrics) = self.metrics_client() {
+                        metrics.job_coalesced();
+                    }
+
+                    match tokio::time::timeout(timeout, rx.recv()).await {
+                        Ok(Ok(result)) => {
+                            debug!(
+                                tile = ?tile,
+                                cache_hit = result.cache_hit,
+                                duration_ms = result.duration.as_millis(),
+                                context = context_label,
+                                "Coalesced request completed"
+                            );
+                            result.into_data()
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            // Broadcast channel error or timeout - return placeholder
+                            warn!(
+                                tile = ?tile,
+                                context = context_label,
+                                "Coalesced request failed - using placeholder"
+                            );
+                            get_default_placeholder()
+                        }
+                    }
+                }
+                CoalesceResult::NewRequest { tile, .. } => {
+                    // This is the first request - do the actual work
+                    let start = std::time::Instant::now();
+                    let data = self.do_request(tile, timeout, context_label).await;
+                    let duration = start.elapsed();
+
+                    // Complete the coalescer so waiting requests receive the result
+                    let result = CoalescedResult::new(data.clone(), false, duration);
+                    coalescer.complete(tile, result);
+
+                    data
+                }
+            }
+        } else {
+            // No coalescing - send request directly
+            self.do_request(tile, timeout, context_label).await
         };
 
-        // Submit request to the handler
-        (self.dds_handler())(request);
+        // Critical: Validate DDS before returning to X-Plane
+        // Invalid DDS data causes X-Plane to crash
+        let validation_context =
+            format!("{}({},{},{})", context_label, tile.row, tile.col, tile.zoom);
+        validate_dds_or_placeholder(data, &validation_context)
+    }
 
-        // Await response with timeout (fully async - no blocking!)
-        let data = match tokio::time::timeout(timeout, rx).await {
+    /// Perform the actual DDS request (without coalescing).
+    ///
+    /// Sends the request to the job executor daemon via DdsClient.
+    async fn do_request(
+        &self,
+        tile: TileCoord,
+        timeout: Duration,
+        context_label: &'static str,
+    ) -> Vec<u8> {
+        let client = self.dds_client();
+        let cancellation_token = CancellationToken::new();
+
+        // Submit request via DdsClient
+        let rx = client.request_dds(tile, cancellation_token.clone());
+
+        // Await response with timeout
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => {
                 debug!(
                     tile_row = tile.row,
@@ -352,33 +454,35 @@ pub trait DdsRequestor: FileAttrBuilder {
                 response.data
             }
             Ok(Err(_)) => {
-                // Channel closed - sender dropped
+                // Channel closed - daemon shutdown
                 error!(
-                    job_id = %job_id,
                     context = context_label,
-                    "DDS generation channel closed unexpectedly"
+                    "DDS daemon channel closed unexpectedly"
                 );
                 cancellation_token.cancel();
                 get_default_placeholder()
             }
             Err(_) => {
-                // Timeout - cancel the pipeline to release resources
-                warn!(
-                    job_id = %job_id,
+                // Timeout - cancel the request
+                // Enhanced logging for stall diagnosis
+                error!(
+                    tile_row = tile.row,
+                    tile_col = tile.col,
+                    tile_zoom = tile.zoom,
                     timeout_secs = timeout.as_secs(),
                     context = context_label,
-                    "DDS generation timed out - cancelling pipeline"
+                    "TIMEOUT: DDS generation exceeded {}s - possible executor stall. \
+                     Tile: ({},{},{}) Context: {}. Returning placeholder.",
+                    timeout.as_secs(),
+                    tile.row,
+                    tile.col,
+                    tile.zoom,
+                    context_label
                 );
                 cancellation_token.cancel();
                 get_default_placeholder()
             }
-        };
-
-        // Critical: Validate DDS before returning to X-Plane
-        // Invalid DDS data causes X-Plane to crash
-        let validation_context =
-            format!("{}({},{},{})", context_label, tile.row, tile.col, tile.zoom);
-        validate_dds_or_placeholder(data, &validation_context)
+        }
     }
 }
 

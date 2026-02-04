@@ -55,6 +55,8 @@ pub struct LoadingProgress {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(dead_code)] // Infrastructure for future TUI integration
 pub enum LoadingPhase {
+    /// Scanning disk cache for initial size.
+    ScanningDiskCache,
     /// Discovering packages and patches.
     #[default]
     Discovering,
@@ -75,6 +77,7 @@ impl LoadingPhase {
     /// Get a human-readable description of the phase.
     pub fn description(&self) -> &'static str {
         match self {
+            LoadingPhase::ScanningDiskCache => "Scanning disk cache...",
             LoadingPhase::Discovering => "Discovering packages...",
             LoadingPhase::CheckingCache => "Checking cache...",
             LoadingPhase::Scanning => "Scanning sources...",
@@ -114,11 +117,13 @@ impl LoadingProgress {
     }
 
     /// Update with a new package being scanned.
+    #[allow(dead_code)]
     pub fn scanning(&mut self, package_name: &str) {
         self.current_package = package_name.to_string();
     }
 
     /// Mark a package as completed.
+    #[allow(dead_code)]
     pub fn package_completed(&mut self, tiles_added: usize) {
         self.packages_scanned += 1;
         self.tiles_indexed += tiles_added;
@@ -165,7 +170,7 @@ impl LoadingProgress {
 }
 
 /// Progress information during cache pre-warming.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PrewarmProgress {
     /// ICAO code of the airport.
     pub icao: String,
@@ -175,21 +180,10 @@ pub struct PrewarmProgress {
     pub total_tiles: usize,
     /// Number of cache hits (tiles already cached).
     pub cache_hits: usize,
-    /// When prewarming started (reserved for future elapsed time display).
-    #[allow(dead_code)]
-    pub start_time: Instant,
-}
-
-impl Default for PrewarmProgress {
-    fn default() -> Self {
-        Self {
-            icao: String::new(),
-            tiles_loaded: 0,
-            total_tiles: 0,
-            cache_hits: 0,
-            start_time: Instant::now(),
-        }
-    }
+    /// When prewarming completed (None if still in progress).
+    pub completed_at: Option<Instant>,
+    /// Whether prewarm was cancelled (vs completed normally).
+    pub was_cancelled: bool,
 }
 
 impl PrewarmProgress {
@@ -200,22 +194,25 @@ impl PrewarmProgress {
             tiles_loaded: 0,
             total_tiles,
             cache_hits: 0,
-            start_time: Instant::now(),
+            completed_at: None,
+            was_cancelled: false,
         }
     }
 
-    /// Update progress with a tile loaded.
-    pub fn tile_loaded(&mut self, was_cache_hit: bool) {
-        self.tiles_loaded += 1;
-        if was_cache_hit {
-            self.cache_hits += 1;
-        }
+    /// Mark the prewarm as complete.
+    pub fn mark_complete(&mut self, was_cancelled: bool) {
+        self.completed_at = Some(Instant::now());
+        self.was_cancelled = was_cancelled;
     }
 
-    /// Get the elapsed time.
-    #[allow(dead_code)]
-    pub fn elapsed(&self) -> Duration {
-        self.start_time.elapsed()
+    /// Check if prewarm is complete (finished or cancelled).
+    pub fn is_complete(&self) -> bool {
+        self.completed_at.is_some()
+    }
+
+    /// Get time since completion, if complete.
+    pub fn time_since_completion(&self) -> Option<Duration> {
+        self.completed_at.map(|t| t.elapsed())
     }
 
     /// Get the completion percentage (0.0 to 1.0).
@@ -234,6 +231,8 @@ pub struct DashboardConfig {
     pub memory_cache_max: usize,
     /// Disk cache max size.
     pub disk_cache_max: usize,
+    /// Provider name for display (e.g., "Bing", "Google", "Go2").
+    pub provider_name: String,
 }
 
 impl Default for DashboardConfig {
@@ -241,11 +240,15 @@ impl Default for DashboardConfig {
         Self {
             memory_cache_max: 2 * 1024 * 1024 * 1024,
             disk_cache_max: 20 * 1024 * 1024 * 1024,
+            provider_name: "Unknown".to_string(),
         }
     }
 }
 
 /// Job rate metrics for the control plane display.
+///
+/// Note: Used by legacy ControlPlaneWidget, kept for compatibility.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct JobRates {
     /// Jobs submitted per second (instantaneous rate).

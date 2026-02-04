@@ -13,33 +13,39 @@
 //!
 //! let config = ServiceConfig::default();
 //! let service = XEarthLayerService::new(config, ProviderConfig::bing())?;
-//! let tile_data = service.download_tile(37.7749, -122.4194, 15)?;
+//!
+//! // Mount FUSE filesystem for a scenery package
+//! let handle = service.mount_package_async(package_path).await?;
 //! ```
 
+pub mod aircraft_position;
 pub mod airport;
 pub mod cache;
 pub mod config;
 pub mod coord;
 pub mod dds;
 pub mod diagnostics;
+pub mod executor;
 pub mod fuse;
+pub mod jobs;
 pub mod log;
 pub mod logging;
 pub mod manager;
-pub mod orchestrator;
+pub mod metrics;
 pub mod ortho_union;
 pub mod package;
 pub mod panic;
 pub mod patches;
-pub mod pipeline;
 pub mod prefetch;
 pub mod provider;
 pub mod publisher;
+pub mod runtime;
+pub mod scene_tracker;
 pub mod service;
 pub mod system;
-pub mod telemetry;
+pub mod tasks;
 pub mod texture;
-pub mod tile;
+pub mod time;
 pub mod xplane;
 
 /// Version of the XEarthLayer library and CLI.

@@ -2,9 +2,9 @@
 //!
 //! Loads and saves user configuration with sensible defaults.
 
+use super::DiskIoProfile;
 use crate::config::size::{format_size, parse_size};
 use crate::dds::DdsFormat;
-use crate::pipeline::DiskIoProfile;
 use ini::Ini;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -63,6 +63,8 @@ pub struct ConfigFile {
     pub prewarm: PrewarmSettings,
     /// Patches settings for custom Ortho4XP tile patches
     pub patches: PatchesSettings,
+    /// Executor daemon settings for job/task framework
+    pub executor: ExecutorSettings,
 }
 
 /// Provider configuration.
@@ -182,21 +184,20 @@ pub struct LoggingSettings {
 pub struct PrefetchSettings {
     /// Enable predictive tile prefetching based on X-Plane telemetry
     pub enabled: bool,
-    /// Prefetch strategy: "auto", "heading-aware", or "radial" (default: "auto")
+    /// Prefetch strategy: "auto" or "adaptive" (both use adaptive prefetch)
     ///
-    /// - "auto": Uses heading-aware with graceful degradation to radial
-    /// - "heading-aware": Direction-aware cone prefetching (requires telemetry)
-    /// - "radial": Simple radius-based prefetching (no heading data required)
+    /// The adaptive prefetch system automatically selects the best strategy
+    /// based on flight phase (ground/cruise) and system throughput.
     pub strategy: String,
+    /// Adaptive prefetch mode: "auto", "aggressive", "opportunistic", or "disabled"
+    ///
+    /// - "auto": Select mode based on calibration results (recommended)
+    /// - "aggressive": Position-based triggers (fast connections)
+    /// - "opportunistic": Circuit breaker triggers (moderate connections)
+    /// - "disabled": Disable prefetch
+    pub mode: String,
     /// UDP port for X-Plane telemetry (default: 49002 for ForeFlight protocol)
     pub udp_port: u16,
-    /// Prediction cone half-angle in degrees (default: 80)
-    pub cone_angle: f32,
-    /// Inner radius where prefetch zone starts (nautical miles).
-    /// This is just inside X-Plane's ~90nm loaded zone. Default: 85nm.
-    pub inner_radius_nm: f32,
-    /// Outer radius where prefetch zone ends (nautical miles). Default: 120nm.
-    pub outer_radius_nm: f32,
     /// Maximum tiles to submit per prefetch cycle. Default: 200.
     /// Lower values reduce bandwidth competition with on-demand requests.
     pub max_tiles_per_cycle: usize,
@@ -212,9 +213,21 @@ pub struct PrefetchSettings {
     /// Cooloff time (seconds) before trying to close the circuit.
     /// Default: 5 seconds.
     pub circuit_breaker_half_open_secs: u64,
-    /// Radial prefetcher tile radius (number of tiles in each direction).
-    /// Default: 120 tiles. Maximum: 255.
-    pub radial_radius: u8,
+
+    // Adaptive prefetch calibration settings
+    /// Minimum throughput for aggressive mode (tiles/sec).
+    /// If measured throughput exceeds this, aggressive (position-based) prefetch is enabled.
+    /// Default: 30.0
+    pub calibration_aggressive_threshold: f64,
+    /// Minimum throughput for opportunistic mode (tiles/sec).
+    /// If measured throughput is between this and aggressive_threshold,
+    /// opportunistic (circuit breaker) prefetch is enabled.
+    /// Below this threshold, prefetch is disabled.
+    /// Default: 10.0
+    pub calibration_opportunistic_threshold: f64,
+    /// How long to measure throughput during initial calibration (seconds).
+    /// Default: 60
+    pub calibration_sample_duration: u64,
 }
 
 /// Control plane configuration for job management and health monitoring.
@@ -239,9 +252,9 @@ pub struct ControlPlaneSettings {
 /// Prewarm configuration for cold-start cache warming.
 #[derive(Debug, Clone)]
 pub struct PrewarmSettings {
-    /// Radius in nautical miles around an airport to prewarm.
-    /// Default: 100nm
-    pub radius_nm: f32,
+    /// Grid size in DSF tiles (N = N×N grid) around an airport to prewarm.
+    /// Default: 8 (8×8 grid = 64 DSF tiles, ~480nm × 480nm at mid-latitudes)
+    pub grid_size: u32,
 }
 
 /// Patches configuration for custom Ortho4XP tile patches.
@@ -255,6 +268,38 @@ pub struct PatchesSettings {
     /// Each subdirectory should be a complete Ortho4XP tile with Earth nav data/, terrain/, etc.
     /// Default: ~/.xearthlayer/patches
     pub directory: Option<PathBuf>,
+}
+
+/// Executor daemon configuration for the job/task framework.
+#[derive(Debug, Clone)]
+pub struct ExecutorSettings {
+    /// Network resource pool capacity (concurrent HTTP connections).
+    /// Default: 128 (clamped to 64-256 range)
+    pub network_concurrent: usize,
+    /// CPU resource pool capacity (concurrent assemble/encode operations).
+    /// Default: num_cpus * 1.25, minimum num_cpus + 2
+    pub cpu_concurrent: usize,
+    /// Disk I/O resource pool capacity (concurrent disk operations).
+    /// Default: 64 for SSD, auto-detected from storage type
+    pub disk_io_concurrent: usize,
+    /// Maximum concurrent tasks the executor can run.
+    /// Default: 128
+    pub max_concurrent_tasks: usize,
+    /// Internal job channel capacity (job queue size).
+    /// Default: 256
+    pub job_channel_capacity: usize,
+    /// External request channel capacity (request queue from FUSE/prefetch).
+    /// Default: 1000
+    pub request_channel_capacity: usize,
+    /// HTTP request timeout in seconds for individual chunk downloads.
+    /// Default: 10 seconds
+    pub request_timeout_secs: u64,
+    /// Maximum retry attempts per failed chunk download.
+    /// Default: 3
+    pub max_retries: u32,
+    /// Base delay in milliseconds for exponential backoff between retries.
+    /// Default: 100ms
+    pub retry_base_delay_ms: u64,
 }
 
 impl Default for ConfigFile {
@@ -308,17 +353,17 @@ impl Default for ConfigFile {
             },
             prefetch: PrefetchSettings {
                 enabled: true,
-                strategy: "auto".to_string(),
+                strategy: "adaptive".to_string(),
+                mode: "auto".to_string(),
                 udp_port: DEFAULT_PREFETCH_UDP_PORT,
-                cone_angle: DEFAULT_PREFETCH_CONE_ANGLE,
-                inner_radius_nm: DEFAULT_PREFETCH_INNER_RADIUS_NM,
-                outer_radius_nm: DEFAULT_PREFETCH_OUTER_RADIUS_NM,
                 max_tiles_per_cycle: DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
                 cycle_interval_ms: DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
                 circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
                 circuit_breaker_open_ms: DEFAULT_CIRCUIT_BREAKER_OPEN_MS,
                 circuit_breaker_half_open_secs: DEFAULT_CIRCUIT_BREAKER_HALF_OPEN_SECS,
-                radial_radius: DEFAULT_PREFETCH_RADIAL_RADIUS,
+                calibration_aggressive_threshold: DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD,
+                calibration_opportunistic_threshold: DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD,
+                calibration_sample_duration: DEFAULT_CALIBRATION_SAMPLE_DURATION,
             },
             control_plane: ControlPlaneSettings {
                 max_concurrent_jobs: default_max_concurrent_jobs(),
@@ -326,10 +371,21 @@ impl Default for ConfigFile {
                 health_check_interval_secs: DEFAULT_CONTROL_PLANE_HEALTH_CHECK_INTERVAL_SECS,
                 semaphore_timeout_secs: DEFAULT_CONTROL_PLANE_SEMAPHORE_TIMEOUT_SECS,
             },
-            prewarm: PrewarmSettings { radius_nm: 100.0 },
+            prewarm: PrewarmSettings { grid_size: 4 },
             patches: PatchesSettings {
                 enabled: true,
                 directory: Some(config_dir.join("patches")),
+            },
+            executor: ExecutorSettings {
+                network_concurrent: DEFAULT_EXECUTOR_NETWORK_CONCURRENT,
+                cpu_concurrent: default_executor_cpu_concurrent(),
+                disk_io_concurrent: DEFAULT_EXECUTOR_DISK_IO_CONCURRENT,
+                max_concurrent_tasks: DEFAULT_EXECUTOR_MAX_CONCURRENT_TASKS,
+                job_channel_capacity: DEFAULT_EXECUTOR_JOB_CHANNEL_CAPACITY,
+                request_channel_capacity: DEFAULT_EXECUTOR_REQUEST_CHANNEL_CAPACITY,
+                request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+                max_retries: DEFAULT_MAX_RETRIES,
+                retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             },
         }
     }
@@ -443,18 +499,6 @@ pub const DEFAULT_GENERATION_TIMEOUT_SECS: u64 = 10;
 /// Default UDP port for X-Plane telemetry (ForeFlight protocol).
 pub const DEFAULT_PREFETCH_UDP_PORT: u16 = 49002;
 
-/// Default prediction cone half-angle in degrees.
-/// Wider angle (80°) covers more area ahead of aircraft.
-pub const DEFAULT_PREFETCH_CONE_ANGLE: f32 = 80.0;
-
-/// Default inner radius where prefetch zone starts (nautical miles).
-/// Just inside X-Plane's ~90nm loaded zone boundary.
-pub const DEFAULT_PREFETCH_INNER_RADIUS_NM: f32 = 85.0;
-
-/// Default outer radius where prefetch zone ends (nautical miles).
-/// Extended to 180nm for better look-ahead coverage.
-pub const DEFAULT_PREFETCH_OUTER_RADIUS_NM: f32 = 180.0;
-
 /// Default maximum tiles to submit per prefetch cycle.
 /// Increased to 200 for faster cache warming.
 pub const DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE: usize = 200;
@@ -475,9 +519,22 @@ pub const DEFAULT_CIRCUIT_BREAKER_OPEN_MS: u64 = 500;
 /// Set to 2 seconds for faster recovery after load drops.
 pub const DEFAULT_CIRCUIT_BREAKER_HALF_OPEN_SECS: u64 = 2;
 
-/// Default radial prefetcher tile radius.
-/// 120 tiles provides wide coverage around aircraft position.
-pub const DEFAULT_PREFETCH_RADIAL_RADIUS: u8 = 120;
+// =============================================================================
+// Adaptive prefetch calibration defaults
+// =============================================================================
+
+/// Default aggressive threshold: 30 tiles/sec.
+/// Systems exceeding this use position-based prefetch triggers.
+pub const DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD: f64 = 30.0;
+
+/// Default opportunistic threshold: 10 tiles/sec.
+/// Systems between this and aggressive use circuit breaker triggers.
+/// Below this, prefetch is disabled.
+pub const DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD: f64 = 10.0;
+
+/// Default calibration sample duration: 60 seconds.
+/// How long to measure throughput during initial calibration.
+pub const DEFAULT_CALIBRATION_SAMPLE_DURATION: u64 = 60;
 
 // =============================================================================
 // Control plane defaults
@@ -506,6 +563,32 @@ pub fn default_max_concurrent_jobs() -> usize {
 
 /// Default mipmap count (5 levels: 4096 → 2048 → 1024 → 512 → 256).
 pub const DEFAULT_MIPMAP_COUNT: usize = 5;
+
+// =============================================================================
+// Executor defaults
+// =============================================================================
+
+/// Default network resource pool capacity.
+/// Conservative default of 128 prevents provider rate limiting.
+pub const DEFAULT_EXECUTOR_NETWORK_CONCURRENT: usize = 128;
+
+/// Default disk I/O resource pool capacity for SSD storage.
+pub const DEFAULT_EXECUTOR_DISK_IO_CONCURRENT: usize = 64;
+
+/// Default maximum concurrent tasks in the executor.
+pub const DEFAULT_EXECUTOR_MAX_CONCURRENT_TASKS: usize = 128;
+
+/// Default job channel capacity (internal job queue).
+pub const DEFAULT_EXECUTOR_JOB_CHANNEL_CAPACITY: usize = 256;
+
+/// Default request channel capacity (external request queue).
+pub const DEFAULT_EXECUTOR_REQUEST_CHANNEL_CAPACITY: usize = 1000;
+
+/// Default executor CPU concurrent: num_cpus * 1.25, minimum num_cpus + 2
+pub fn default_executor_cpu_concurrent() -> usize {
+    let cpus = num_cpus();
+    ((cpus as f64 * 1.25).ceil() as usize).max(cpus + 2)
+}
 
 // =============================================================================
 // Package manager defaults
@@ -812,15 +895,41 @@ impl ConfigFile {
             if let Some(v) = section.get("strategy") {
                 let v = v.trim().to_lowercase();
                 match v.as_str() {
-                    "auto" | "heading-aware" | "radial" => {
-                        config.prefetch.strategy = v;
+                    "auto" | "adaptive" => {
+                        config.prefetch.strategy = "adaptive".to_string();
+                    }
+                    // Legacy strategies - map to adaptive with warning (deprecated in v0.4.0)
+                    "heading-aware" | "radial" | "tile-based" => {
+                        tracing::warn!(
+                            "Prefetch strategy '{}' is deprecated and will be removed in a future version. \
+                             Using 'adaptive' instead. Please update your config file.",
+                            v
+                        );
+                        config.prefetch.strategy = "adaptive".to_string();
                     }
                     _ => {
                         return Err(ConfigFileError::InvalidValue {
                             section: "prefetch".to_string(),
                             key: "strategy".to_string(),
                             value: v.to_string(),
-                            reason: "must be 'auto', 'heading-aware', or 'radial'".to_string(),
+                            reason: "must be 'auto' or 'adaptive'".to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(v) = section.get("mode") {
+                let v = v.trim().to_lowercase();
+                match v.as_str() {
+                    "auto" | "aggressive" | "opportunistic" | "disabled" => {
+                        config.prefetch.mode = v;
+                    }
+                    _ => {
+                        return Err(ConfigFileError::InvalidValue {
+                            section: "prefetch".to_string(),
+                            key: "mode".to_string(),
+                            value: v.to_string(),
+                            reason: "must be 'auto', 'aggressive', 'opportunistic', or 'disabled'"
+                                .to_string(),
                         });
                     }
                 }
@@ -834,37 +943,8 @@ impl ConfigFile {
                         reason: "must be a valid port number (1-65535)".to_string(),
                     })?;
             }
-            if let Some(v) = section.get("cone_angle") {
-                config.prefetch.cone_angle =
-                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "cone_angle".to_string(),
-                        value: v.to_string(),
-                        reason: "must be a positive number (degrees)".to_string(),
-                    })?;
-            }
-            // Deprecated: cone_distance_nm, radial_radius_nm, batch_size, max_in_flight, radial_radius
-            // These are ignored if present in config file (removed in v0.2.9/v0.2.11)
-            if let Some(v) = section.get("inner_radius_nm") {
-                config.prefetch.inner_radius_nm =
-                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "inner_radius_nm".to_string(),
-                        value: v.to_string(),
-                        reason: "must be a positive number (nautical miles)".to_string(),
-                    })?;
-            }
-            if let Some(v) = section.get("outer_radius_nm") {
-                config.prefetch.outer_radius_nm =
-                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "outer_radius_nm".to_string(),
-                        value: v.to_string(),
-                        reason: "must be a positive number (nautical miles)".to_string(),
-                    })?;
-            }
-            // Deprecated: radial_outer_radius_nm, cone_outer_radius_nm, cone_half_angle
-            // These are ignored if present in config file (removed in v0.2.9)
+            // Legacy settings cone_angle, inner_radius_nm, outer_radius_nm are deprecated (v0.4.0)
+            // They are ignored if present in config file (use 'xearthlayer config upgrade')
             if let Some(v) = section.get("max_tiles_per_cycle") {
                 config.prefetch.max_tiles_per_cycle =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
@@ -910,13 +990,34 @@ impl ConfigFile {
                         reason: "must be a positive integer (seconds)".to_string(),
                     })?;
             }
-            if let Some(v) = section.get("radial_radius") {
-                config.prefetch.radial_radius =
+            // Legacy settings radial_radius, tile_based_rows_ahead are deprecated (v0.4.0)
+            // They are ignored if present in config file (use 'xearthlayer config upgrade')
+            // Adaptive prefetch calibration settings
+            if let Some(v) = section.get("calibration_aggressive_threshold") {
+                config.prefetch.calibration_aggressive_threshold =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
                         section: "prefetch".to_string(),
-                        key: "radial_radius".to_string(),
+                        key: "calibration_aggressive_threshold".to_string(),
                         value: v.to_string(),
-                        reason: "must be a positive integer (tiles)".to_string(),
+                        reason: "must be a positive number (tiles/sec)".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("calibration_opportunistic_threshold") {
+                config.prefetch.calibration_opportunistic_threshold =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "prefetch".to_string(),
+                        key: "calibration_opportunistic_threshold".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive number (tiles/sec)".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("calibration_sample_duration") {
+                config.prefetch.calibration_sample_duration =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "prefetch".to_string(),
+                        key: "calibration_sample_duration".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer (seconds)".to_string(),
                     })?;
             }
         }
@@ -963,13 +1064,13 @@ impl ConfigFile {
 
         // [prewarm] section
         if let Some(section) = ini.section(Some("prewarm")) {
-            if let Some(v) = section.get("radius_nm") {
-                config.prewarm.radius_nm =
+            if let Some(v) = section.get("grid_size") {
+                config.prewarm.grid_size =
                     v.parse().map_err(|_| ConfigFileError::InvalidValue {
                         section: "prewarm".to_string(),
-                        key: "radius_nm".to_string(),
+                        key: "grid_size".to_string(),
                         value: v.to_string(),
-                        reason: "must be a positive number (nautical miles)".to_string(),
+                        reason: "must be a positive integer (DSF tiles per side)".to_string(),
                     })?;
             }
         }
@@ -986,6 +1087,92 @@ impl ConfigFile {
                 } else {
                     config.patches.directory = None;
                 }
+            }
+        }
+
+        // [executor] section
+        if let Some(section) = ini.section(Some("executor")) {
+            if let Some(v) = section.get("network_concurrent") {
+                let parsed: usize = v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "executor".to_string(),
+                    key: "network_concurrent".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a positive integer".to_string(),
+                })?;
+                // Clamp to valid range (same as HTTP concurrent)
+                config.executor.network_concurrent = clamp_http_concurrent(parsed);
+            }
+            if let Some(v) = section.get("cpu_concurrent") {
+                config.executor.cpu_concurrent =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "cpu_concurrent".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("disk_io_concurrent") {
+                config.executor.disk_io_concurrent =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "disk_io_concurrent".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("max_concurrent_tasks") {
+                config.executor.max_concurrent_tasks =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "max_concurrent_tasks".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("job_channel_capacity") {
+                config.executor.job_channel_capacity =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "job_channel_capacity".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("request_channel_capacity") {
+                config.executor.request_channel_capacity =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "request_channel_capacity".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("request_timeout_secs") {
+                config.executor.request_timeout_secs =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "request_timeout_secs".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer (seconds)".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("max_retries") {
+                config.executor.max_retries =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "max_retries".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer".to_string(),
+                    })?;
+            }
+            if let Some(v) = section.get("retry_base_delay_ms") {
+                config.executor.retry_base_delay_ms =
+                    v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                        section: "executor".to_string(),
+                        key: "retry_base_delay_ms".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a positive integer (milliseconds)".to_string(),
+                    })?;
             }
         }
 
@@ -1080,19 +1267,27 @@ threads = {}
 ; If exceeded, returns a magenta placeholder texture
 timeout = {}
 
-[pipeline]
-; Advanced concurrency and retry settings. Defaults are tuned for most systems.
-; Only modify if you understand the implications.
+[executor]
+; Job executor daemon settings for tile generation.
+; These control resource pools, concurrency, and retry behavior.
 
-; Maximum concurrent HTTP requests across all tiles (default: 128, limits: 64-256)
-; Values outside 64-256 are clamped. The ceiling prevents provider rate limiting.
-max_http_concurrent = {}
-; Maximum concurrent CPU-bound operations for tile assembly and encoding
-; (default: num_cpus * 1.25, minimum num_cpus + 2)
-max_cpu_concurrent = {}
-; Maximum concurrent prefetch jobs (default: max(num_cpus / 4, 2))
-; Lower values leave more resources for on-demand tile requests
-max_prefetch_in_flight = {}
+; Resource pool capacities (concurrent operations by type)
+; Network: HTTP connections for chunk downloads (default: 128, clamped to 64-256)
+network_concurrent = {}
+; CPU: Assemble + encode operations (default: num_cpus * 1.25)
+cpu_concurrent = {}
+; Disk I/O: Cache read/write operations (default: 64 for SSD)
+disk_io_concurrent = {}
+
+; Job processing limits
+; Maximum concurrent tasks the executor can run (default: 128)
+max_concurrent_tasks = {}
+; Internal job queue capacity (default: 256)
+job_channel_capacity = {}
+; External request queue from FUSE/prefetch (default: 1000)
+request_channel_capacity = {}
+
+; Download behavior
 ; HTTP request timeout in seconds for individual chunk downloads (default: 10)
 request_timeout_secs = {}
 ; Maximum retry attempts per failed chunk download (default: 3)
@@ -1100,9 +1295,6 @@ max_retries = {}
 ; Base delay in milliseconds for exponential backoff between retries (default: 100)
 ; Actual delay = base_delay * 2^attempt (e.g., 100ms, 200ms, 400ms, 800ms)
 retry_base_delay_ms = {}
-; Broadcast channel capacity for request coalescing (default: 16)
-; Rarely needs adjustment
-coalesce_channel_capacity = {}
 
 [xplane]
 ; X-Plane Custom Scenery directory for mounting scenery packs
@@ -1135,26 +1327,18 @@ file = {}
 enabled = {}
 ; Prefetch strategy (default: auto)
 ;   auto         - Uses heading-aware with graceful degradation to radial
-;   heading-aware - Direction-aware cone prefetching (requires telemetry)
-;   radial       - Simple radius-based prefetching (no heading data required)
+;   adaptive     - Self-calibrating DSF-aligned prefetch (recommended)
+; Legacy strategies (radial, heading-aware, tile-based) are deprecated
+; and will automatically use adaptive instead.
 strategy = {}
+; Adaptive prefetch mode (default: auto)
+;   auto         - Select mode based on throughput calibration (recommended)
+;   aggressive   - Position-based triggers (fast connections)
+;   opportunistic - Circuit breaker triggers (moderate connections)
+;   disabled     - Disable prefetch entirely
+mode = {}
 ; UDP port for telemetry (default: 49002 for ForeFlight protocol)
 udp_port = {}
-
-; Zone boundaries (nautical miles)
-; Inner radius where prefetch zone starts (default: 85)
-; Just inside X-Plane's ~90nm loaded zone boundary
-inner_radius_nm = {}
-; Outer radius where prefetch zone ends (default: 180)
-outer_radius_nm = {}
-
-; Radial prefetcher tile radius (default: 120)
-; Higher values prefetch more tiles around aircraft position
-radial_radius = {}
-
-; Heading-aware cone (prediction cone half-angle in degrees, default: 80)
-; Wider angles prefetch more tiles but use more bandwidth
-cone_angle = {}
 
 ; Cycle limits
 ; Maximum tiles to submit per prefetch cycle (default: 200)
@@ -1172,6 +1356,17 @@ circuit_breaker_threshold = {}
 circuit_breaker_open_ms = {}
 ; Cooloff time (seconds) before trying to close the circuit (default: 5)
 circuit_breaker_half_open_secs = {}
+
+; Adaptive prefetch calibration (for strategy = adaptive)
+; Minimum throughput for aggressive mode (tiles/sec, default: 30)
+; Systems exceeding this use position-based prefetch triggers
+calibration_aggressive_threshold = {}
+; Minimum throughput for opportunistic mode (tiles/sec, default: 10)
+; Systems between this and aggressive use circuit breaker triggers
+; Below this, prefetch is disabled
+calibration_opportunistic_threshold = {}
+; How long to measure throughput during initial calibration (seconds, default: 60)
+calibration_sample_duration = {}
 
 [control_plane]
 ; Advanced settings for job management and health monitoring.
@@ -1194,8 +1389,10 @@ semaphore_timeout_secs = {}
 ; Settings for cold-start cache pre-warming.
 ; Use with --airport ICAO to pre-load tiles around an airport before flight.
 
-; Radius in nautical miles around the airport to prewarm (default: 100)
-radius_nm = {}
+; Grid size in DSF tiles (N = N×N grid) around the airport to prewarm.
+; 8 = 8×8 grid = 64 DSF tiles, approximately 480nm × 480nm at mid-latitudes.
+; Each DSF tile is 1° × 1° (roughly 60nm × 60nm at equator).
+grid_size = {}
 
 [patches]
 ; Settings for custom Ortho4XP tile patches (airport addon mesh/elevation support).
@@ -1223,13 +1420,16 @@ directory = {}
             self.download.timeout,
             self.generation.threads,
             self.generation.timeout,
-            self.pipeline.max_http_concurrent,
-            self.pipeline.max_cpu_concurrent,
-            self.pipeline.max_prefetch_in_flight,
-            self.pipeline.request_timeout_secs,
-            self.pipeline.max_retries,
-            self.pipeline.retry_base_delay_ms,
-            self.pipeline.coalesce_channel_capacity,
+            // Executor settings
+            self.executor.network_concurrent,
+            self.executor.cpu_concurrent,
+            self.executor.disk_io_concurrent,
+            self.executor.max_concurrent_tasks,
+            self.executor.job_channel_capacity,
+            self.executor.request_channel_capacity,
+            self.executor.request_timeout_secs,
+            self.executor.max_retries,
+            self.executor.retry_base_delay_ms,
             scenery_dir,
             library_url,
             install_location,
@@ -1239,21 +1439,21 @@ directory = {}
             path_to_string(&self.logging.file),
             self.prefetch.enabled,
             self.prefetch.strategy,
+            self.prefetch.mode,
             self.prefetch.udp_port,
-            self.prefetch.inner_radius_nm,
-            self.prefetch.outer_radius_nm,
-            self.prefetch.radial_radius,
-            self.prefetch.cone_angle,
             self.prefetch.max_tiles_per_cycle,
             self.prefetch.cycle_interval_ms,
             self.prefetch.circuit_breaker_threshold,
             self.prefetch.circuit_breaker_open_ms,
             self.prefetch.circuit_breaker_half_open_secs,
+            self.prefetch.calibration_aggressive_threshold,
+            self.prefetch.calibration_opportunistic_threshold,
+            self.prefetch.calibration_sample_duration,
             self.control_plane.max_concurrent_jobs,
             self.control_plane.stall_threshold_secs,
             self.control_plane.health_check_interval_secs,
             self.control_plane.semaphore_timeout_secs,
-            self.prewarm.radius_nm,
+            self.prewarm.grid_size,
             self.patches.enabled,
             self.patches
                 .directory

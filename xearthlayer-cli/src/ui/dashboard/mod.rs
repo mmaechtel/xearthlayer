@@ -28,11 +28,12 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use xearthlayer::pipeline::control_plane::{ControlPlaneHealth, HealthSnapshot};
+use xearthlayer::aircraft_position::{AircraftPositionProvider, SharedAircraftPosition};
+use xearthlayer::metrics::TelemetrySnapshot;
 use xearthlayer::prefetch::SharedPrefetchStatus;
-use xearthlayer::telemetry::TelemetrySnapshot;
+use xearthlayer::runtime::SharedRuntimeHealth;
 
-use crate::ui::widgets::{CacheConfig, NetworkHistory, PipelineHistory};
+use crate::ui::widgets::{CacheConfig, DiskHistory, NetworkHistory, SceneryHistory};
 
 // Re-export public types from state module
 pub use state::{
@@ -48,7 +49,10 @@ pub struct Dashboard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     config: DashboardConfig,
     network_history: NetworkHistory,
-    pipeline_history: PipelineHistory,
+    /// History for scenery system sparklines (new v0.3.0 layout).
+    scenery_history: SceneryHistory,
+    /// History for disk I/O sparklines (new v0.3.0 layout).
+    disk_history: DiskHistory,
     shutdown: Arc<AtomicBool>,
     start_time: Instant,
     last_draw: Instant,
@@ -58,16 +62,16 @@ pub struct Dashboard {
     spinner_frame: usize,
     /// Optional prefetch status for display.
     prefetch_status: Option<Arc<SharedPrefetchStatus>>,
-    /// Optional control plane health for display.
-    control_plane_health: Option<Arc<ControlPlaneHealth>>,
+    /// Optional runtime health for display.
+    runtime_health: Option<SharedRuntimeHealth>,
     /// Maximum concurrent jobs for the control plane display.
     max_concurrent_jobs: usize,
-    /// Previous control plane snapshot for rate calculation.
-    prev_control_plane_snapshot: Option<HealthSnapshot>,
     /// Quit confirmation state - Some(timestamp) when awaiting confirmation.
     quit_confirmation: Option<Instant>,
     /// Background prewarm status (None = no prewarm, Some = prewarm in progress or complete).
     prewarm_status: Option<PrewarmProgress>,
+    /// Aircraft position provider from APT module.
+    aircraft_position: Option<SharedAircraftPosition>,
 }
 
 impl Dashboard {
@@ -94,18 +98,19 @@ impl Dashboard {
             terminal,
             config,
             network_history: NetworkHistory::new(60), // 60 samples for sparkline
-            pipeline_history: PipelineHistory::new(12), // 12 samples for pipeline sparkline
+            scenery_history: SceneryHistory::new(12), // 12 samples for scenery sparklines
+            disk_history: DiskHistory::new(12),       // 12 samples for disk I/O sparkline
             shutdown,
             start_time: now,
             last_draw: now,
             state,
             spinner_frame: 0,
             prefetch_status: None,
-            control_plane_health: None,
+            runtime_health: None,
             max_concurrent_jobs: 0,
-            prev_control_plane_snapshot: None,
             quit_confirmation: None,
             prewarm_status: None,
+            aircraft_position: None,
         })
     }
 
@@ -115,18 +120,25 @@ impl Dashboard {
         self
     }
 
-    /// Set the control plane health source for display.
-    pub fn with_control_plane(
+    /// Set the runtime health source for display.
+    pub fn with_runtime_health(
         mut self,
-        health: Arc<ControlPlaneHealth>,
+        health: SharedRuntimeHealth,
         max_concurrent_jobs: usize,
     ) -> Self {
-        self.control_plane_health = Some(health);
+        self.runtime_health = Some(health);
         self.max_concurrent_jobs = max_concurrent_jobs;
         self
     }
 
+    /// Set the aircraft position provider from APT module.
+    pub fn with_aircraft_position(mut self, apt: SharedAircraftPosition) -> Self {
+        self.aircraft_position = Some(apt);
+        self
+    }
+
     /// Get the current state.
+    #[allow(dead_code)]
     pub fn state(&self) -> &DashboardState {
         &self.state
     }
@@ -164,6 +176,7 @@ impl Dashboard {
     }
 
     /// Check if in Loading state.
+    #[allow(dead_code)]
     pub fn is_loading(&self) -> bool {
         matches!(self.state, DashboardState::Loading(_))
     }
@@ -193,8 +206,15 @@ impl Dashboard {
         self.network_history
             .update(snapshot.bytes_downloaded, sample_interval);
 
-        // Update pipeline history for sparklines
-        self.pipeline_history.update(snapshot, sample_interval);
+        // Update scenery history for new layout sparklines
+        self.scenery_history.update(snapshot, sample_interval);
+
+        // Update disk history (both reads and writes for I/O tracking)
+        self.disk_history.update(
+            snapshot.disk_bytes_written,
+            snapshot.disk_bytes_read,
+            sample_interval,
+        );
 
         let uptime = self.start_time.elapsed();
         let cache_config = CacheConfig {
@@ -210,40 +230,13 @@ impl Dashboard {
             .unwrap_or_default();
 
         // Get control plane health if available
-        let control_plane_snapshot = self.control_plane_health.as_ref().map(|h| h.snapshot());
+        let control_plane_snapshot = self.runtime_health.as_ref().map(|h| h.snapshot());
         let max_concurrent_jobs = self.max_concurrent_jobs;
 
-        // Calculate job rates from control plane snapshots
-        let job_rates = if let Some(ref current) = control_plane_snapshot {
-            if let Some(ref prev) = self.prev_control_plane_snapshot {
-                if sample_interval > 0.0 {
-                    let submitted_delta = current
-                        .total_jobs_submitted
-                        .saturating_sub(prev.total_jobs_submitted);
-                    let completed_delta = current
-                        .total_jobs_completed
-                        .saturating_sub(prev.total_jobs_completed);
-                    let submitted_rate = submitted_delta as f64 / sample_interval;
-                    let completed_rate = completed_delta as f64 / sample_interval;
-                    Some(JobRates {
-                        submitted_per_sec: submitted_rate,
-                        completed_per_sec: completed_rate,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Store current snapshot for next rate calculation
-        self.prev_control_plane_snapshot = control_plane_snapshot.clone();
-
-        // Clone pipeline history for use in closure
-        let pipeline_history = self.pipeline_history.clone();
+        // Clone histories for use in closure
+        let scenery_history = self.scenery_history.clone();
+        let disk_history = self.disk_history.clone();
+        let provider_name = self.config.provider_name.clone();
 
         // Calculate confirmation remaining time for display
         let confirmation_remaining = self.confirmation_remaining();
@@ -257,18 +250,27 @@ impl Dashboard {
             None
         };
 
+        // Get aircraft position status from APT module
+        let aircraft_position_status = self
+            .aircraft_position
+            .as_ref()
+            .map(|apt| apt.status())
+            .unwrap_or_default();
+
         self.terminal.draw(|frame| {
             render::render_ui(
                 frame,
                 snapshot,
                 &self.network_history,
-                &pipeline_history,
+                &scenery_history,
+                &disk_history,
+                &provider_name,
                 uptime,
                 &cache_config,
                 &prefetch_snapshot,
+                &aircraft_position_status,
                 control_plane_snapshot.as_ref(),
                 max_concurrent_jobs,
-                job_rates.as_ref(),
                 confirmation_remaining,
                 prewarm_status.as_ref(),
                 prewarm_spinner,
@@ -287,7 +289,9 @@ impl Dashboard {
     /// - Timeout: auto-cancels after 5 seconds
     pub fn poll_event(&mut self) -> io::Result<Option<DashboardEvent>> {
         // Check shutdown flag first (e.g., Ctrl+C signal)
-        if self.shutdown.load(Ordering::SeqCst) {
+        let shutdown_flag = self.shutdown.load(Ordering::SeqCst);
+        if shutdown_flag {
+            tracing::info!("poll_event: shutdown flag is TRUE, returning Quit");
             return Ok(Some(DashboardEvent::Quit));
         }
 

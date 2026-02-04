@@ -123,8 +123,12 @@ impl SpawnedMountHandle {
     /// Unmount the filesystem synchronously using fusermount.
     ///
     /// This is a fallback for when we can't use async unmount.
+    /// Uses escalating unmount strategy:
+    /// 1. Signal task to unmount gracefully
+    /// 2. Try `fusermount -u` (graceful unmount)
+    /// 3. If busy, try `fusermount -uz` (lazy unmount)
     pub fn unmount_sync(&mut self) {
-        let mountpoint_str = self.mountpoint.to_string_lossy();
+        let mountpoint_str = self.mountpoint.to_string_lossy().to_string();
 
         // Signal the task to stop (if channel still exists)
         if let Some(tx) = self.unmount_tx.take() {
@@ -147,46 +151,93 @@ impl SpawnedMountHandle {
             return;
         }
 
-        debug!(mountpoint = %mountpoint_str, "Still mounted, unmounting via fusermount");
+        debug!(mountpoint = %mountpoint_str, "Still mounted, attempting graceful unmount");
 
-        // Try fusermount3 first (fuse3), then fall back to fusermount (fuse2)
+        // Step 1: Try graceful unmount with fusermount3 or fusermount
+        let graceful_success = Self::try_unmount(&mountpoint_str, false);
+
+        if graceful_success {
+            debug!(mountpoint = %mountpoint_str, "Graceful unmount succeeded");
+        } else {
+            // Step 2: Check if still mounted - if so, escalate to lazy unmount
+            // Give a bit more time for any in-flight operations
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            if Self::is_mounted(&self.mountpoint) {
+                warn!(
+                    mountpoint = %mountpoint_str,
+                    "Graceful unmount failed (likely busy), escalating to lazy unmount"
+                );
+
+                // Step 3: Lazy unmount - detaches immediately, cleans up asynchronously
+                // This handles the case where X-Plane crashed with open file handles
+                let lazy_success = Self::try_unmount(&mountpoint_str, true);
+
+                if lazy_success {
+                    debug!(mountpoint = %mountpoint_str, "Lazy unmount succeeded");
+                } else {
+                    warn!(
+                        mountpoint = %mountpoint_str,
+                        "Lazy unmount also failed - mount may require manual cleanup"
+                    );
+                }
+            }
+        }
+
+        // Cancel the task regardless of unmount success
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+
+    /// Attempt to unmount using fusermount3 or fusermount.
+    ///
+    /// # Arguments
+    /// * `mountpoint` - Path to unmount
+    /// * `lazy` - If true, use lazy unmount (-uz) which detaches immediately
+    ///
+    /// # Returns
+    /// `true` if unmount command succeeded, `false` otherwise
+    fn try_unmount(mountpoint: &str, lazy: bool) -> bool {
+        let args: &[&str] = if lazy {
+            &["-uz", mountpoint]
+        } else {
+            &["-u", mountpoint]
+        };
+
         let result = Command::new("fusermount3")
-            .args(["-u", &mountpoint_str])
+            .args(args)
             .output()
-            .or_else(|_| {
-                Command::new("fusermount")
-                    .args(["-u", &mountpoint_str])
-                    .output()
-            });
+            .or_else(|_| Command::new("fusermount").args(args).output());
 
         match result {
             Ok(output) => {
                 if output.status.success() {
-                    debug!(mountpoint = %mountpoint_str, "fusermount succeeded");
+                    true
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Don't warn for expected "not found" or "not mounted" errors
-                    if !stderr.contains("not found") && !stderr.contains("not mounted") {
-                        warn!(
-                            mountpoint = %mountpoint_str,
+                    // "not found" or "not mounted" means already unmounted - that's success
+                    if stderr.contains("not found") || stderr.contains("not mounted") {
+                        true
+                    } else {
+                        debug!(
+                            mountpoint = %mountpoint,
+                            lazy = lazy,
                             stderr = %stderr,
-                            "fusermount -u failed"
+                            "fusermount failed"
                         );
+                        false
                     }
                 }
             }
             Err(e) => {
                 warn!(
-                    mountpoint = %mountpoint_str,
+                    mountpoint = %mountpoint,
                     error = %e,
                     "Failed to run fusermount"
                 );
+                false
             }
-        }
-
-        // Cancel the task
-        if let Some(task) = self.task.take() {
-            task.abort();
         }
     }
 

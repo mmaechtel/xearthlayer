@@ -1,7 +1,6 @@
 //! Service error types.
 
 use crate::provider::ProviderError;
-use crate::tile::TileGeneratorError;
 use std::fmt;
 use std::io;
 
@@ -12,8 +11,6 @@ pub enum ServiceError {
     HttpClientError(String),
     /// Failed to create provider
     ProviderError(ProviderError),
-    /// Failed to generate tile
-    TileGeneratorError(TileGeneratorError),
     /// Failed to create cache
     CacheError(String),
     /// Invalid configuration
@@ -28,6 +25,8 @@ pub enum ServiceError {
     RuntimeError(String),
     /// FUSE mount or operation error
     FuseError(String),
+    /// Service not started or required component not available
+    NotStarted(String),
 }
 
 impl fmt::Display for ServiceError {
@@ -35,7 +34,6 @@ impl fmt::Display for ServiceError {
         match self {
             Self::HttpClientError(msg) => write!(f, "HTTP client error: {}", msg),
             Self::ProviderError(e) => write!(f, "Provider error: {}", e),
-            Self::TileGeneratorError(e) => write!(f, "Tile generator error: {}", e),
             Self::CacheError(msg) => write!(f, "Cache error: {}", msg),
             Self::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
             Self::IoError(e) => write!(f, "I/O error: {}", e),
@@ -51,6 +49,7 @@ impl fmt::Display for ServiceError {
             }
             Self::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             Self::FuseError(msg) => write!(f, "FUSE error: {}", msg),
+            Self::NotStarted(msg) => write!(f, "Service not started: {}", msg),
         }
     }
 }
@@ -59,7 +58,6 @@ impl std::error::Error for ServiceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ProviderError(e) => Some(e),
-            Self::TileGeneratorError(e) => Some(e),
             Self::IoError(e) => Some(e),
             _ => None,
         }
@@ -69,12 +67,6 @@ impl std::error::Error for ServiceError {
 impl From<ProviderError> for ServiceError {
     fn from(e: ProviderError) -> Self {
         Self::ProviderError(e)
-    }
-}
-
-impl From<TileGeneratorError> for ServiceError {
-    fn from(e: TileGeneratorError) -> Self {
-        Self::TileGeneratorError(e)
     }
 }
 

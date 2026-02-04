@@ -3,6 +3,9 @@
 use crate::config::{ControlPlaneSettings, DownloadConfig, PipelineSettings, TextureConfig};
 use std::path::PathBuf;
 
+/// Default disk GC interval in seconds (60 seconds).
+pub const DEFAULT_GC_INTERVAL_SECS: u64 = 60;
+
 /// Configuration for the XEarthLayer service.
 ///
 /// Combines all configuration needed to create and run the service.
@@ -38,6 +41,8 @@ pub struct ServiceConfig {
     cache_memory_size: Option<usize>,
     /// Disk cache size in bytes
     cache_disk_size: Option<usize>,
+    /// Disk GC interval in seconds
+    disk_gc_interval_secs: u64,
     /// Number of threads for parallel tile generation
     generation_threads: Option<usize>,
     /// Timeout in seconds for generating a single tile
@@ -91,6 +96,11 @@ impl ServiceConfig {
         self.cache_disk_size
     }
 
+    /// Get the disk GC interval in seconds.
+    pub fn disk_gc_interval_secs(&self) -> u64 {
+        self.disk_gc_interval_secs
+    }
+
     /// Get the number of threads for parallel tile generation, if configured.
     pub fn generation_threads(&self) -> Option<usize> {
         self.generation_threads
@@ -135,6 +145,7 @@ impl Default for ServiceConfig {
             cache_directory: None,
             cache_memory_size: None,
             cache_disk_size: None,
+            disk_gc_interval_secs: DEFAULT_GC_INTERVAL_SECS,
             generation_threads: None,
             generation_timeout: None,
             quiet_mode: false,
@@ -169,6 +180,7 @@ pub struct ServiceConfigBuilder {
     cache_directory: Option<PathBuf>,
     cache_memory_size: Option<usize>,
     cache_disk_size: Option<usize>,
+    disk_gc_interval_secs: Option<u64>,
     generation_threads: Option<usize>,
     generation_timeout: Option<u64>,
     quiet_mode: Option<bool>,
@@ -216,6 +228,12 @@ impl ServiceConfigBuilder {
     /// Set the disk cache size in bytes.
     pub fn cache_disk_size(mut self, size: usize) -> Self {
         self.cache_disk_size = Some(size);
+        self
+    }
+
+    /// Set the disk GC interval in seconds.
+    pub fn disk_gc_interval(mut self, secs: u64) -> Self {
+        self.disk_gc_interval_secs = Some(secs);
         self
     }
 
@@ -267,6 +285,9 @@ impl ServiceConfigBuilder {
             cache_directory: self.cache_directory,
             cache_memory_size: self.cache_memory_size,
             cache_disk_size: self.cache_disk_size,
+            disk_gc_interval_secs: self
+                .disk_gc_interval_secs
+                .unwrap_or(DEFAULT_GC_INTERVAL_SECS),
             generation_threads: self.generation_threads,
             generation_timeout: self.generation_timeout,
             quiet_mode: self.quiet_mode.unwrap_or(false),

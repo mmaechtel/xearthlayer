@@ -20,20 +20,30 @@
 //! // Create service
 //! let service = XEarthLayerService::new(config, ProviderConfig::bing())?;
 //!
-//! // Download a tile
-//! let data = service.download_tile(37.7749, -122.4194, 15)?;
+//! // Mount FUSE filesystem
+//! let handle = service.mount_package_async(package_path).await?;
 //! ```
 
 mod builder;
+mod cache_layer;
 mod config;
-mod dds_handler;
 mod error;
 mod facade;
 mod fuse_mount;
-mod network_logger;
+mod orchestrator;
+mod orchestrator_config;
+mod prewarm;
+mod runtime_builder;
 
+pub use cache_layer::CacheLayer;
 pub use config::{ServiceConfig, ServiceConfigBuilder};
-pub use dds_handler::{DdsHandlerBuilder, MonitoringConfig, PipelineLimits, RetryConfig};
 pub use error::ServiceError;
 pub use facade::XEarthLayerService;
 pub use fuse_mount::{FuseMountConfig, FuseMountService};
+pub use orchestrator::{
+    MountResult, PrefetchHandle, ServiceOrchestrator, StartupProgress, StartupResult,
+};
+pub use orchestrator_config::{OrchestratorConfig, PrefetchConfig, PrewarmConfig};
+pub use prewarm::{PrewarmOrchestrator, PrewarmStartError, PrewarmStartResult};
+// PrewarmHandle and PrewarmStatus are exported from prefetch module
+pub use runtime_builder::RuntimeBuilder;

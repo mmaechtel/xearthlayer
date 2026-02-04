@@ -65,6 +65,7 @@ pub fn render_loading_ui(frame: &mut Frame, progress: &LoadingProgress, spinner:
 
     // Spinner + phase/current package line
     let status_text = match progress.phase {
+        LoadingPhase::ScanningDiskCache => "Scanning disk cache...".to_string(),
         LoadingPhase::Discovering => "Discovering packages...".to_string(),
         LoadingPhase::CheckingCache => "Checking cache...".to_string(),
         LoadingPhase::Scanning => {

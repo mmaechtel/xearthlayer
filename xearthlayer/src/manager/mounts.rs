@@ -9,77 +9,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
+use crate::cache::adapters::{DiskCacheBridge, MemoryCacheBridge};
 use crate::cache::MemoryCache;
-use crate::fuse::fuse3::{Fuse3OrthoUnionFS, Fuse3UnionFS};
+use crate::config::DiskIoProfile;
+use crate::executor::{MemoryCacheAdapter, StorageConcurrencyLimiter};
+use crate::fuse::fuse3::Fuse3OrthoUnionFS;
 use crate::fuse::SpawnedMountHandle;
-use crate::ortho_union::{default_cache_path, IndexBuildProgressCallback, OrthoUnionIndexBuilder};
+use crate::metrics::TelemetrySnapshot;
+use crate::ortho_union::{
+    default_cache_path, IndexBuildProgressCallback, OrthoUnionIndex, OrthoUnionIndexBuilder,
+};
 use crate::package::{
     InstalledPackage as PackageInstalledPackage, Package as PackageCore, PackageType,
 };
 use crate::panic as panic_handler;
-use crate::patches::{PatchDiscovery, PatchUnionIndex};
-use crate::pipeline::adapters::MemoryCacheAdapter;
-use crate::pipeline::{DiskIoProfile, StorageConcurrencyLimiter};
-use crate::prefetch::{FuseLoadMonitor, SharedFuseLoadMonitor, TileRequestCallback};
+use crate::patches::PatchDiscovery;
+use crate::prefetch::tile_based::DdsAccessEvent;
+use crate::prefetch::{FuseLoadMonitor, TileRequestCallback};
+use crate::scene_tracker::{DefaultSceneTracker, FuseAccessEvent};
 use crate::service::{ServiceConfig, ServiceError, XEarthLayerService};
-use crate::telemetry::TelemetrySnapshot;
 
 use super::local::{InstalledPackage, LocalPackageStore};
 use super::{ManagerError, ManagerResult};
-
-/// Result of mounting a single package.
-///
-/// # Deprecated
-///
-/// This struct is deprecated in favor of [`ConsolidatedOrthoMountResult`].
-/// Use [`MountManager::mount_consolidated_ortho`] instead of per-package mounting.
-#[deprecated(
-    since = "0.2.11",
-    note = "Use ConsolidatedOrthoMountResult with mount_consolidated_ortho() instead"
-)]
-#[derive(Debug)]
-pub struct MountResult {
-    /// The region code.
-    pub region: String,
-    /// The package type.
-    pub package_type: PackageType,
-    /// Path where the package is mounted.
-    pub mountpoint: PathBuf,
-    /// Whether the mount succeeded.
-    pub success: bool,
-    /// Error message if mount failed.
-    pub error: Option<String>,
-}
-
-#[allow(deprecated)]
-impl MountResult {
-    /// Create a successful mount result.
-    pub fn success(region: String, package_type: PackageType, mountpoint: PathBuf) -> Self {
-        Self {
-            region,
-            package_type,
-            mountpoint,
-            success: true,
-            error: None,
-        }
-    }
-
-    /// Create a failed mount result.
-    pub fn failure(
-        region: String,
-        package_type: PackageType,
-        mountpoint: PathBuf,
-        error: String,
-    ) -> Self {
-        Self {
-            region,
-            package_type,
-            mountpoint,
-            success: false,
-            error: Some(error),
-        }
-    }
-}
 
 /// Information about an active mount.
 #[derive(Debug)]
@@ -90,76 +43,6 @@ pub struct ActiveMount {
     pub package_type: PackageType,
     /// Path where the package is mounted.
     pub mountpoint: PathBuf,
-}
-
-/// Result of mounting the patches union filesystem.
-///
-/// # Deprecated
-///
-/// This struct is deprecated in favor of [`ConsolidatedOrthoMountResult`].
-/// Patches are now included in the consolidated ortho mount.
-#[deprecated(
-    since = "0.2.11",
-    note = "Patches are now included in mount_consolidated_ortho()"
-)]
-#[derive(Debug)]
-pub struct PatchesMountResult {
-    /// Path where patches are mounted.
-    pub mountpoint: PathBuf,
-    /// Number of valid patches discovered.
-    pub patch_count: usize,
-    /// Total files in the union index.
-    pub file_count: usize,
-    /// Names of patches included (in priority order).
-    pub patch_names: Vec<String>,
-    /// Whether the mount succeeded.
-    pub success: bool,
-    /// Error message if mount failed.
-    pub error: Option<String>,
-}
-
-#[allow(deprecated)]
-impl PatchesMountResult {
-    /// Create a successful patches mount result.
-    pub fn success(
-        mountpoint: PathBuf,
-        patch_count: usize,
-        file_count: usize,
-        patch_names: Vec<String>,
-    ) -> Self {
-        Self {
-            mountpoint,
-            patch_count,
-            file_count,
-            patch_names,
-            success: true,
-            error: None,
-        }
-    }
-
-    /// Create a failed patches mount result.
-    pub fn failure(mountpoint: PathBuf, error: String) -> Self {
-        Self {
-            mountpoint,
-            patch_count: 0,
-            file_count: 0,
-            patch_names: Vec::new(),
-            success: false,
-            error: Some(error),
-        }
-    }
-
-    /// Create a result indicating no patches were found (not an error).
-    pub fn no_patches() -> Self {
-        Self {
-            mountpoint: PathBuf::new(),
-            patch_count: 0,
-            file_count: 0,
-            patch_names: Vec::new(),
-            success: true,
-            error: None,
-        }
-    }
 }
 
 /// Result of mounting the consolidated ortho union filesystem.
@@ -248,9 +131,16 @@ pub struct MountManager {
     /// Target scenery directory for mounts (e.g., X-Plane Custom Scenery).
     /// If None, packages are mounted in-place.
     scenery_path: Option<PathBuf>,
-    /// Shared load monitor for tracking FUSE-originated requests.
-    /// Used by the circuit breaker to detect when X-Plane is loading scenery.
-    load_monitor: Arc<SharedFuseLoadMonitor>,
+    /// Scene Tracker for empirical X-Plane request tracking.
+    ///
+    /// This serves as the single source of truth for:
+    /// - Load monitoring (implements [`FuseLoadMonitor`] for circuit breaker)
+    /// - Tile tracking (which DDS tiles X-Plane has requested)
+    /// - Burst detection (identifying loading patterns)
+    ///
+    /// FUSE calls `scene_tracker.record_request()` for immediate visibility
+    /// and sends detailed events via channel for async processing.
+    scene_tracker: Arc<DefaultSceneTracker>,
     /// Active patches union filesystem mount (if any).
     patches_session: Option<SpawnedMountHandle>,
     /// Patches mount info for display.
@@ -263,6 +153,17 @@ pub struct MountManager {
     consolidated_mount: Option<ActiveMount>,
     /// Service for consolidated ortho (owns the runtime for DDS generation).
     consolidated_service: Option<XEarthLayerService>,
+    /// DDS access event receiver for tile-based prefetching.
+    /// This is populated when mounting consolidated ortho and can be retrieved
+    /// by the prefetcher via `take_dds_access_receiver()`.
+    dds_access_rx: Option<mpsc::UnboundedReceiver<DdsAccessEvent>>,
+    /// Scene Tracker event receiver for empirical scenery tracking.
+    /// This is populated when mounting consolidated ortho and can be retrieved
+    /// by the Scene Tracker via `take_scene_tracker_receiver()`.
+    scene_tracker_rx: Option<mpsc::UnboundedReceiver<FuseAccessEvent>>,
+    /// OrthoUnionIndex for DSF tile enumeration (tile-based prefetch).
+    /// This is populated when mounting consolidated ortho.
+    ortho_union_index: Option<Arc<OrthoUnionIndex>>,
 }
 
 impl MountManager {
@@ -273,13 +174,16 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: None,
-            load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
+            scene_tracker: Arc::new(DefaultSceneTracker::with_defaults()),
             patches_session: None,
             patches_mount: None,
             patches_service: None,
             consolidated_session: None,
             consolidated_mount: None,
             consolidated_service: None,
+            dds_access_rx: None,
+            scene_tracker_rx: None,
+            ortho_union_index: None,
         }
     }
 
@@ -293,13 +197,16 @@ impl MountManager {
             services: HashMap::new(),
             mounts: HashMap::new(),
             scenery_path: Some(scenery_path.to_path_buf()),
-            load_monitor: Arc::new(SharedFuseLoadMonitor::new()),
+            scene_tracker: Arc::new(DefaultSceneTracker::with_defaults()),
             patches_session: None,
             patches_mount: None,
             patches_service: None,
             consolidated_session: None,
             consolidated_mount: None,
             consolidated_service: None,
+            dds_access_rx: None,
+            scene_tracker_rx: None,
+            ortho_union_index: None,
         }
     }
 
@@ -321,334 +228,6 @@ impl MountManager {
     /// Check if a specific region is mounted.
     pub fn is_mounted(&self, region: &str) -> bool {
         self.sessions.contains_key(&region.to_lowercase())
-    }
-
-    /// Mount all installed ortho packages.
-    ///
-    /// Discovers installed ortho packages from the store and mounts each one.
-    /// Returns results for all packages, including failures.
-    ///
-    /// # Deprecated
-    ///
-    /// Use [`Self::mount_consolidated_ortho`] instead for a single unified mount
-    /// that combines patches and all ortho packages.
-    ///
-    /// # Arguments
-    ///
-    /// * `store` - The local package store to discover packages from
-    /// * `service_factory` - Factory function to create service instances
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut manager = MountManager::new();
-    /// let store = LocalPackageStore::new("/path/to/scenery");
-    /// let results = manager.mount_all(&store, |pkg| {
-    ///     create_service_for_package(pkg, &service_config, &provider_config)
-    /// })?;
-    /// ```
-    #[deprecated(since = "0.2.11", note = "Use mount_consolidated_ortho() instead")]
-    #[allow(deprecated)]
-    pub fn mount_all<F>(
-        &mut self,
-        store: &LocalPackageStore,
-        service_factory: F,
-    ) -> ManagerResult<Vec<MountResult>>
-    where
-        F: Fn(&InstalledPackage) -> Result<XEarthLayerService, ServiceError>,
-    {
-        let packages = store.list()?;
-        let mut results = Vec::new();
-
-        for package in packages {
-            // Only mount ortho packages
-            if package.package_type() != PackageType::Ortho {
-                continue;
-            }
-
-            let result = self.mount_package(&package, &service_factory);
-            results.push(result);
-        }
-
-        Ok(results)
-    }
-
-    /// Mount a single package.
-    ///
-    /// # Deprecated
-    ///
-    /// Use [`Self::mount_consolidated_ortho`] instead for a single unified mount.
-    ///
-    /// # Arguments
-    ///
-    /// * `package` - The installed package to mount
-    /// * `service_factory` - Factory function to create a service instance
-    #[deprecated(since = "0.2.11", note = "Use mount_consolidated_ortho() instead")]
-    #[allow(deprecated)]
-    pub fn mount_package<F>(
-        &mut self,
-        package: &InstalledPackage,
-        service_factory: F,
-    ) -> MountResult
-    where
-        F: Fn(&InstalledPackage) -> Result<XEarthLayerService, ServiceError>,
-    {
-        let region = package.region().to_lowercase();
-
-        // Determine mountpoint: scenery_path/package_name or in-place
-        let mountpoint = if let Some(ref scenery_path) = self.scenery_path {
-            // Mount to Custom Scenery directory with package name
-            let folder_name = package
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("zzXEL_{}_ortho", region));
-            scenery_path.join(&folder_name)
-        } else {
-            // Mount in-place
-            package.path.clone()
-        };
-
-        // Skip if already mounted
-        if self.is_mounted(&region) {
-            return MountResult::failure(
-                region,
-                package.package_type(),
-                mountpoint,
-                "Already mounted".to_string(),
-            );
-        }
-
-        // Only mount ortho packages
-        if package.package_type() != PackageType::Ortho {
-            return MountResult::failure(
-                region,
-                package.package_type(),
-                mountpoint,
-                "Only ortho packages can be mounted".to_string(),
-            );
-        }
-
-        // Create service for this package
-        let service = match service_factory(package) {
-            Ok(s) => s,
-            Err(e) => {
-                return MountResult::failure(
-                    region,
-                    package.package_type(),
-                    mountpoint,
-                    format!("Failed to create service: {}", e),
-                );
-            }
-        };
-
-        // Create mountpoint directory if it doesn't exist
-        if !mountpoint.exists() {
-            if let Err(e) = std::fs::create_dir_all(&mountpoint) {
-                return MountResult::failure(
-                    region,
-                    package.package_type(),
-                    mountpoint,
-                    format!("Failed to create mountpoint directory: {}", e),
-                );
-            }
-        }
-
-        // Mount the filesystem using fuse3 async multi-threaded backend
-        // Source = the installed package directory
-        // Mountpoint = either in Custom Scenery (if scenery_path set) or in-place
-        let source_str = package.path.to_string_lossy();
-        let mountpoint_str = mountpoint.to_string_lossy();
-
-        // Use fuse3 async multi-threaded backend with spawned task
-        // This uses SpawnedMountHandle which can be safely dropped from any context
-        let mount_result = service
-            .runtime_handle()
-            .block_on(service.serve_passthrough_fuse3_spawned(&source_str, &mountpoint_str));
-
-        match mount_result {
-            Ok(session) => {
-                let mount_info = ActiveMount {
-                    region: region.clone(),
-                    package_type: package.package_type(),
-                    mountpoint: mountpoint.clone(),
-                };
-
-                // Register mount point with panic handler for cleanup on crash
-                panic_handler::register_mount(mountpoint.clone());
-
-                self.sessions.insert(region.clone(), session);
-                // CRITICAL: Store the service to keep its Tokio runtime alive.
-                // The DdsHandler closure holds a Handle to the runtime owned by the service.
-                // If the service is dropped, the runtime shuts down and spawned tasks abort.
-                self.services.insert(region.clone(), service);
-                self.mounts.insert(region.clone(), mount_info);
-
-                MountResult::success(region, package.package_type(), mountpoint)
-            }
-            Err(e) => MountResult::failure(
-                region,
-                package.package_type(),
-                mountpoint,
-                format!("Failed to mount: {}", e),
-            ),
-        }
-    }
-
-    /// Mount the patches union filesystem.
-    ///
-    /// Discovers valid patches from the patches directory, builds a union index,
-    /// and mounts it as a single scenery folder at `zzyXEL_patches_ortho`.
-    ///
-    /// # Deprecated
-    ///
-    /// Use [`Self::mount_consolidated_ortho`] instead. Patches are now integrated
-    /// into the single consolidated mount at `zzXEL_ortho`.
-    ///
-    /// # Arguments
-    ///
-    /// * `patches_dir` - Directory containing patch folders
-    /// * `service_builder` - Builder for creating the DDS service
-    ///
-    /// # Returns
-    ///
-    /// `PatchesMountResult` indicating success/failure and patch counts.
-    #[deprecated(
-        since = "0.2.11",
-        note = "Patches are now part of mount_consolidated_ortho()"
-    )]
-    #[allow(deprecated)]
-    pub fn mount_patches(
-        &mut self,
-        patches_dir: &std::path::Path,
-        service_builder: &ServiceBuilder,
-    ) -> PatchesMountResult {
-        // Skip if already mounted
-        if self.patches_session.is_some() {
-            return PatchesMountResult::failure(
-                PathBuf::new(),
-                "Patches already mounted".to_string(),
-            );
-        }
-
-        // Discover valid patches
-        let discovery = PatchDiscovery::new(patches_dir);
-        if !discovery.exists() {
-            tracing::debug!(
-                patches_dir = %patches_dir.display(),
-                "Patches directory does not exist, skipping"
-            );
-            return PatchesMountResult::no_patches();
-        }
-
-        let patches = match discovery.find_valid_patches() {
-            Ok(p) => p,
-            Err(e) => {
-                return PatchesMountResult::failure(
-                    PathBuf::new(),
-                    format!("Failed to discover patches: {}", e),
-                );
-            }
-        };
-
-        if patches.is_empty() {
-            tracing::debug!(
-                patches_dir = %patches_dir.display(),
-                "No valid patches found, skipping"
-            );
-            return PatchesMountResult::no_patches();
-        }
-
-        // Build union index
-        let index = match PatchUnionIndex::build(&patches) {
-            Ok(i) => i,
-            Err(e) => {
-                return PatchesMountResult::failure(
-                    PathBuf::new(),
-                    format!("Failed to build patch index: {}", e),
-                );
-            }
-        };
-
-        let patch_count = index.patch_names().len();
-        let file_count = index.file_count();
-        let patch_names = index.patch_names().to_vec();
-
-        tracing::info!(
-            patches = patch_count,
-            files = file_count,
-            "Built patches union index"
-        );
-
-        // Determine mountpoint
-        let mountpoint = if let Some(ref scenery_path) = self.scenery_path {
-            scenery_path.join("zzyXEL_patches_ortho")
-        } else {
-            return PatchesMountResult::failure(
-                PathBuf::new(),
-                "No scenery path configured for patches mount".to_string(),
-            );
-        };
-
-        // Create mountpoint directory
-        if !mountpoint.exists() {
-            if let Err(e) = std::fs::create_dir_all(&mountpoint) {
-                return PatchesMountResult::failure(
-                    mountpoint,
-                    format!("Failed to create mountpoint directory: {}", e),
-                );
-            }
-        }
-
-        // Create the patches service (owns the Tokio runtime for DDS generation)
-        let service = match service_builder.build_patches_service() {
-            Ok(s) => s,
-            Err(e) => {
-                return PatchesMountResult::failure(
-                    mountpoint,
-                    format!("Failed to create patches service: {}", e),
-                );
-            }
-        };
-
-        // Get DdsHandler and runtime from the service
-        let dds_handler = service.create_prefetch_handler();
-        let expected_dds_size = service.expected_dds_size();
-        let runtime_handle = service.runtime_handle().clone();
-
-        // Create and mount the union filesystem
-        let union_fs = Fuse3UnionFS::new(index, dds_handler, expected_dds_size);
-        let mountpoint_str = mountpoint.to_string_lossy();
-
-        let mount_result = runtime_handle.block_on(union_fs.mount_spawned(&mountpoint_str));
-
-        match mount_result {
-            Ok(session) => {
-                let mount_info = ActiveMount {
-                    region: "patches".to_string(),
-                    package_type: PackageType::Ortho, // Patches are ortho-like
-                    mountpoint: mountpoint.clone(),
-                };
-
-                // Register mount point with panic handler for cleanup on crash
-                panic_handler::register_mount(mountpoint.clone());
-
-                // Store service to keep runtime alive, then store session and mount info
-                self.patches_service = Some(service);
-                self.patches_session = Some(session);
-                self.patches_mount = Some(mount_info);
-
-                tracing::info!(
-                    mountpoint = %mountpoint.display(),
-                    patches = patch_count,
-                    files = file_count,
-                    "Patches union filesystem mounted"
-                );
-
-                PatchesMountResult::success(mountpoint, patch_count, file_count, patch_names)
-            }
-            Err(e) => PatchesMountResult::failure(mountpoint, format!("Failed to mount: {}", e)),
-        }
     }
 
     /// Check if patches are mounted.
@@ -814,23 +393,84 @@ impl MountManager {
         }
 
         // Create the service (owns the Tokio runtime for DDS generation)
-        let service = match service_builder.build_patches_service() {
-            Ok(s) => s,
-            Err(e) => {
+        // Use async service creation if no cache bridges are set (new architecture)
+        // Fall back to sync creation when cache bridges are pre-configured (legacy)
+        let service = if service_builder.cache_bridges().is_some() {
+            // Legacy path: use pre-configured cache bridges from CacheLayer
+            match service_builder.build_patches_service() {
+                Ok(s) => s,
+                Err(e) => {
+                    return ConsolidatedOrthoMountResult::failure(
+                        mountpoint,
+                        format!("Failed to create service: {}", e),
+                    );
+                }
+            }
+        } else {
+            // New path: use XEarthLayerService::start() with integrated cache and metrics
+            // We need a runtime to run the async service creation
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    return ConsolidatedOrthoMountResult::failure(
+                        mountpoint,
+                        format!("Failed to create runtime for service: {}", e),
+                    );
+                }
+            };
+
+            let mut service = match runtime.block_on(service_builder.build_service_async()) {
+                Ok(s) => s,
+                Err(e) => {
+                    return ConsolidatedOrthoMountResult::failure(
+                        mountpoint,
+                        format!("Failed to create service: {}", e),
+                    );
+                }
+            };
+
+            // Transfer runtime ownership to the service so it stays alive
+            service.set_owned_runtime(runtime);
+            service
+        };
+
+        // Get DdsClient and runtime from the service
+        let dds_client = match service.dds_client() {
+            Some(client) => client,
+            None => {
                 return ConsolidatedOrthoMountResult::failure(
                     mountpoint,
-                    format!("Failed to create service: {}", e),
+                    "DDS client not available (async provider required)".to_string(),
                 );
             }
         };
-
-        // Get DdsHandler and runtime from the service
-        let dds_handler = service.create_prefetch_handler();
         let expected_dds_size = service.expected_dds_size();
         let runtime_handle = service.runtime_handle().clone();
 
-        // Create and mount the consolidated ortho union filesystem
-        let ortho_union_fs = Fuse3OrthoUnionFS::new(index, dds_handler, expected_dds_size);
+        // Create DDS access event channel for tile-based prefetching
+        // The sender goes to FUSE, the receiver goes to the prefetcher
+        let (dds_access_tx, dds_access_rx) = mpsc::unbounded_channel();
+
+        // Create Scene Tracker event channel for empirical scenery tracking
+        // The sender goes to FUSE, the receiver goes to the Scene Tracker
+        let (scene_tracker_tx, scene_tracker_rx) = mpsc::unbounded_channel();
+
+        // Store the index for tile-based prefetcher to use later
+        let index_for_prefetch = Arc::new(index);
+
+        // Create and mount the consolidated ortho union filesystem with DDS access channel
+        // Also wire the load monitor so circuit breaker can detect X-Plane load
+        // Wire Scene Tracker channel for empirical scenery tracking
+        let mut ortho_union_fs =
+            Fuse3OrthoUnionFS::new((*index_for_prefetch).clone(), dds_client, expected_dds_size)
+                .with_dds_access_channel(dds_access_tx)
+                .with_scene_tracker_channel(scene_tracker_tx)
+                .with_load_monitor(Arc::clone(&self.scene_tracker) as Arc<dyn FuseLoadMonitor>);
+
+        // Wire metrics client for coalesced request tracking
+        if let Some(metrics) = service.metrics_client() {
+            ortho_union_fs = ortho_union_fs.with_metrics(metrics);
+        }
         let mountpoint_str = mountpoint.to_string_lossy();
 
         let mount_result = runtime_handle.block_on(ortho_union_fs.mount_spawned(&mountpoint_str));
@@ -850,6 +490,13 @@ impl MountManager {
                 self.consolidated_service = Some(service);
                 self.consolidated_session = Some(session);
                 self.consolidated_mount = Some(mount_info);
+
+                // Store DDS access channel receiver and index for tile-based prefetcher
+                self.dds_access_rx = Some(dds_access_rx);
+                self.ortho_union_index = Some(index_for_prefetch);
+
+                // Store Scene Tracker receiver for empirical scenery tracking
+                self.scene_tracker_rx = Some(scene_tracker_rx);
 
                 tracing::info!(
                     mountpoint = %mountpoint.display(),
@@ -880,6 +527,48 @@ impl MountManager {
     /// Get consolidated ortho mount info (if mounted).
     pub fn consolidated_mount(&self) -> Option<&ActiveMount> {
         self.consolidated_mount.as_ref()
+    }
+
+    /// Take the DDS access event receiver for tile-based prefetching.
+    ///
+    /// This method takes ownership of the receiver, so it can only be called once.
+    /// The receiver is created when mounting consolidated ortho and is used by
+    /// the tile-based prefetcher to receive DDS access events from FUSE.
+    ///
+    /// # Returns
+    ///
+    /// `Some(receiver)` if consolidated ortho is mounted and receiver hasn't been taken,
+    /// `None` otherwise.
+    pub fn take_dds_access_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<DdsAccessEvent>> {
+        self.dds_access_rx.take()
+    }
+
+    /// Take the Scene Tracker event receiver for empirical scenery tracking.
+    ///
+    /// This method takes ownership of the receiver, so it can only be called once.
+    /// The receiver is created when mounting consolidated ortho and is used by
+    /// the Scene Tracker to receive FUSE access events.
+    ///
+    /// # Returns
+    ///
+    /// `Some(receiver)` if consolidated ortho is mounted and receiver hasn't been taken,
+    /// `None` otherwise.
+    pub fn take_scene_tracker_receiver(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<FuseAccessEvent>> {
+        self.scene_tracker_rx.take()
+    }
+
+    /// Get a reference to the OrthoUnionIndex for tile-based prefetching.
+    ///
+    /// The index is created when mounting consolidated ortho and can be used
+    /// by the tile-based prefetcher to enumerate DDS files within DSF tiles.
+    ///
+    /// # Returns
+    ///
+    /// `Some(index)` if consolidated ortho is mounted, `None` otherwise.
+    pub fn ortho_union_index(&self) -> Option<Arc<OrthoUnionIndex>> {
+        self.ortho_union_index.clone()
     }
 
     /// Unmount a specific region.
@@ -947,6 +636,13 @@ impl MountManager {
         self.consolidated_session = None;
         self.consolidated_mount = None;
         self.consolidated_service = None;
+
+        // Clear tile-based prefetch resources
+        self.dds_access_rx = None;
+        self.ortho_union_index = None;
+
+        // Clear Scene Tracker resources
+        self.scene_tracker_rx = None;
     }
 
     /// Get a reference to a mounted service (if any).
@@ -961,18 +657,35 @@ impl MountManager {
             .or_else(|| self.services.values().next())
     }
 
-    /// Get the shared load monitor for circuit breaker integration.
+    /// Get the load monitor for circuit breaker integration.
     ///
-    /// All DDS handlers across all services call `record_request()` on this
-    /// monitor when they receive a FUSE-originated request (not prefetch).
-    /// Used by the circuit breaker to detect when X-Plane is loading scenery.
+    /// Returns the Scene Tracker as a [`FuseLoadMonitor`], which serves as the
+    /// single source of truth for X-Plane load detection. The circuit breaker
+    /// uses this to detect when X-Plane is actively loading scenery.
+    ///
+    /// Note: This returns the Scene Tracker cast to `FuseLoadMonitor`. For full
+    /// Scene Tracker functionality (tile tracking, burst detection), use
+    /// [`scene_tracker()`] instead.
     pub fn load_monitor(&self) -> Arc<dyn FuseLoadMonitor> {
-        Arc::clone(&self.load_monitor) as Arc<dyn FuseLoadMonitor>
+        Arc::clone(&self.scene_tracker) as Arc<dyn FuseLoadMonitor>
+    }
+
+    /// Get the Scene Tracker for empirical X-Plane request tracking.
+    ///
+    /// The Scene Tracker maintains an empirical model of what X-Plane has
+    /// requested, including:
+    /// - Which DDS tiles have been accessed
+    /// - Burst detection for loading patterns
+    /// - Geographic region tracking
+    ///
+    /// It also implements [`FuseLoadMonitor`] for circuit breaker integration.
+    pub fn scene_tracker(&self) -> Arc<DefaultSceneTracker> {
+        Arc::clone(&self.scene_tracker)
     }
 
     /// Get the current count of FUSE-originated requests across all services.
     pub fn fuse_jobs_submitted(&self) -> u64 {
-        self.load_monitor.total_requests()
+        FuseLoadMonitor::total_requests(&*self.scene_tracker)
     }
 
     /// Get aggregated telemetry from all mounted services.
@@ -1004,6 +717,8 @@ impl MountManager {
             disk_cache_misses: 0,
             disk_cache_hit_rate: 0.0,
             disk_cache_size_bytes: 0,
+            disk_bytes_written: 0,
+            disk_bytes_read: 0,
             encodes_completed: 0,
             encodes_active: 0,
             bytes_encoded: 0,
@@ -1061,6 +776,8 @@ impl MountManager {
             total.disk_cache_size_bytes = total
                 .disk_cache_size_bytes
                 .max(snapshot.disk_cache_size_bytes);
+            total.disk_bytes_written = total.disk_bytes_written.max(snapshot.disk_bytes_written);
+            total.disk_bytes_read = total.disk_bytes_read.max(snapshot.disk_bytes_read);
             total.encodes_completed += snapshot.encodes_completed;
             total.encodes_active += snapshot.encodes_active;
             total.bytes_encoded += snapshot.bytes_encoded;
@@ -1125,20 +842,45 @@ pub struct ServiceBuilder {
     provider_config: crate::provider::ProviderConfig,
     logger: Arc<dyn crate::log::Logger>,
     /// Shared disk I/O limiter across all service instances.
-    /// Created lazily on first build to avoid allocation when unused.
+    /// Note: Currently unused as DiskCacheAdapter handles I/O internally.
+    /// Kept for potential future use with shared I/O limiting.
+    #[allow(dead_code)]
     disk_io_limiter: Arc<StorageConcurrencyLimiter>,
-    /// Shared memory cache across all service instances.
+    /// Shared memory cache across all service instances (legacy).
     /// Without this, each package would have its own cache with the full
     /// configured limit, potentially using N times the expected memory.
     shared_memory_cache: Option<Arc<MemoryCache>>,
     /// Shared memory cache adapter (wraps cache with provider/format context).
     shared_memory_cache_adapter: Option<Arc<MemoryCacheAdapter>>,
+    /// Cache bridges from the new CacheService architecture.
+    /// When set, these are used instead of the legacy cache system.
+    /// The DiskCacheBridge includes internal GC daemon (no external GC needed!).
+    cache_bridges: Option<CacheBridges>,
     /// Shared tile request callback for FUSE-based position inference.
     /// When set, all services forward tile requests to this callback.
     tile_request_callback: Option<TileRequestCallback>,
     /// Shared load monitor for circuit breaker integration.
     /// All services call `record_request()` for FUSE-originated requests.
     load_monitor: Arc<dyn FuseLoadMonitor>,
+}
+
+/// Cache bridges from the new CacheService architecture.
+///
+/// These bridges wrap `CacheService` instances that own their own lifecycle,
+/// including internal GC daemons. This eliminates the need for external
+/// GC daemon management.
+///
+/// The `runtime_handle` provides access to the Tokio runtime that manages
+/// the cache services, ensuring async operations can be executed even from
+/// non-async contexts.
+#[derive(Clone)]
+pub struct CacheBridges {
+    /// Memory cache bridge (implements executor::MemoryCache).
+    pub memory: Arc<MemoryCacheBridge>,
+    /// Disk cache bridge (implements executor::DiskCache, has internal GC!).
+    pub disk: Arc<DiskCacheBridge>,
+    /// Handle to the runtime managing the cache services.
+    pub runtime_handle: tokio::runtime::Handle,
 }
 
 impl ServiceBuilder {
@@ -1230,9 +972,45 @@ impl ServiceBuilder {
             disk_io_limiter,
             shared_memory_cache,
             shared_memory_cache_adapter,
+            cache_bridges: None,
             tile_request_callback: None,
-            load_monitor: Arc::new(SharedFuseLoadMonitor::new()), // Default, can be overridden
+            load_monitor: Arc::new(DefaultSceneTracker::with_defaults()), // Default, can be overridden
         }
+    }
+
+    /// Set the cache bridges from the CacheService architecture.
+    ///
+    /// When cache bridges are set, services will use the cache infrastructure
+    /// with internal GC daemons instead of the legacy external GC daemon.
+    ///
+    /// # Arguments
+    ///
+    /// * `bridges` - Cache bridges from `CacheLayer`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use xearthlayer::service::CacheLayer;
+    /// use xearthlayer::manager::{ServiceBuilder, CacheBridges};
+    ///
+    /// let cache_layer = CacheLayer::start(cache_config).await?;
+    /// let bridges = CacheBridges {
+    ///     memory: cache_layer.memory_bridge(),
+    ///     disk: cache_layer.disk_bridge(),
+    ///     runtime_handle: cache_layer.runtime_handle(),
+    /// };
+    ///
+    /// let builder = ServiceBuilder::new(service_config, provider_config, logger)
+    ///     .with_cache_bridges(bridges);
+    /// ```
+    pub fn with_cache_bridges(mut self, bridges: CacheBridges) -> Self {
+        self.cache_bridges = Some(bridges);
+        self
+    }
+
+    /// Get the cache bridges if set.
+    pub fn cache_bridges(&self) -> Option<&CacheBridges> {
+        self.cache_bridges.as_ref()
     }
 
     /// Set the shared load monitor for circuit breaker integration.
@@ -1263,24 +1041,12 @@ impl ServiceBuilder {
     ///
     /// The service will share the disk I/O concurrency limiter and memory cache
     /// with all other services built by this builder.
+    ///
+    /// If cache bridges are set (via `with_cache_bridges()`), the service uses
+    /// the new cache service architecture with internal GC. Otherwise, it uses
+    /// the legacy cache system.
     pub fn build(&self, _package: &InstalledPackage) -> Result<XEarthLayerService, ServiceError> {
-        let mut service = XEarthLayerService::new(
-            self.service_config.clone(),
-            self.provider_config.clone(),
-            self.logger.clone(),
-        )?;
-
-        // Set shared disk I/O limiter to prevent I/O exhaustion across packages
-        service.set_disk_io_limiter(Arc::clone(&self.disk_io_limiter));
-
-        // Set shared memory cache to ensure global memory limit is respected
-        // Without this, each package would have its own cache potentially using
-        // N times the configured memory limit
-        if let (Some(ref cache), Some(ref adapter)) =
-            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
-        {
-            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
-        }
+        let mut service = self.build_service_internal()?;
 
         // Wire tile request callback for FUSE-based position inference
         if let Some(ref callback) = self.tile_request_callback {
@@ -1299,21 +1065,7 @@ impl ServiceBuilder {
     /// union filesystem. The service shares the same resources (disk I/O limiter,
     /// memory cache, etc.) as services built for regional packages.
     pub fn build_patches_service(&self) -> Result<XEarthLayerService, ServiceError> {
-        let mut service = XEarthLayerService::new(
-            self.service_config.clone(),
-            self.provider_config.clone(),
-            self.logger.clone(),
-        )?;
-
-        // Set shared disk I/O limiter to prevent I/O exhaustion across packages
-        service.set_disk_io_limiter(Arc::clone(&self.disk_io_limiter));
-
-        // Set shared memory cache to ensure global memory limit is respected
-        if let (Some(ref cache), Some(ref adapter)) =
-            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
-        {
-            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
-        }
+        let mut service = self.build_service_internal()?;
 
         // Wire tile request callback for FUSE-based position inference
         if let Some(ref callback) = self.tile_request_callback {
@@ -1323,6 +1075,86 @@ impl ServiceBuilder {
         // Wire load monitor for circuit breaker integration
         service.set_load_monitor(Arc::clone(&self.load_monitor));
 
+        Ok(service)
+    }
+
+    /// Internal helper to build a service with either cache bridges or legacy cache.
+    fn build_service_internal(&self) -> Result<XEarthLayerService, ServiceError> {
+        // Use cache bridges if available (new architecture with internal GC)
+        if let Some(ref bridges) = self.cache_bridges {
+            // Use the runtime handle from cache bridges - this was provided by CacheLayer
+            // and ensures we have a valid Tokio runtime even from non-async contexts
+            let runtime_handle = bridges.runtime_handle.clone();
+            let service = XEarthLayerService::with_cache_bridges(
+                self.service_config.clone(),
+                self.provider_config.clone(),
+                self.logger.clone(),
+                runtime_handle,
+                Arc::clone(&bridges.memory),
+                Arc::clone(&bridges.disk),
+            )?;
+
+            tracing::debug!("Built service with cache bridges (internal GC)");
+            return Ok(service);
+        }
+
+        // Fall back to legacy cache system
+        let mut service = XEarthLayerService::new(
+            self.service_config.clone(),
+            self.provider_config.clone(),
+            self.logger.clone(),
+        )?;
+
+        // Set shared memory cache to ensure global memory limit is respected
+        // Without this, each package would have its own cache potentially using
+        // N times the configured memory limit
+        if let (Some(ref cache), Some(ref adapter)) =
+            (&self.shared_memory_cache, &self.shared_memory_cache_adapter)
+        {
+            service.set_shared_memory_cache(Arc::clone(cache), Arc::clone(adapter));
+        }
+
+        tracing::debug!("Built service with legacy cache (external GC required)");
+        Ok(service)
+    }
+
+    /// Build a service using `XEarthLayerService::start()` (recommended).
+    ///
+    /// This async method creates a service with integrated metrics and cache,
+    /// using the new architecture where:
+    /// - MetricsSystem is created first
+    /// - CacheLayer is created with MetricsClient (enables GC reporting)
+    /// - All components are properly wired
+    ///
+    /// This is the recommended way to create services as it ensures the GC
+    /// daemon has access to metrics for reporting cache evictions.
+    ///
+    /// # Returns
+    ///
+    /// A fully initialized `XEarthLayerService` with integrated cache and metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any component fails to initialize.
+    pub async fn build_service_async(&self) -> Result<XEarthLayerService, ServiceError> {
+        let mut service = XEarthLayerService::start(
+            self.service_config.clone(),
+            self.provider_config.clone(),
+            self.logger.clone(),
+        )
+        .await?;
+
+        // Wire tile request callback for FUSE-based position inference
+        if let Some(ref callback) = self.tile_request_callback {
+            service.set_tile_request_callback(callback.clone());
+        }
+
+        // Wire load monitor for circuit breaker integration
+        service.set_load_monitor(Arc::clone(&self.load_monitor));
+
+        tracing::info!(
+            "Built service with integrated cache and metrics (XEarthLayerService::start)"
+        );
         Ok(service)
     }
 }
@@ -1342,32 +1174,6 @@ mod tests {
     fn test_mount_manager_default() {
         let manager = MountManager::default();
         assert_eq!(manager.mount_count(), 0);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_mount_result_success() {
-        let result = MountResult::success(
-            "na".to_string(),
-            PackageType::Ortho,
-            PathBuf::from("/path/to/mount"),
-        );
-        assert!(result.success);
-        assert!(result.error.is_none());
-        assert_eq!(result.region, "na");
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_mount_result_failure() {
-        let result = MountResult::failure(
-            "eu".to_string(),
-            PackageType::Ortho,
-            PathBuf::from("/path/to/mount"),
-            "Test error".to_string(),
-        );
-        assert!(!result.success);
-        assert_eq!(result.error, Some("Test error".to_string()));
     }
 
     #[test]

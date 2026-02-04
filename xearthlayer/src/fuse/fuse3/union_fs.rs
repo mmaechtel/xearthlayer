@@ -30,16 +30,15 @@
 use super::inode::InodeManager;
 use super::shared::{DdsRequestor, FileAttrBuilder, VirtualDdsConfig, TTL};
 use super::types::{Fuse3Error, Fuse3Result};
-use crate::fuse::async_passthrough::DdsHandler;
+use crate::executor::{DdsClient, StorageConcurrencyLimiter};
 use crate::fuse::{get_default_placeholder, parse_dds_filename};
 use crate::patches::PatchUnionIndex;
-use crate::pipeline::StorageConcurrencyLimiter;
 use crate::prefetch::TileRequestCallback;
 use bytes::Bytes;
 use fuse3::raw::prelude::*;
 use fuse3::raw::reply::{
     DirectoryEntry, DirectoryEntryPlus, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyInit, ReplyStatFs,
+    ReplyInit, ReplyOpen, ReplyStatFs,
 };
 use fuse3::raw::Filesystem;
 use fuse3::{Errno, MountOptions, Result as Fuse3InternalResult};
@@ -65,8 +64,8 @@ use tracing::{debug, trace};
 pub struct Fuse3UnionFS {
     /// Union index mapping virtual paths to real file locations
     index: Arc<PatchUnionIndex>,
-    /// Handler for DDS generation requests
-    dds_handler: DdsHandler,
+    /// Client for DDS generation requests (daemon architecture)
+    dds_client: Arc<dyn DdsClient>,
     /// Inode manager for path mappings
     inode_manager: InodeManager,
     /// Configuration for virtual DDS attributes
@@ -85,9 +84,13 @@ impl Fuse3UnionFS {
     /// # Arguments
     ///
     /// * `index` - Pre-built union index of all patches
-    /// * `dds_handler` - Handler for DDS generation requests
+    /// * `dds_client` - Client for DDS generation requests (daemon architecture)
     /// * `expected_dds_size` - Expected size of generated DDS files
-    pub fn new(index: PatchUnionIndex, dds_handler: DdsHandler, expected_dds_size: usize) -> Self {
+    pub fn new(
+        index: PatchUnionIndex,
+        dds_client: Arc<dyn DdsClient>,
+        expected_dds_size: usize,
+    ) -> Self {
         let disk_io_limiter = Arc::new(StorageConcurrencyLimiter::with_defaults("union_disk_io"));
         debug!(
             max_concurrent = disk_io_limiter.max_concurrent(),
@@ -101,7 +104,7 @@ impl Fuse3UnionFS {
 
         Self {
             index: Arc::new(index),
-            dds_handler,
+            dds_client,
             inode_manager: InodeManager::new(virtual_root),
             virtual_dds_config: VirtualDdsConfig::new(expected_dds_size as u64),
             generation_timeout: Duration::from_secs(30),
@@ -113,7 +116,7 @@ impl Fuse3UnionFS {
     /// Create with custom disk I/O limiter.
     pub fn with_disk_io_limiter(
         index: PatchUnionIndex,
-        dds_handler: DdsHandler,
+        dds_client: Arc<dyn DdsClient>,
         expected_dds_size: usize,
         disk_io_limiter: Arc<StorageConcurrencyLimiter>,
     ) -> Self {
@@ -121,7 +124,7 @@ impl Fuse3UnionFS {
 
         Self {
             index: Arc::new(index),
-            dds_handler,
+            dds_client,
             inode_manager: InodeManager::new(virtual_root),
             virtual_dds_config: VirtualDdsConfig::new(expected_dds_size as u64),
             generation_timeout: Duration::from_secs(30),
@@ -157,6 +160,8 @@ impl Fuse3UnionFS {
         let mut mount_options = MountOptions::default();
         mount_options.read_only(true);
         mount_options.force_readdir_plus(false);
+        // Tell kernel we don't implement opendir - it should call readdir directly
+        mount_options.no_open_dir_support(true);
 
         let mount_path = PathBuf::from(mountpoint);
 
@@ -183,6 +188,8 @@ impl Fuse3UnionFS {
         let mut mount_options = MountOptions::default();
         mount_options.read_only(true);
         mount_options.force_readdir_plus(false);
+        // Tell kernel we don't implement opendir - it should call readdir directly
+        mount_options.no_open_dir_support(true);
 
         let mount_path = PathBuf::from(mountpoint);
         let mount_path_for_handle = mount_path.clone();
@@ -235,8 +242,8 @@ impl FileAttrBuilder for Fuse3UnionFS {
 }
 
 impl DdsRequestor for Fuse3UnionFS {
-    fn dds_handler(&self) -> &DdsHandler {
-        &self.dds_handler
+    fn dds_client(&self) -> &Arc<dyn DdsClient> {
+        &self.dds_client
     }
 
     fn generation_timeout(&self) -> Duration {
@@ -537,6 +544,17 @@ impl Filesystem for Fuse3UnionFS {
         })
     }
 
+    async fn opendir(
+        &self,
+        _req: Request,
+        ino: u64,
+        _flags: u32,
+    ) -> Fuse3InternalResult<ReplyOpen> {
+        trace!(ino = ino, "fuse3 union: opendir");
+        // Return success with fh=0 for stateless directory I/O
+        Ok(ReplyOpen { fh: 0, flags: 0 })
+    }
+
     async fn access(&self, _req: Request, _ino: u64, _mask: u32) -> Fuse3InternalResult<()> {
         Ok(())
     }
@@ -579,20 +597,78 @@ impl Filesystem for Fuse3UnionFS {
 mod tests {
     use super::super::shared::chunk_to_tile_coords;
     use super::*;
-    use crate::fuse::async_passthrough::{DdsRequest, DdsResponse};
+    use crate::coord::TileCoord;
+    use crate::executor::{DdsClientError, Priority};
     use crate::patches::PatchInfo;
+    use crate::runtime::{DdsResponse, JobRequest, RequestOrigin};
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_util::sync::CancellationToken;
 
-    fn create_test_handler() -> DdsHandler {
-        Arc::new(|req: DdsRequest| {
-            let response = DdsResponse {
-                data: vec![0xDD, 0x53, 0x20, 0x00],
-                cache_hit: false,
-                duration: Duration::from_millis(100),
+    /// Mock DdsClient for testing
+    struct MockDdsClient {
+        tx: mpsc::Sender<JobRequest>,
+    }
+
+    impl MockDdsClient {
+        fn new() -> (Arc<Self>, mpsc::Receiver<JobRequest>) {
+            let (tx, rx) = mpsc::channel(10);
+            (Arc::new(Self { tx }), rx)
+        }
+    }
+
+    impl DdsClient for MockDdsClient {
+        fn submit(&self, request: JobRequest) -> Result<(), DdsClientError> {
+            self.tx
+                .try_send(request)
+                .map_err(|_| DdsClientError::ChannelClosed)
+        }
+
+        fn request_dds(
+            &self,
+            tile: TileCoord,
+            cancellation: CancellationToken,
+        ) -> oneshot::Receiver<DdsResponse> {
+            let (tx, rx) = oneshot::channel();
+            let request = JobRequest {
+                tile,
+                priority: Priority::ON_DEMAND,
+                cancellation,
+                response_tx: Some(tx),
+                origin: RequestOrigin::Fuse,
             };
-            let _ = req.result_tx.send(response);
-        })
+            let _ = self.tx.try_send(request);
+            rx
+        }
+
+        fn request_dds_with_options(
+            &self,
+            tile: TileCoord,
+            priority: Priority,
+            origin: RequestOrigin,
+            cancellation: CancellationToken,
+        ) -> oneshot::Receiver<DdsResponse> {
+            let (tx, rx) = oneshot::channel();
+            let request = JobRequest {
+                tile,
+                priority,
+                cancellation,
+                response_tx: Some(tx),
+                origin,
+            };
+            let _ = self.tx.try_send(request);
+            rx
+        }
+
+        fn is_connected(&self) -> bool {
+            !self.tx.is_closed()
+        }
+    }
+
+    fn create_test_client() -> Arc<dyn DdsClient> {
+        let (client, _rx) = MockDdsClient::new();
+        client
     }
 
     fn create_test_patch(temp: &TempDir, name: &str) -> PatchInfo {
@@ -623,8 +699,8 @@ mod tests {
         let patch = create_test_patch(&temp, "TestPatch");
         let index = PatchUnionIndex::build(&[patch]).unwrap();
 
-        let handler = create_test_handler();
-        let fs = Fuse3UnionFS::new(index, handler, 1024);
+        let client = create_test_client();
+        let fs = Fuse3UnionFS::new(index, client, 1024);
 
         assert_eq!(fs.index().patch_names(), &["TestPatch"]);
     }

@@ -18,6 +18,7 @@
 mod commands;
 mod error;
 mod runner;
+mod tui_app;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -94,45 +95,6 @@ enum Commands {
         command: commands::patches::PatchesCommands,
     },
 
-    /// Start XEarthLayer with a scenery pack (passthrough for real files, on-demand DDS generation)
-    Start {
-        /// Source scenery pack directory to overlay
-        #[arg(long)]
-        source: String,
-
-        /// FUSE mountpoint directory (default: from config or auto-detect)
-        #[arg(long)]
-        mountpoint: Option<String>,
-
-        /// Imagery provider (default: from config)
-        #[arg(long, value_enum)]
-        provider: Option<ProviderType>,
-
-        /// Google Maps API key (default: from config)
-        #[arg(long)]
-        google_api_key: Option<String>,
-
-        /// MapBox access token (default: from config)
-        #[arg(long)]
-        mapbox_token: Option<String>,
-
-        /// DDS compression format (default: from config)
-        #[arg(long, value_enum)]
-        dds_format: Option<DdsCompression>,
-
-        /// Download timeout in seconds (default: from config)
-        #[arg(long)]
-        timeout: Option<u64>,
-
-        /// Maximum parallel downloads (default: from config)
-        #[arg(long)]
-        parallel: Option<usize>,
-
-        /// Disable caching (always generate tiles fresh)
-        #[arg(long)]
-        no_cache: bool,
-    },
-
     /// Start XEarthLayer and mount all installed ortho packages for X-Plane
     ///
     /// This is the main command for running XEarthLayer. It discovers all installed
@@ -182,41 +144,6 @@ enum Commands {
         #[arg(long)]
         airport: Option<String>,
     },
-
-    /// Download a single tile to a file (for testing)
-    Download {
-        /// Latitude in decimal degrees
-        #[arg(long)]
-        lat: f64,
-
-        /// Longitude in decimal degrees
-        #[arg(long)]
-        lon: f64,
-
-        /// Zoom level (12-19 for Bing, 12-22 for Google)
-        #[arg(long, default_value = "16")]
-        zoom: u8,
-
-        /// Output file path (.dds extension)
-        #[arg(long)]
-        output: String,
-
-        /// DDS compression format (default: from config)
-        #[arg(long, value_enum)]
-        dds_format: Option<DdsCompression>,
-
-        /// Imagery provider (default: from config)
-        #[arg(long, value_enum)]
-        provider: Option<ProviderType>,
-
-        /// Google Maps API key (default: from config)
-        #[arg(long)]
-        google_api_key: Option<String>,
-
-        /// MapBox access token (default: from config)
-        #[arg(long)]
-        mapbox_token: Option<String>,
-    },
 }
 
 // ============================================================================
@@ -239,46 +166,6 @@ fn main() {
         Some(Commands::Publish { command }) => commands::publish::run(command),
         Some(Commands::Packages { command }) => commands::packages::run(command),
         Some(Commands::Patches { command }) => commands::patches::run(command),
-        Some(Commands::Start {
-            source,
-            mountpoint,
-            provider,
-            google_api_key,
-            mapbox_token,
-            dds_format,
-            timeout,
-            parallel,
-            no_cache,
-        }) => commands::start::run(commands::start::StartArgs {
-            source,
-            mountpoint,
-            provider,
-            google_api_key,
-            mapbox_token,
-            dds_format,
-            timeout,
-            parallel,
-            no_cache,
-        }),
-        Some(Commands::Download {
-            lat,
-            lon,
-            zoom,
-            output,
-            dds_format,
-            provider,
-            google_api_key,
-            mapbox_token,
-        }) => commands::download::run(commands::download::DownloadArgs {
-            lat,
-            lon,
-            zoom,
-            output,
-            dds_format,
-            provider,
-            google_api_key,
-            mapbox_token,
-        }),
         Some(Commands::Run {
             provider,
             google_api_key,

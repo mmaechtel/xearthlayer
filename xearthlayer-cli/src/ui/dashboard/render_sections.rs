@@ -3,6 +3,10 @@
 //! This module contains rendering functions for specific dashboard sections:
 //! - Aircraft position / prefetch status
 //! - Control plane metrics
+//!
+//! Note: Some functions here are legacy (v0.2.x) and kept for reference.
+
+#![allow(dead_code)] // Legacy render functions kept for reference
 
 use ratatui::{
     layout::Rect,
@@ -11,8 +15,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use xearthlayer::pipeline::control_plane::HealthSnapshot;
 use xearthlayer::prefetch::{GpsStatus, PrefetchMode, PrefetchStatusSnapshot};
+use xearthlayer::runtime::HealthSnapshot;
 
 use super::state::JobRates;
 use crate::ui::widgets::ControlPlaneWidget;
@@ -102,6 +106,7 @@ pub fn render_prefetch(frame: &mut Frame, area: Rect, prefetch: &PrefetchStatusS
         PrefetchMode::Telemetry => Color::Green,
         PrefetchMode::FuseInference => Color::Yellow,
         PrefetchMode::Radial => Color::Cyan,
+        PrefetchMode::TileBased => Color::Blue, // DSF tile-aligned prefetch
         PrefetchMode::Idle => Color::DarkGray,
         PrefetchMode::CircuitOpen => Color::Magenta, // Paused due to high X-Plane load
     };
