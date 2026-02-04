@@ -307,39 +307,46 @@ Failed chunk downloads are retried with exponential backoff:
 
 ### [prefetch]
 
-Controls predictive tile prefetching based on X-Plane telemetry. The prefetch system pre-loads tiles ahead of the aircraft to reduce FPS drops when new scenery loads.
+Controls the Adaptive Prefetch System, which pre-loads tiles ahead of the aircraft to reduce FPS drops during flight. The system automatically calibrates itself based on your network and system performance.
 
-**Prefetch Architecture:**
+**Adaptive Prefetch Architecture (v0.3.0+):**
 
-XEarthLayer uses a ring-based prefetch system that targets the boundary around X-Plane's ~90nm loaded scenery:
+The system uses flight phase detection and performance calibration:
 
-![Heading-Aware Prefetch Zones](images/heading-aware-prefetch.png)
+1. **Performance Calibration**: During X-Plane's initial scenery load, XEarthLayer measures tile generation throughput to determine the optimal prefetch mode.
 
-- **Prefetch Zone (85-180nm)**: Ring around aircraft where tiles are prefetched
-- **Heading Cone (80° half-angle)**: Forward-biased prefetching along flight path
+2. **Flight Phase Strategies**:
+   - **Ground Strategy**: Ring-based prefetch around position (GS < 40kt, AGL < 20ft)
+   - **Cruise Strategy**: Track-based band prefetch ahead of flight path (GS > 40kt)
+
+3. **Mode Selection**: Based on calibration throughput:
+   - **Aggressive**: >30 tiles/sec - Position-based trigger (0.3° into DSF tile)
+   - **Opportunistic**: 10-30 tiles/sec - Circuit breaker trigger (when X-Plane finishes loading)
+   - **Disabled**: <10 tiles/sec - Prefetch skipped (won't complete in time)
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable/disable predictive tile prefetching |
-| `strategy` | string | `auto` | Prefetch strategy: `auto`, `heading-aware`, or `radial` |
+| `strategy` | string | `auto` | Strategy selection: `auto` (recommended) or `adaptive` |
+| `mode` | string | `auto` | Mode selection: `auto`, `aggressive`, `opportunistic`, `disabled` |
 | `udp_port` | integer | `49002` | UDP port for X-Plane telemetry (ForeFlight protocol) |
-| `inner_radius_nm` | float | `85` | Inner edge of prefetch zone (5nm inside X-Plane's 90nm boundary) |
-| `outer_radius_nm` | float | `180` | Outer edge of prefetch zone |
-| `cone_angle` | float | `80` | Half-angle of heading cone (80° = 160° total width) |
-| `radial_radius` | integer | `120` | Radial prefetcher tile radius (tiles in each direction) |
-| `max_tiles_per_cycle` | integer | `200` | Maximum tiles to submit per prefetch cycle |
+| `max_tiles_per_cycle` | integer | `3000` | Maximum tiles to submit per prefetch cycle |
 | `cycle_interval_ms` | integer | `2000` | Interval between prefetch cycles (milliseconds) |
 | `circuit_breaker_threshold` | float | `50.0` | FUSE jobs/sec threshold to pause prefetching |
 | `circuit_breaker_open_ms` | integer | `500` | Duration (ms) high load must be sustained to pause |
 | `circuit_breaker_half_open_secs` | integer | `2` | Cooloff time (secs) before resuming prefetch |
+| `calibration_aggressive_threshold` | float | `30.0` | Tiles/sec threshold for aggressive mode |
+| `calibration_opportunistic_threshold` | float | `10.0` | Tiles/sec threshold for opportunistic mode |
+| `calibration_sample_duration` | integer | `60` | Duration (secs) to measure throughput during calibration |
 
-**Strategy Options:**
+**Mode Options:**
 
-| Strategy | Description |
-|----------|-------------|
-| `auto` | Heading-aware with graceful degradation to radial (recommended) |
-| `heading-aware` | Direction-aware cone prefetching, requires telemetry |
-| `radial` | Simple grid around current position, works without telemetry |
+| Mode | Trigger | When Used |
+|------|---------|-----------|
+| `auto` | Based on calibration (recommended) | Most users |
+| `aggressive` | Position-based (0.3° into DSF tile) | Fast connections (>30 tiles/sec) |
+| `opportunistic` | Circuit breaker close | Moderate connections (10-30 tiles/sec) |
+| `disabled` | Never | Slow connections or debugging |
 
 **Circuit Breaker:**
 
@@ -349,35 +356,27 @@ The circuit breaker automatically pauses prefetching when X-Plane is loading sce
 - **Open (Paused)**: Prefetching paused, FUSE rate exceeded threshold
 - **Half-Open (Resuming)**: Testing if safe to resume after cooloff
 
-**Zoom Level Handling:**
-
-XEarthLayer automatically prefetches tiles at the correct zoom levels by reading the `.ter` files in your scenery packages. The SceneryIndex knows exactly which tiles exist and at what zoom level, so no manual zoom level configuration is needed.
-
 **Example:**
 ```ini
 [prefetch]
 enabled = true
 strategy = auto
+mode = auto                    ; Let calibration determine mode
 udp_port = 49002
 
-; Prefetch zone boundaries (nautical miles)
-inner_radius_nm = 85           ; Start prefetching 5nm inside X-Plane's 90nm boundary
-outer_radius_nm = 180          ; Extended look-ahead coverage
-
-; Heading-aware cone
-cone_angle = 80                ; 160° total cone width for forward prefetching
-
-; Radial prefetcher (fallback when no telemetry)
-radial_radius = 120            ; Tile radius for radial prefetching
-
 ; Rate limiting
-max_tiles_per_cycle = 200      ; Tiles per cycle
+max_tiles_per_cycle = 3000     ; Tiles per cycle
 cycle_interval_ms = 2000       ; Cycle interval (ms)
 
 ; Circuit breaker (pause prefetch during scene loading)
 circuit_breaker_threshold = 50.0      ; FUSE jobs/sec to trigger pause
 circuit_breaker_open_ms = 500         ; Sustained load duration to open
 circuit_breaker_half_open_secs = 2    ; Cooloff before resuming
+
+; Calibration thresholds (tiles/sec)
+calibration_aggressive_threshold = 30.0      ; Above = aggressive mode
+calibration_opportunistic_threshold = 10.0   ; Above = opportunistic, below = disabled
+calibration_sample_duration = 60             ; Calibration period (seconds)
 ```
 
 **X-Plane Setup:**
@@ -386,7 +385,7 @@ To enable prefetching, configure X-Plane to send ForeFlight telemetry:
 2. Enable **Send to ForeFlight**
 3. XEarthLayer will receive position/heading updates on UDP port 49002
 
-**Note:** Even without telemetry, XEarthLayer can infer aircraft position from FUSE file access patterns (FUSE inference mode) and fall back to radial prefetching if needed
+**Note:** Prefetch works best with telemetry for heading-aware band calculation, but the system remains functional without it by using FUSE file access patterns to infer aircraft position
 
 ### [prewarm]
 
@@ -564,29 +563,25 @@ timeout = 10
 ; retry_base_delay_ms = 100        ; Backoff base delay
 
 [prefetch]
-; Predictive tile prefetching based on X-Plane telemetry
+; Adaptive Prefetch System (v0.3.0+) - self-calibrating tile prefetching
 enabled = true
-strategy = auto  ; auto, heading-aware, or radial
+strategy = auto                ; auto or adaptive
+mode = auto                    ; auto, aggressive, opportunistic, disabled
 ; udp_port = 49002
 
-; Prefetch zone boundaries (nautical miles)
-; inner_radius_nm = 85         ; inner edge (5nm inside X-Plane's 90nm zone)
-; outer_radius_nm = 180        ; outer edge of prefetch zone
-
-; Heading-aware cone
-; cone_angle = 80              ; half-angle of cone (160° total width)
-
-; Radial prefetcher
-; radial_radius = 120          ; tile radius for radial prefetching
-
 ; Rate limiting
-; max_tiles_per_cycle = 200    ; tiles per cycle (lower = less bandwidth)
-; cycle_interval_ms = 2000     ; cycle interval (higher = less aggressive)
+; max_tiles_per_cycle = 3000   ; tiles per cycle
+; cycle_interval_ms = 2000     ; cycle interval (ms)
 
 ; Circuit breaker (pause prefetch during scene loading)
 ; circuit_breaker_threshold = 50.0      ; FUSE jobs/sec to trigger
 ; circuit_breaker_open_ms = 500         ; duration to sustain before pause
 ; circuit_breaker_half_open_secs = 2    ; cooloff before resuming
+
+; Performance calibration thresholds (tiles/sec)
+; calibration_aggressive_threshold = 30.0    ; above = aggressive mode
+; calibration_opportunistic_threshold = 10.0 ; above = opportunistic, below = disabled
+; calibration_sample_duration = 60           ; calibration period (seconds)
 
 [prewarm]
 ; Cold-start cache pre-warming (use with --airport ICAO)
@@ -709,17 +704,17 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `executor.max_retries` | positive integer | Max retry attempts per chunk |
 | `executor.retry_base_delay_ms` | positive integer | Exponential backoff base (ms) |
 | `prefetch.enabled` | `true`, `false` | Enable predictive prefetching |
-| `prefetch.strategy` | `auto`, `heading-aware`, `radial` | Prefetch strategy |
+| `prefetch.strategy` | `auto`, `adaptive` | Prefetch strategy selection |
+| `prefetch.mode` | `auto`, `aggressive`, `opportunistic`, `disabled` | Prefetch mode (auto uses calibration) |
 | `prefetch.udp_port` | positive integer | X-Plane telemetry UDP port |
-| `prefetch.inner_radius_nm` | positive number | Inner edge of prefetch zone (nm) |
-| `prefetch.outer_radius_nm` | positive number | Outer edge of prefetch zone (nm) |
-| `prefetch.cone_angle` | positive number | Half-angle of heading cone (degrees) |
-| `prefetch.radial_radius` | positive integer | Radial prefetcher tile radius |
 | `prefetch.max_tiles_per_cycle` | positive integer | Max tiles per prefetch cycle |
 | `prefetch.cycle_interval_ms` | positive integer | Prefetch cycle interval (ms) |
 | `prefetch.circuit_breaker_threshold` | positive number | FUSE jobs/sec to pause prefetch |
 | `prefetch.circuit_breaker_open_ms` | positive integer | Sustained load duration (ms) |
 | `prefetch.circuit_breaker_half_open_secs` | positive integer | Cooloff time (secs) |
+| `prefetch.calibration_aggressive_threshold` | positive number | Tiles/sec for aggressive mode |
+| `prefetch.calibration_opportunistic_threshold` | positive number | Tiles/sec for opportunistic mode |
+| `prefetch.calibration_sample_duration` | positive integer | Calibration period (seconds) |
 | `prewarm.radius_nm` | positive number | Pre-warm radius around airport (nm) |
 | `xplane.scenery_dir` | path | X-Plane Custom Scenery directory |
 | `packages.library_url` | URL | Package library index URL |
