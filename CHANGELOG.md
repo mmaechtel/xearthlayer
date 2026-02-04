@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-XX (Draft)
+
+> **Note**: This is a major release introducing the Adaptive Prefetch System and a complete rewrite of the execution core.
+
+### Added
+
+- **Adaptive Prefetch System**: Self-calibrating tile prediction that eliminates scenery loading stutters
+  - Predicts which tiles X-Plane will request based on position, heading, and empirically-observed loading patterns
+  - Self-calibrates during initial scene load by measuring tile generation throughput
+  - **Flight phase detection**: Ground (< 40kt) vs Cruise mode with different strategies
+  - **GroundStrategy**: Ring-based prefetching around aircraft position
+  - **CruiseStrategy**: Track-based band prefetching ahead of heading, matching X-Plane's actual band-loading behavior
+  - **Mode selection**: Aggressive (>30 tiles/sec), Opportunistic (10-30), or Disabled based on system performance
+  - Pauses during scene loading via circuit breaker to avoid interfering with on-demand requests
+  - See `docs/dev/adaptive-prefetch-design.md` for full design
+
+- **Job Executor Framework**: Complete rewrite of the execution core enabling adaptive prefetch
+  - Async, non-blocking execution replaces legacy `spawn_blocking` pipeline
+  - **Priority scheduling**: `ON_DEMAND` (100) > `PREFETCH` (0) > `HOUSEKEEPING` (-50)
+  - **Resource pools**: Semaphore-based concurrency limits by type (Network, CPU, DiskIO)
+  - **Job concurrency groups**: Limits concurrent DDS generation jobs to balance pipeline stages
+  - **Cancellation support**: Via `CancellationToken` for clean shutdown and job control
+  - **Child job spawning**: Prefetch spawns individual DDS generation jobs
+  - **Stall detection watchdog**: Warns when executor appears stuck with pending work
+  - Modular design decomposed into 8 focused modules
+  - See `docs/dev/job-executor-design.md` for architecture
+
+- **Aircraft Position & Telemetry (APT) Module**: Real-time flight data integration
+  - Receives UDP telemetry from X-Plane via ForeFlight protocol (port 49002)
+  - Flight path tracking with heading calculation from position history
+  - Aggregates telemetry from multiple sources with authoritative track selection
+  - Dashboard integration showing GPS status and telemetry source
+
+- **Scene Tracker**: Empirical X-Plane request monitoring
+  - Tracks aggregate FUSE request load for circuit breaker
+  - Detects scene loading events to pause prefetch
+  - Shared load counter across all mounted services
+
+- **Self-Contained Cache Services**: Improved cache lifecycle management
+  - `CacheLayer` encapsulates memory + disk caches with internal lifecycle
+  - In-memory LRU index for O(1) cache tracking without filesystem scanning
+  - Garbage collection runs as executor job - async, cancellable, yields to high-priority work
+  - Cache bridges for executor integration (`MemoryCacheBridge`, `DiskCacheBridge`)
+
+- **Integration Tests**: Comprehensive executor test coverage
+  - Tests for job execution, sequential tasks, concurrent jobs
+  - Tests for kill signal cancellation, error policies, graceful shutdown
+  - Tests for zero-task edge case
+
+### Fixed
+
+- **Directory Listing (#38)**: `ls` now works in FUSE mounted directories
+  - Implemented `opendir` and `readdirplus` operations
+  - Proper directory handle management
+
+- **Request Coalescing**: Prevents duplicate work for same tile
+  - Concurrent requests for the same tile share a single generation job
+
+- **Panic with Zero Tasks**: Jobs with 0 tasks no longer panic
+  - Fixed `drain(..1)` on empty vector in CacheGcJob
+
+- **APT Debug Logging Panic**: Resolved crash when debug logging enabled
+  - Fixed format string issue in airport coordinate logging
+
+### Changed
+
+- **Executor Architecture**: Decomposed monolithic executor into focused modules
+  - `core.rs`: JobExecutor struct and main event loop
+  - `config.rs`: ExecutorConfig and public constants
+  - `submitter.rs`: JobSubmitter and SubmittedJob
+  - `active_job.rs`: ActiveJob state and TaskCompletion
+  - `lifecycle.rs`: Job/task lifecycle management
+  - `dispatch.rs`: Task dispatching to workers
+  - `signals.rs`: Signal processing (pause, resume, stop, kill)
+  - `watchdog.rs`: StallWatchdog for stall detection
+
+- **Metrics Architecture**: 3-layer event-based telemetry
+  - Fire-and-forget emission pattern
+  - Disk read tracking for cache diagnostics
+  - Sparkline consolidation across widgets
+
+- **Service Initialization**: Consolidated startup via `ServiceOrchestrator`
+  - Eliminated duplicate initialization paths
+  - Proper metrics ordering with cache lifecycle
+
+- **Prefetch System**: Removed legacy prefetchers
+  - Heading-aware and radial prefetchers replaced by adaptive system
+  - Single `AdaptivePrefetchCoordinator` handles all flight phases
+
+### Removed
+
+- **Legacy Sync Download Pipeline**: ~500 lines of code removed
+  - Removed `tile/` module (TileOrchestrator, ParallelTileGenerator)
+  - Removed `orchestrator/` module (DownloadOrchestrator)
+  - Replaced by async Job Executor Framework
+
+- **Deprecated MountManager Methods**: Cleaned up unused mount operations
+
+- **Deprecated UI Widgets**: Removed obsolete dashboard components
+
+- **Dead Code**: Removed unused `retry_counts` field from ActiveJob
+
+### Deprecated
+
+- **Configuration Keys**: The following `pipeline.*` keys are deprecated
+  - Use `executor.*` equivalents instead
+  - Run `xearthlayer config upgrade` to migrate
+
+### Documentation
+
+- `docs/dev/adaptive-prefetch-design.md` - Prefetch system design with empirical findings
+- `docs/dev/xplane-scenery-loading-whitepaper.md` - X-Plane loading behavior research
+- `docs/dev/job-executor-design.md` - Executor framework architecture
+- `CLAUDE.md` - Project guidelines for AI-assisted development
+
+### Upgrade Notes
+
+**New `config.ini` settings for v0.3.0:**
+
+```ini
+[executor]
+# Resource pool configuration
+max_concurrent_tasks = 128
+job_channel_capacity = 256
+
+# Job concurrency limits (balances pipeline stages)
+tile_generation_limit = 40
+```
+
+**Breaking Changes:**
+
+- `pipeline.*` configuration keys no longer used (replaced by `executor.*`)
+- Legacy `TileGenerator` API removed (use `DdsClient` trait)
+- `run_eviction_daemon` deprecated (GC now internal to `DiskCacheProvider`)
+
+Run `xearthlayer config upgrade` to automatically migrate configuration.
+
 ## [0.2.12] - 2026-01-10
 
 > **Note**: v0.2.11 was skipped due to a release infrastructure issue.
@@ -464,7 +601,8 @@ Run `xearthlayer config upgrade` to automatically add new settings with defaults
 - Linux support only (Windows and macOS planned for future releases)
 - Requires FUSE3 for filesystem mounting
 
-[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.2.12...HEAD
+[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/samsoir/xearthlayer/compare/v0.2.12...v0.3.0
 [0.2.12]: https://github.com/samsoir/xearthlayer/compare/v0.2.10...v0.2.12
 [0.2.10]: https://github.com/samsoir/xearthlayer/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/samsoir/xearthlayer/compare/v0.2.8...v0.2.9
