@@ -340,10 +340,6 @@ CI will fail if pre-commit checks were not run.
 - **Windows**: ⏳ Planned (requires Dokan/WinFSP)
 - **macOS**: ⏳ Planned (requires macFUSE)
 
-## TODO - Technical Debt
-
-- **Remove legacy TileGenerator**: The `generator` field in `facade.rs`, along with `TileOrchestrator`, `ParallelTileGenerator`, and related code in `xearthlayer/src/tile/` and `xearthlayer/src/orchestrator/` are never called. This legacy code (~500 lines across 6+ files) can be removed.
-
 ## References
 
 - Original inspiration: [AutoOrtho](https://github.com/kubilus1/autoortho)

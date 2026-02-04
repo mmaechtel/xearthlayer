@@ -37,7 +37,7 @@ See [How It Works](docs/how-it-works.md) for detailed architecture.
 
 ## Features
 
-- Small regional packages (gigabytes, not terrabytes)
+- Small regional packages (gigabytes, not terabytes)
 - On-demand texture streaming from multiple providers:
   - **Bing Maps** - Free, global coverage (recommended)
   - **Google Maps** - Via GO2 (free) or official API (paid)
@@ -45,11 +45,11 @@ See [How It Works](docs/how-it-works.md) for detailed architecture.
   - **ArcGIS** - Free, global coverage
   - **MapBox** - Requires access token
   - **USGS** - Free, US coverage only
-- **Predictive prefetching** - Tiles loaded ahead of your flight path
-  - Heading-aware cone prefetching using X-Plane telemetry
-  - Multi-zoom support (ZL14 near, ZL12 distant)
-  - Scenery-aware indexing for exact tile lookup
-  - Graceful degradation when telemetry unavailable
+- **Adaptive Prefetch System** - Self-calibrating tile prediction
+  - Flight phase detection: Ground (ring pattern) vs Cruise (track-based bands)
+  - Performance calibration during X-Plane's initial scenery load
+  - Automatic mode selection: Aggressive, Opportunistic, or Disabled
+  - Circuit breaker pauses prefetch during X-Plane loading
 - Two-tier caching for instant repeat visits
 - High-quality BC1/BC3 DDS textures with mipmaps
 - Real-time dashboard showing cache, download, and prefetch status
@@ -91,26 +91,35 @@ XEarthLayer requires regional scenery packages to be installed in order for it t
 
 [XEarthLayer Scenery Packages](https://github.com/samsoir/xearthlayer-regional-scenery) are hosted on Github.
 
-## Predictive Prefetching
+## Adaptive Prefetch System
 
-XEarthLayer reduces FPS drops by prefetching tiles ahead of your aircraft using a dual-zone system:
+XEarthLayer reduces scenery loading stutters by prefetching tiles ahead of your aircraft. The system automatically calibrates itself based on your network and system performance.
 
-![Heading-Aware Prefetch Zones](docs/images/heading-aware-prefetch.png)
+### How It Works
 
-For best results:
+1. **Performance Calibration**: During X-Plane's initial scenery load (~12° × 12° area), XEarthLayer measures tile generation throughput to determine optimal prefetch mode.
 
-1. **Enable ForeFlight telemetry** in X-Plane:
-   - Settings → Network → Enable "Send to ForeFlight"
-   - XEarthLayer receives position/heading on UDP port 49002
+2. **Flight Phase Detection**: The system automatically switches between strategies:
+   - **Ground Strategy**: Ring-based prefetch around your position (GS < 40kt)
+   - **Cruise Strategy**: Track-based band prefetch ahead of your flight path (GS > 40kt)
 
-2. **Prefetch modes** (automatic selection):
-   - **Telemetry mode**: Precise cone-based prefetching using heading data
-   - **FUSE inference**: Infers position from file access patterns when telemetry is stale
-   - **Radial fallback**: Simple 7×7 grid when no heading data available
+3. **Circuit Breaker**: When X-Plane is actively loading scenery (>50 requests/sec), prefetch pauses to avoid interfering with on-demand requests.
 
-The dashboard shows real-time prefetch status: `Prefetch: Telemetry | 23/cycle | Cache: 156↑ TTL: 8⊘ | ZL14 ZL12`
+### Prefetch Modes
 
-See [Configuration](docs/configuration.md#prefetch) and [Predictive Caching Design](docs/dev/predictive-caching.md) for tuning options.
+| Mode | Trigger | When Used |
+|------|---------|-----------|
+| **Aggressive** | Position-based (0.3° into DSF tile) | Throughput > 30 tiles/sec |
+| **Opportunistic** | Circuit breaker close | Throughput 10-30 tiles/sec |
+| **Disabled** | Never | Throughput < 10 tiles/sec |
+
+### Configuration
+
+Enable ForeFlight telemetry in X-Plane for best results:
+- Settings → Network → Enable "Send to ForeFlight"
+- XEarthLayer receives position/heading on UDP port 49002
+
+See [Configuration](docs/configuration.md#prefetch) and [Adaptive Prefetch Design](docs/dev/adaptive-prefetch-design.md) for tuning options.
 
 ## Documentation
 

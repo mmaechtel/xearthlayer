@@ -35,19 +35,19 @@ That's it! XEarthLayer will automatically receive your aircraft position and hea
 
 ### What This Enables
 
-- **Predictive prefetching**: XEarthLayer downloads tiles ahead of your flight path
-- **Heading-aware caching**: Tiles in your direction of travel are prioritized
+- **Adaptive prefetching**: XEarthLayer automatically calibrates prefetch based on your network speed
+- **Track-based band loading**: Tiles ahead of your flight path are prioritized based on your ground track
+- **Flight phase detection**: Different strategies for ground ops vs cruise flight
 - **Smoother scenery loading**: Tiles are often ready before X-Plane requests them
-- **Reduced stutter**: Fewer texture pop-ins during flight
 
 ### Without Telemetry
 
 XEarthLayer still works without telemetry! It will:
 - Generate textures on-demand as X-Plane requests them
-- Use basic radial prefetching around recently requested tiles
+- Infer position from FUSE file access patterns
 - Cache textures for subsequent visits
 
-However, you may notice more tile pop-ins when flying into new areas, especially at higher speeds.
+However, you may notice more tile pop-ins when flying into new areas, as the system can't predict your heading without telemetry.
 
 ## Installation
 
