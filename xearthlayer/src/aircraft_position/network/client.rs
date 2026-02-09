@@ -98,9 +98,17 @@ impl NetworkClient for VatsimClient {
         let data: VatsimData =
             serde_json::from_slice(&bytes).map_err(|e| NetworkError::JsonError(e.to_string()))?;
 
-        data.pilots
-            .into_iter()
-            .find(|p| p.cid == self.pilot_cid)
+        let pilot = data.pilots.iter().find(|p| p.cid == self.pilot_cid);
+
+        tracing::debug!(
+            total_pilots = data.pilots.len(),
+            pilot_cid = self.pilot_cid,
+            found = pilot.is_some(),
+            "VATSIM data feed fetched"
+        );
+
+        pilot
+            .cloned()
             .ok_or(NetworkError::PilotNotFound(self.pilot_cid))
     }
 }
