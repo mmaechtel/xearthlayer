@@ -93,6 +93,43 @@ impl DsfTileCoord {
     pub fn from_dds_filename(filename: &str) -> Option<Self> {
         // Remove .dds extension
         let stem = filename.strip_suffix(".dds")?;
+        Self::parse_scenery_stem(stem)
+    }
+
+    /// Parse a DSF filename to extract the tile coordinate.
+    ///
+    /// DSF filenames follow the pattern `[+-]\d{2}[+-]\d{3}.dsf`.
+    /// Examples: `+33-119.dsf` → `(33, -119)`, `-46+012.dsf` → `(-46, 12)`.
+    pub fn from_dsf_filename(filename: &str) -> Option<Self> {
+        let stem = filename.strip_suffix(".dsf")?;
+
+        // Must be exactly 7 chars: [+-]DD[+-]DDD
+        if stem.len() != 7 {
+            return None;
+        }
+
+        let lat: i32 = stem[0..3].parse().ok()?;
+        let lon: i32 = stem[3..7].parse().ok()?;
+        Some(Self::new(lat, lon))
+    }
+
+    /// Parse a scenery filename (DDS, TER, etc.) to extract the DSF tile.
+    ///
+    /// Filename format: `{chunk_row}_{chunk_col}_{map_type}{zoom}.{ext}`
+    /// Works with any extension — the coordinate parsing is the same.
+    /// Also handles `_sea` suffix (e.g., `10000_5000_BI16_sea.ter`).
+    pub fn from_scenery_filename(filename: &str) -> Option<Self> {
+        // Strip any extension
+        let stem = filename.rsplit_once('.')?.0;
+        Self::parse_scenery_stem(stem)
+    }
+
+    /// Parse the stem of a scenery filename (without extension).
+    ///
+    /// Handles both `row_col_typeZoom` and `row_col_typeZoom_sea` formats.
+    fn parse_scenery_stem(stem: &str) -> Option<Self> {
+        // Handle _sea suffix
+        let stem = stem.strip_suffix("_sea").unwrap_or(stem);
 
         // Split by underscore: row_col_typeZoom
         let parts: Vec<&str> = stem.split('_').collect();
@@ -113,8 +150,6 @@ impl DsfTileCoord {
             .ok()?;
 
         // Convert chunk coordinates to geographic coordinates
-        // Chunks are 256x256 pixels at chunk_zoom level
-        // DDS tiles are 16x16 chunks, so tile_zoom = chunk_zoom - 4
         let (lat, lon) = chunk_to_lat_lon(chunk_row, chunk_col, zoom);
 
         Some(Self::from_lat_lon(lat, lon))
@@ -356,5 +391,82 @@ mod tests {
         set.insert(t1);
         assert!(set.contains(&t2));
         assert!(!set.contains(&t3));
+    }
+
+    // =========================================================================
+    // from_dsf_filename tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_from_dsf_filename_positive_coords() {
+        let tile = DsfTileCoord::from_dsf_filename("+45+011.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(45, 11)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_negative_coords() {
+        let tile = DsfTileCoord::from_dsf_filename("-46+012.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(-46, 12)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_mixed_signs() {
+        let tile = DsfTileCoord::from_dsf_filename("+33-119.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(33, -119)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_zero_coords() {
+        let tile = DsfTileCoord::from_dsf_filename("+00+000.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(0, 0)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_wrong_extension() {
+        assert!(DsfTileCoord::from_dsf_filename("+33-119.ter").is_none());
+    }
+
+    #[test]
+    fn test_from_dsf_filename_invalid_format() {
+        assert!(DsfTileCoord::from_dsf_filename("invalid.dsf").is_none());
+        assert!(DsfTileCoord::from_dsf_filename("").is_none());
+        assert!(DsfTileCoord::from_dsf_filename("+33.dsf").is_none());
+    }
+
+    // =========================================================================
+    // from_scenery_filename tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_from_scenery_filename_dds() {
+        let tile = DsfTileCoord::from_scenery_filename("10000_5000_BI16.dds");
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_ter() {
+        let tile = DsfTileCoord::from_scenery_filename("10000_5000_BI16.ter");
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_sea_suffix() {
+        let tile = DsfTileCoord::from_scenery_filename("10000_5000_BI16_sea.ter");
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_invalid() {
+        assert!(DsfTileCoord::from_scenery_filename("invalid.dds").is_none());
+        assert!(DsfTileCoord::from_scenery_filename("readme.txt").is_none());
+        assert!(DsfTileCoord::from_scenery_filename("").is_none());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_matches_from_dds_filename() {
+        // For .dds files, from_scenery_filename should produce same result as from_dds_filename
+        let dds_result = DsfTileCoord::from_dds_filename("10000_5000_BI16.dds");
+        let scenery_result = DsfTileCoord::from_scenery_filename("10000_5000_BI16.dds");
+        assert_eq!(dds_result, scenery_result);
     }
 }

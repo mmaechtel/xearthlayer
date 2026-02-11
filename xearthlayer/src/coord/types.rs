@@ -14,6 +14,14 @@ pub const MAX_LON: f64 = 180.0;
 pub const MIN_ZOOM: u8 = 0;
 pub const MAX_ZOOM: u8 = 18;
 
+/// Number of chunks along each side of a tile (16×16 = 256 chunks per tile).
+pub const CHUNKS_PER_TILE_SIDE: u32 = 16;
+
+/// Zoom level offset between tile zoom and chunk zoom (log₂(CHUNKS_PER_TILE_SIDE)).
+///
+/// A tile at zoom Z is composed of chunks at zoom Z+4, because 2⁴ = 16.
+pub const CHUNK_ZOOM_OFFSET: u8 = 4;
+
 /// Tile coordinates in Web Mercator / Slippy Map system.
 ///
 /// Represents a 4096×4096 pixel tile composed of 16×16 chunks.
@@ -59,6 +67,22 @@ impl TileCoord {
         (lat, lon)
     }
 
+    /// Returns the global chunk coordinates of this tile's origin (top-left chunk).
+    ///
+    /// DDS filenames use chunk-level global coordinates:
+    /// `{chunk_row}_{chunk_col}_{map_type}{chunk_zoom}.dds`
+    ///
+    /// This is the canonical conversion from tile coordinates to the
+    /// chunk-level format used in DDS/TER filenames on disk.
+    #[inline]
+    pub fn chunk_origin(&self) -> (u32, u32, u8) {
+        (
+            self.row * CHUNKS_PER_TILE_SIDE,
+            self.col * CHUNKS_PER_TILE_SIDE,
+            self.zoom + CHUNK_ZOOM_OFFSET,
+        )
+    }
+
     /// Returns the DSF tile (1°×1°) that contains this DDS tile.
     ///
     /// X-Plane's scenery is organized into 1°×1° DSF tiles. This method
@@ -90,13 +114,14 @@ impl Iterator for TileChunksIterator {
     type Item = ChunkCoord;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current >= 256 {
+        let total_chunks = CHUNKS_PER_TILE_SIDE * CHUNKS_PER_TILE_SIDE;
+        if self.current >= total_chunks as u16 {
             return None;
         }
 
         // Calculate chunk position in row-major order
-        let chunk_row = (self.current / 16) as u8;
-        let chunk_col = (self.current % 16) as u8;
+        let chunk_row = (self.current / CHUNKS_PER_TILE_SIDE as u16) as u8;
+        let chunk_col = (self.current % CHUNKS_PER_TILE_SIDE as u16) as u8;
 
         self.current += 1;
 
@@ -149,9 +174,9 @@ impl ChunkCoord {
     /// of 16×16 chunks, where each chunk is a 256×256 tile from zoom Z+4.
     #[inline]
     pub fn to_global_coords(&self) -> (u32, u32, u8) {
-        let global_row = self.tile_row * 16 + self.chunk_row as u32;
-        let global_col = self.tile_col * 16 + self.chunk_col as u32;
-        (global_row, global_col, self.zoom + 4)
+        let global_row = self.tile_row * CHUNKS_PER_TILE_SIDE + self.chunk_row as u32;
+        let global_col = self.tile_col * CHUNKS_PER_TILE_SIDE + self.chunk_col as u32;
+        (global_row, global_col, self.zoom + CHUNK_ZOOM_OFFSET)
     }
 }
 

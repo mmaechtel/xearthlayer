@@ -530,6 +530,13 @@ impl Filesystem for Fuse3OrthoUnionFS {
             }
         }
 
+        // Patched region passthrough gate
+        // If this resource is in a region owned by a patch, the patch is responsible
+        // for providing it. Serve only what exists on disk — no generation.
+        if self.index.is_resource_in_patched_region(&child_path) {
+            return Err(Errno::from(libc::ENOENT));
+        }
+
         // Check if it's a DDS file we can generate
         if name_str.ends_with(".dds") {
             if let Ok(coords) = parse_dds_filename(&name_str) {
@@ -1244,6 +1251,138 @@ mod tests {
         assert_ne!(
             dsf_entry.attr.size, virtual_dds_size,
             "DSF file should NOT have virtual DDS size"
+        );
+    }
+
+    // ========================================================================
+    // Patched region passthrough gate tests (Issue #51)
+    // ========================================================================
+
+    /// Test that lookup returns ENOENT for DDS files in patched regions.
+    ///
+    /// When a patch owns a region (provides the DSF), FUSE should never generate
+    /// DDS textures for that region — it should return ENOENT for missing files.
+    #[tokio::test]
+    async fn test_lookup_patched_region_returns_enoent_for_missing_dds() {
+        use fuse3::raw::Filesystem;
+
+        let temp = TempDir::new().unwrap();
+
+        // Create a patch with DSF in region (33, -119)
+        let patches_dir = temp.path().join("patches");
+        let patch_dir = patches_dir.join("LIPX_Mesh");
+        let nav_dir = patch_dir.join("Earth nav data/+30-120");
+        std::fs::create_dir_all(&nav_dir).unwrap();
+        std::fs::write(nav_dir.join("+33-119.dsf"), b"fake dsf").unwrap();
+        std::fs::create_dir_all(patch_dir.join("terrain")).unwrap();
+
+        // Create a package so we have a textures/ directory
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .with_patches_dir(&patches_dir)
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        // Verify the region is marked as patched
+        assert!(
+            index.is_patched_region(33, -119),
+            "Region (33, -119) should be patched"
+        );
+
+        let client = create_test_client();
+        let fs = Fuse3OrthoUnionFS::new(index, client, 1024);
+
+        // Get inode for "textures" directory
+        let textures_inode = fs
+            .inode_manager
+            .get_or_create_inode(std::path::Path::new("textures"));
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        // Look up a DDS filename whose coordinates fall in the patched region (33, -119).
+        // We need a filename that resolves to DsfTileCoord(33, -119).
+        // Use from_lat_lon to find chunk coordinates for that region.
+        // At zoom 16, tiles near 33.5°N -118.5°W are roughly row ~6250, col ~7167
+        // But we need to construct a valid DDS filename. Let's use a known coordinate
+        // mapping: a chunk at zoom 16 in the (33, -119) DSF region.
+        use crate::coord::to_tile_coords;
+        let tc = to_tile_coords(33.5, -118.5, 16).unwrap();
+        let dds_name = format!("{}_{}_BI16.dds", tc.row, tc.col);
+
+        // Verify this filename actually maps to the patched region
+        use crate::prefetch::tile_based::DsfTileCoord;
+        let dsf = DsfTileCoord::from_scenery_filename(&dds_name).unwrap();
+        assert_eq!(dsf.lat, 33, "DDS filename should map to lat 33");
+        assert_eq!(dsf.lon, -119, "DDS filename should map to lon -119");
+
+        // Lookup should return ENOENT because:
+        // 1. The DDS file doesn't exist on disk
+        // 2. The region is owned by a patch → no generation
+        let result = fs
+            .lookup(req, textures_inode, std::ffi::OsStr::new(&dds_name))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Lookup for DDS in patched region should return ENOENT, got: {:?}",
+            result
+        );
+    }
+
+    /// Test that lookup in a non-patched region still creates a virtual inode for DDS generation.
+    #[tokio::test]
+    async fn test_lookup_non_patched_region_creates_virtual_inode() {
+        use fuse3::raw::Filesystem;
+
+        let temp = TempDir::new().unwrap();
+
+        // Create a package (no patches = no patched regions)
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            index.patched_region_count(),
+            0,
+            "No patches = no patched regions"
+        );
+
+        let client = create_test_client();
+        let fs = Fuse3OrthoUnionFS::new(index, client, 1024);
+
+        let textures_inode = fs
+            .inode_manager
+            .get_or_create_inode(std::path::Path::new("textures"));
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        // Any DDS filename should succeed (virtual inode for generation)
+        let result = fs
+            .lookup(
+                req,
+                textures_inode,
+                std::ffi::OsStr::new("10000_5000_BI16.dds"),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Lookup for DDS in non-patched region should succeed for generation"
         );
     }
 }

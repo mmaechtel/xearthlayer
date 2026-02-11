@@ -4,7 +4,7 @@
 //! and regional packages). It is constructed by [`OrthoUnionIndexBuilder`] and
 //! is immutable after construction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -166,6 +166,13 @@ pub struct OrthoUnionIndex {
 
     /// Total file count across all sources.
     total_files: usize,
+
+    /// 1°×1° DSF regions owned by patches.
+    ///
+    /// When a patch provides the DSF for a region, it owns all resources in
+    /// that region. FUSE, prewarm, and prefetch skip generation for these areas.
+    #[serde(default)]
+    patched_regions: HashSet<(i32, i32)>,
 }
 
 impl OrthoUnionIndex {
@@ -179,6 +186,7 @@ impl OrthoUnionIndex {
             files: HashMap::new(),
             directories: HashMap::new(),
             total_files: 0,
+            patched_regions: HashSet::new(),
         }
     }
 
@@ -191,6 +199,7 @@ impl OrthoUnionIndex {
             files: HashMap::new(),
             directories: HashMap::new(),
             total_files: 0,
+            patched_regions: HashSet::new(),
         }
     }
 
@@ -392,6 +401,45 @@ impl OrthoUnionIndex {
     /// Check if the index is empty (no sources).
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
+    }
+
+    /// Set the patched regions (used by builder after index construction).
+    pub(crate) fn set_patched_regions(&mut self, regions: HashSet<(i32, i32)>) {
+        self.patched_regions = regions;
+    }
+
+    /// Check if a 1°×1° DSF region is owned by a patch.
+    pub fn is_patched_region(&self, lat: i32, lon: i32) -> bool {
+        self.patched_regions.contains(&(lat, lon))
+    }
+
+    /// Get the set of patched regions (for logging).
+    pub fn patched_regions(&self) -> &HashSet<(i32, i32)> {
+        &self.patched_regions
+    }
+
+    /// Get the number of patched regions.
+    pub fn patched_region_count(&self) -> usize {
+        self.patched_regions.len()
+    }
+
+    /// Check if a virtual path refers to a resource in a patch-owned region.
+    ///
+    /// Returns true if the resource's geographic region is covered by a patch DSF.
+    /// When true, FUSE should operate in pure passthrough mode — serve only what
+    /// exists on disk, never generate resources. The patch owns this area.
+    pub fn is_resource_in_patched_region(&self, virtual_path: &Path) -> bool {
+        if self.patched_regions.is_empty() {
+            return false; // Fast path: no patches installed
+        }
+        let filename = match virtual_path.file_name().and_then(|f| f.to_str()) {
+            Some(f) => f,
+            None => return false,
+        };
+        match DsfTileCoord::from_scenery_filename(filename) {
+            Some(dsf) => self.patched_regions.contains(&(dsf.lat, dsf.lon)),
+            None => false, // Can't determine region → not considered patched
+        }
     }
 
     /// Iterate over all files in the index.
@@ -1126,5 +1174,109 @@ mod tests {
             index.dds_tile_exists(200000, 125184, 18),
             "Should find tile from second source"
         );
+    }
+
+    // ========================================================================
+    // Patched region tests (Issue #51)
+    // ========================================================================
+
+    #[test]
+    fn test_patched_region_empty() {
+        let index = OrthoUnionIndex::new();
+        assert!(!index.is_patched_region(45, 11));
+        assert_eq!(index.patched_region_count(), 0);
+    }
+
+    #[test]
+    fn test_patched_region_match() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        regions.insert((45, 11));
+        regions.insert((45, 12));
+        index.set_patched_regions(regions);
+
+        assert!(index.is_patched_region(45, 11));
+        assert!(index.is_patched_region(45, 12));
+        assert_eq!(index.patched_region_count(), 2);
+    }
+
+    #[test]
+    fn test_patched_region_no_match() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        regions.insert((45, 11));
+        index.set_patched_regions(regions);
+
+        assert!(!index.is_patched_region(45, 12));
+        assert!(!index.is_patched_region(33, -119));
+    }
+
+    #[test]
+    fn test_patched_regions_accessor() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        regions.insert((45, 11));
+        index.set_patched_regions(regions);
+
+        let accessor = index.patched_regions();
+        assert!(accessor.contains(&(45, 11)));
+        assert_eq!(accessor.len(), 1);
+    }
+
+    #[test]
+    fn test_is_resource_in_patched_region_dds() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        // Use DsfTileCoord::from_dds_filename to find the actual region for "10000_5000_BI16.dds"
+        let dsf = DsfTileCoord::from_dds_filename("10000_5000_BI16.dds").unwrap();
+        regions.insert((dsf.lat, dsf.lon));
+        index.set_patched_regions(regions);
+
+        let path = std::path::Path::new("textures/10000_5000_BI16.dds");
+        assert!(index.is_resource_in_patched_region(path));
+    }
+
+    #[test]
+    fn test_is_resource_in_patched_region_ter() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        let dsf = DsfTileCoord::from_scenery_filename("10000_5000_BI16.ter").unwrap();
+        regions.insert((dsf.lat, dsf.lon));
+        index.set_patched_regions(regions);
+
+        let path = std::path::Path::new("terrain/10000_5000_BI16.ter");
+        assert!(index.is_resource_in_patched_region(path));
+    }
+
+    #[test]
+    fn test_is_resource_in_patched_region_non_patched() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        regions.insert((45, 11)); // some unrelated region
+        index.set_patched_regions(regions);
+
+        // This DDS is NOT in the (45, 11) region
+        let path = std::path::Path::new("textures/10000_5000_BI16.dds");
+        assert!(!index.is_resource_in_patched_region(path));
+    }
+
+    #[test]
+    fn test_is_resource_in_patched_region_no_patches() {
+        let index = OrthoUnionIndex::new();
+        // Fast path: no patches installed, should return false immediately
+        let path = std::path::Path::new("textures/10000_5000_BI16.dds");
+        assert!(!index.is_resource_in_patched_region(path));
+    }
+
+    #[test]
+    fn test_is_resource_in_patched_region_non_scenery_file() {
+        let mut index = OrthoUnionIndex::new();
+        let mut regions = std::collections::HashSet::new();
+        regions.insert((45, 11));
+        index.set_patched_regions(regions);
+
+        // Non-scenery files (like DSF files) should return false
+        let path = std::path::Path::new("Earth nav data/+45+011.dsf");
+        assert!(!index.is_resource_in_patched_region(path));
     }
 }

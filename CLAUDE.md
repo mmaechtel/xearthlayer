@@ -109,7 +109,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - `CircuitBreaker` - Pauses prefetch during X-Plane scene loading
     - Submits jobs to shared job executor daemon via `DdsClient` trait
     - Mode selection: Aggressive (>30 tiles/sec), Opportunistic (10-30), or Disabled
-    - **Three-tier filtering**: Local tracking → Memory cache → Disk existence (via `OrthoUnionIndex`)
+    - **Four-tier filtering**: Local tracking → Memory cache → Patched region exclusion → Disk existence (via `OrthoUnionIndex`)
     - See `docs/dev/adaptive-prefetch-design.md` for design details
 
 12. **Ortho Union Index** (`xearthlayer/src/ortho_union/`)
@@ -121,6 +121,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - `IndexBuildProgress` - Progress reporting with factory methods
     - Priority resolution: patches (`_patches/*`) sort before regional packages
     - `dds_tile_exists(row, col, zoom)` - Checks if DDS tile exists on disk (used by prefetch)
+    - Patch region ownership: `patched_regions` HashSet tracks 1x1 DSF regions covered by patches
+    - `is_patched_region(lat, lon)` - Region-level query for prewarm/prefetch filtering
+    - `is_resource_in_patched_region(path)` - FUSE passthrough gate (no generation for patch-owned regions)
 
 ### Module Dependencies
 
@@ -152,6 +155,8 @@ Uses **Web Mercator** (Slippy Map) projection:
 - Tile coordinates: (row, col, zoom)
 - Each tile = 16×16 chunks of 256×256 pixels = 4096×4096 total
 - Chunk zoom = tile zoom + 4 (e.g., tile zoom 12 → chunk zoom 16)
+- Named constants: `CHUNKS_PER_TILE_SIDE` (16), `CHUNK_ZOOM_OFFSET` (4) in `coord/types.rs`
+- Canonical conversion: `TileCoord::chunk_origin()` → (chunk_row, chunk_col, chunk_zoom)
 
 ### Threading Model
 

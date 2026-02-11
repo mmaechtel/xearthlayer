@@ -43,6 +43,7 @@ use tracing::{debug, info, warn};
 use crate::coord::TileCoord;
 use crate::executor::{DdsClient, MemoryCache, Priority};
 use crate::ortho_union::OrthoUnionIndex;
+use crate::prefetch::tile_based::DsfTileCoord;
 use crate::runtime::{JobRequest, RequestOrigin};
 
 /// Maximum concurrent tile requests in flight.
@@ -68,7 +69,9 @@ pub struct PrewarmStatus {
     pub failed: usize,
     /// Tiles that were already in memory cache.
     pub cache_hits: usize,
-    /// Tiles that already exist on disk (patches, disk cache, etc.).
+    /// Tiles skipped because their region is owned by a patch.
+    pub patch_skipped: usize,
+    /// Tiles that already exist on disk (XEL cache, etc.).
     pub disk_hits: usize,
     /// Whether prewarm has finished (success or failure).
     pub is_complete: bool,
@@ -85,6 +88,7 @@ impl PrewarmStatus {
             completed: 0,
             failed: 0,
             cache_hits: 0,
+            patch_skipped: 0,
             disk_hits: 0,
             is_complete: false,
             was_cancelled: false,
@@ -93,8 +97,9 @@ impl PrewarmStatus {
 
     /// Number of tiles currently in flight (submitted but not yet complete).
     pub fn in_flight(&self) -> usize {
-        self.total
-            .saturating_sub(self.completed + self.failed + self.cache_hits + self.disk_hits)
+        self.total.saturating_sub(
+            self.completed + self.failed + self.cache_hits + self.patch_skipped + self.disk_hits,
+        )
     }
 
     /// Progress as a fraction from 0.0 to 1.0.
@@ -102,12 +107,13 @@ impl PrewarmStatus {
         if self.total == 0 {
             return 1.0; // Empty prewarm is "complete"
         }
-        (self.completed + self.cache_hits + self.disk_hits) as f64 / self.total as f64
+        (self.completed + self.cache_hits + self.patch_skipped + self.disk_hits) as f64
+            / self.total as f64
     }
 
-    /// Total tiles that have been processed (completed + failed + cache_hits + disk_hits).
+    /// Total tiles that have been processed (completed + failed + cache_hits + patch_skipped + disk_hits).
     pub fn processed(&self) -> usize {
-        self.completed + self.failed + self.cache_hits + self.disk_hits
+        self.completed + self.failed + self.cache_hits + self.patch_skipped + self.disk_hits
     }
 }
 
@@ -236,12 +242,27 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
             }
         }
 
-        // Step 1b: Filter out tiles already on disk (patches, disk cache, etc.)
+        // Step 1b: Filter out tiles in patched regions (region-level ownership)
+        let before_patch = to_generate.len();
+        to_generate.retain(|tile| {
+            let (lat, lon) = tile.to_lat_lon();
+            let dsf = DsfTileCoord::from_lat_lon(lat, lon);
+            !self.ortho_index.is_patched_region(dsf.lat, dsf.lon)
+        });
+        let patch_skipped = before_patch - to_generate.len();
+        if patch_skipped > 0 {
+            let mut s = self.status.lock();
+            s.patch_skipped = patch_skipped;
+        }
+
+        // Step 1c: Filter out tiles already on disk (XEL cache, etc.)
+        // Use chunk_origin() for the canonical tile → chunk coordinate conversion
         let before_disk = to_generate.len();
         to_generate.retain(|tile| {
+            let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
             !self
                 .ortho_index
-                .dds_tile_exists(tile.row, tile.col, tile.zoom)
+                .dds_tile_exists(chunk_row, chunk_col, chunk_zoom)
         });
         let disk_hits = before_disk - to_generate.len();
         if disk_hits > 0 {
@@ -257,9 +278,10 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
         info!(
             total = self.tiles.len(),
             cache_hits,
+            patch_skipped,
             disk_hits,
             to_generate = to_generate.len(),
-            "Prewarm filter complete"
+            "Prewarm tile filtering complete"
         );
 
         if to_generate.is_empty() {
@@ -403,6 +425,7 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
             completed = s.completed,
             failed = s.failed,
             cache_hits = s.cache_hits,
+            patch_skipped = s.patch_skipped,
             disk_hits = s.disk_hits,
             total = s.total,
             "Prewarm complete"
@@ -653,31 +676,36 @@ mod tests {
     async fn test_prewarm_skips_tiles_on_disk() {
         let temp = TempDir::new().unwrap();
 
-        // Create index with DDS files for tiles (100, 200, 16) and (100, 201, 16)
-        let index = create_index_with_dds(&temp, &["100_200_BI16.dds", "100_201_BI16.dds"]);
+        // Prewarm uses tile-level coords (row, col, zoom), but dds_tile_exists()
+        // needs chunk-level coords (row*16, col*16, zoom+4). DDS filenames on
+        // disk use chunk coords. Tile (6, 12, 12) → chunk (96, 192, 16).
+        let index = create_index_with_dds(
+            &temp,
+            &["96_192_BI16.dds", "96_208_BI16.dds"], // chunk coords for tiles (6,12) and (6,13)
+        );
 
-        // Verify the index finds these tiles
-        assert!(index.dds_tile_exists(100, 200, 16));
-        assert!(index.dds_tile_exists(100, 201, 16));
-        assert!(!index.dds_tile_exists(100, 202, 16));
+        // Verify the index finds these as chunk coords
+        assert!(index.dds_tile_exists(96, 192, 16));
+        assert!(index.dds_tile_exists(96, 208, 16));
+        assert!(!index.dds_tile_exists(96, 224, 16));
 
-        // Create tiles: 2 on disk + 1 not on disk
+        // Create tiles at tile-level coords: 2 on disk + 1 not on disk
         let tiles = vec![
             TileCoord {
-                row: 100,
-                col: 200,
-                zoom: 16,
-            },
+                row: 6,
+                col: 12,
+                zoom: 12,
+            }, // chunk (96, 192, 16) — on disk
             TileCoord {
-                row: 100,
-                col: 201,
-                zoom: 16,
-            },
+                row: 6,
+                col: 13,
+                zoom: 12,
+            }, // chunk (96, 208, 16) — on disk
             TileCoord {
-                row: 100,
-                col: 202,
-                zoom: 16,
-            }, // NOT on disk
+                row: 6,
+                col: 14,
+                zoom: 12,
+            }, // chunk (96, 224, 16) — NOT on disk
         ];
 
         let (client, mut rx) = TestDdsClient::new();
@@ -692,10 +720,10 @@ mod tests {
             &tokio::runtime::Handle::current(),
         );
 
-        // Respond to the ONE job that should be submitted (tile 202)
+        // Respond to the ONE job that should be submitted (tile col=14)
         if let Some(request) = rx.recv().await {
             assert_eq!(
-                request.tile.col, 202,
+                request.tile.col, 14,
                 "Only non-disk tile should be submitted"
             );
             if let Some(tx) = request.response_tx {
@@ -716,23 +744,99 @@ mod tests {
         assert_eq!(status.cache_hits, 0, "No memory cache hits");
     }
 
+    /// Build a test OrthoUnionIndex fixture with specific patched regions.
+    fn build_test_index_with_patched_regions(
+        temp: &TempDir,
+        regions: &[(i32, i32)],
+    ) -> Arc<OrthoUnionIndex> {
+        let pkg_dir = temp.path().join("test_ortho");
+        std::fs::create_dir_all(pkg_dir.join("textures")).unwrap();
+
+        let source = OrthoSource::new_package("test", &pkg_dir);
+        let mut index = OrthoUnionIndex::with_sources(vec![source]);
+        let region_set: std::collections::HashSet<(i32, i32)> = regions.iter().cloned().collect();
+        index.set_patched_regions(region_set);
+        Arc::new(index)
+    }
+
+    #[tokio::test]
+    async fn test_prewarm_skips_patched_regions() {
+        use crate::prefetch::tile_based::DsfTileCoord;
+
+        let temp = TempDir::new().unwrap();
+
+        // Build test index with patched region (33, -119)
+        let index = build_test_index_with_patched_regions(&temp, &[(33, -119)]);
+
+        // Create tiles: 2 in patched region + 1 outside
+        // Use to_tile_coords to get valid chunk coords in DSF region (33, -119)
+        let tc_patched = crate::coord::to_tile_coords(33.5, -118.5, 16).unwrap();
+        let tc_patched2 = crate::coord::TileCoord {
+            row: tc_patched.row + 1,
+            col: tc_patched.col,
+            zoom: 16,
+        };
+        // A tile clearly outside the patched region
+        let tc_outside = crate::coord::to_tile_coords(60.0, 10.0, 16).unwrap();
+
+        // Verify our coordinate expectations
+        let dsf = DsfTileCoord::from_lat_lon(33.5, -118.5);
+        assert_eq!(dsf.lat, 33);
+        assert_eq!(dsf.lon, -119);
+
+        let tiles = vec![tc_patched, tc_patched2, tc_outside];
+
+        let (client, mut rx) = TestDdsClient::new();
+        let memory_cache = Arc::new(EmptyMemoryCache);
+
+        let handle = start_prewarm(
+            "PATCH".to_string(),
+            tiles,
+            client,
+            memory_cache,
+            index,
+            &tokio::runtime::Handle::current(),
+        );
+
+        // Only the non-patched tile should be submitted
+        if let Some(request) = rx.recv().await {
+            assert_eq!(
+                request.tile.row, tc_outside.row,
+                "Only non-patched tile should be submitted"
+            );
+            if let Some(tx) = request.response_tx {
+                let _ = tx.send(DdsResponse::success(
+                    vec![0u8; 10],
+                    std::time::Duration::from_millis(1),
+                ));
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let status = handle.status();
+        assert!(status.is_complete);
+        assert_eq!(status.patch_skipped, 2, "Two tiles should be patch-skipped");
+        assert_eq!(status.completed, 1, "One tile should be generated");
+    }
+
     #[tokio::test]
     async fn test_prewarm_all_tiles_on_disk() {
         let temp = TempDir::new().unwrap();
 
-        // Create index with DDS files for all requested tiles
-        let index = create_index_with_dds(&temp, &["50_60_BI16.dds", "50_61_BI16.dds"]);
+        // Tile (3, 4, 12) → chunk (48, 64, 16), tile (3, 5, 12) → chunk (48, 80, 16)
+        let index = create_index_with_dds(&temp, &["48_64_BI16.dds", "48_80_BI16.dds"]);
 
         let tiles = vec![
             TileCoord {
-                row: 50,
-                col: 60,
-                zoom: 16,
+                row: 3,
+                col: 4,
+                zoom: 12,
             },
             TileCoord {
-                row: 50,
-                col: 61,
-                zoom: 16,
+                row: 3,
+                col: 5,
+                zoom: 12,
             },
         ];
 

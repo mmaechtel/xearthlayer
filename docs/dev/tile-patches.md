@@ -536,3 +536,4 @@ A more comprehensive validation tool could:
 | Date | Change |
 |------|--------|
 | 2026-01-07 | Initial design document |
+| 2026-02-08 | Add region-level ownership: patches with DSF files own the 1x1 region, FUSE/prewarm/prefetch skip generation (#51) |

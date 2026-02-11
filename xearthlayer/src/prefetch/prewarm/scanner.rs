@@ -243,12 +243,10 @@ pub fn parse_ter_filename(filename: &str) -> Option<TileCoord> {
     let zoom_str = &provider_zoom[provider_zoom.len() - 2..];
     let chunk_zoom: u8 = zoom_str.parse().ok()?;
 
-    // Convert CHUNK coordinates to TILE coordinates:
-    // - Each tile contains 16×16 chunks
-    // - Tile zoom = chunk zoom - 4 (2^4 = 16)
-    let tile_row = chunk_row / 16;
-    let tile_col = chunk_col / 16;
-    let tile_zoom = chunk_zoom.saturating_sub(4);
+    // Convert CHUNK coordinates to TILE coordinates (inverse of TileCoord::chunk_origin)
+    let tile_row = chunk_row / crate::coord::CHUNKS_PER_TILE_SIDE;
+    let tile_col = chunk_col / crate::coord::CHUNKS_PER_TILE_SIDE;
+    let tile_zoom = chunk_zoom.saturating_sub(crate::coord::CHUNK_ZOOM_OFFSET);
 
     Some(TileCoord {
         row: tile_row,

@@ -48,5 +48,7 @@
 mod discovery;
 mod union_index;
 
-pub use discovery::{PatchDiscovery, PatchInfo, PatchValidation, ValidationError};
+pub use discovery::{
+    extract_dsf_regions, PatchDiscovery, PatchInfo, PatchValidation, ValidationError,
+};
 pub use union_index::{DirEntry, PatchUnionIndex};

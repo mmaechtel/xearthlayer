@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::prefetch::tile_based::DsfTileCoord;
+
 /// Errors that can occur during patch validation.
 #[derive(Debug, Error, Clone)]
 pub enum ValidationError {
@@ -45,6 +47,12 @@ pub struct PatchInfo {
     /// Number of texture (.dds) files found.
     pub texture_count: usize,
 
+    /// 1°×1° DSF regions owned by this patch (lat, lon pairs).
+    ///
+    /// Populated from DSF filenames in `Earth nav data/`. Each entry represents
+    /// a region where this patch provides the authoritative scenery data.
+    pub dsf_regions: Vec<(i32, i32)>,
+
     /// Whether this patch passed validation.
     pub is_valid: bool,
 
@@ -61,6 +69,7 @@ impl PatchInfo {
             dsf_count: 0,
             terrain_count: 0,
             texture_count: 0,
+            dsf_regions: Vec::new(),
             is_valid: true,
             validation_errors: Vec::new(),
         }
@@ -173,6 +182,7 @@ impl PatchDiscovery {
             info.dsf_count = validation.dsf_count;
             info.terrain_count = validation.terrain_count;
             info.texture_count = validation.texture_count;
+            info.dsf_regions = extract_dsf_regions(&path);
             info.is_valid = validation.is_valid;
             info.validation_errors = validation.errors;
 
@@ -254,6 +264,42 @@ impl PatchDiscovery {
         let patch_path = self.patches_dir.join(name);
         let validation = self.validate_patch(&patch_path);
         validation.is_valid
+    }
+}
+
+/// Extract DSF region coordinates from a patch directory.
+///
+/// Scans `Earth nav data/` for `.dsf` files and parses their filenames
+/// (e.g., `+33-119.dsf` → `(33, -119)`) to determine which 1°×1° regions
+/// the patch covers. Ownership follows the DSF — if a patch provides the
+/// DSF for a region, it owns all resources in that region.
+pub fn extract_dsf_regions(patch_path: &Path) -> Vec<(i32, i32)> {
+    let earth_nav = patch_path.join("Earth nav data");
+    if !earth_nav.exists() {
+        return Vec::new();
+    }
+
+    let mut regions = Vec::new();
+    collect_dsf_regions_recursive(&earth_nav, &mut regions);
+    regions
+}
+
+/// Recursively collect DSF region coordinates from a directory.
+fn collect_dsf_regions_recursive(dir: &Path, regions: &mut Vec<(i32, i32)>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dsf_regions_recursive(&path, regions);
+        } else if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+            if let Some(coord) = DsfTileCoord::from_dsf_filename(filename) {
+                regions.push((coord.lat, coord.lon));
+            }
+        }
     }
 }
 
@@ -444,5 +490,88 @@ mod tests {
         assert_eq!(validation.dsf_count, 1);
         assert_eq!(validation.terrain_count, 1);
         assert_eq!(validation.texture_count, 0);
+    }
+
+    // =========================================================================
+    // extract_dsf_regions tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_extract_dsf_regions_from_patch() {
+        let temp = TempDir::new().unwrap();
+        let patch_dir = temp.path().join("LIPX_Mesh");
+        // DSF files live in subdirectories of "Earth nav data/"
+        let nav_dir = patch_dir.join("Earth nav data").join("+40+010");
+        std::fs::create_dir_all(&nav_dir).unwrap();
+        std::fs::write(nav_dir.join("+45+011.dsf"), b"dsf1").unwrap();
+        std::fs::write(nav_dir.join("+45+012.dsf"), b"dsf2").unwrap();
+
+        let regions = extract_dsf_regions(&patch_dir);
+
+        assert_eq!(regions.len(), 2);
+        assert!(regions.contains(&(45, 11)));
+        assert!(regions.contains(&(45, 12)));
+    }
+
+    #[test]
+    fn test_extract_dsf_regions_empty_patch() {
+        let temp = TempDir::new().unwrap();
+        let patch_dir = temp.path().join("EmptyPatch");
+        std::fs::create_dir_all(patch_dir.join("Earth nav data")).unwrap();
+
+        let regions = extract_dsf_regions(&patch_dir);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dsf_regions_no_earth_nav_data() {
+        let temp = TempDir::new().unwrap();
+        let patch_dir = temp.path().join("NoPatch");
+        std::fs::create_dir_all(&patch_dir).unwrap();
+
+        let regions = extract_dsf_regions(&patch_dir);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dsf_regions_negative_coords() {
+        let temp = TempDir::new().unwrap();
+        let patch_dir = temp.path().join("SouthPatch");
+        let nav_dir = patch_dir.join("Earth nav data").join("-50+010");
+        std::fs::create_dir_all(&nav_dir).unwrap();
+        std::fs::write(nav_dir.join("-46+012.dsf"), b"dsf").unwrap();
+
+        let regions = extract_dsf_regions(&patch_dir);
+
+        assert_eq!(regions.len(), 1);
+        assert!(regions.contains(&(-46, 12)));
+    }
+
+    #[test]
+    fn test_extract_dsf_regions_zero_coords() {
+        let temp = TempDir::new().unwrap();
+        let patch_dir = temp.path().join("ZeroPatch");
+        let nav_dir = patch_dir.join("Earth nav data").join("+00+000");
+        std::fs::create_dir_all(&nav_dir).unwrap();
+        std::fs::write(nav_dir.join("+00+000.dsf"), b"dsf").unwrap();
+
+        let regions = extract_dsf_regions(&patch_dir);
+
+        assert_eq!(regions.len(), 1);
+        assert!(regions.contains(&(0, 0)));
+    }
+
+    #[test]
+    fn test_patch_info_has_dsf_regions() {
+        let temp = TempDir::new().unwrap();
+        let _patch_dir = create_test_patch(&temp, "RegionPatch", true, true);
+        // The test helper creates +33-119.dsf inside Earth nav data/+30-120/
+
+        let discovery = PatchDiscovery::new(temp.path());
+        let patches = discovery.find_patches().unwrap();
+
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].dsf_regions.len(), 1);
+        assert!(patches[0].dsf_regions.contains(&(33, -119)));
     }
 }
