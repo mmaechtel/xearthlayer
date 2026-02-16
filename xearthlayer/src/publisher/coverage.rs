@@ -79,9 +79,10 @@ impl Default for CoverageConfig {
         region_colors.insert("as3".to_string(), (255, 80, 80, 180));
         // Green for AS (legacy/future Asia regions)
         region_colors.insert("as".to_string(), (0, 200, 83, 180));
-        // Yellowish-green for AF/AF1/AF2 (Africa - desert/savanna/jungle)
+        // Cyan for AF1 (North Africa)
+        region_colors.insert("af1".to_string(), (0, 188, 212, 180));
+        // Yellowish-green for AF/AF2 (Southern Africa)
         region_colors.insert("af".to_string(), (180, 200, 80, 180));
-        region_colors.insert("af1".to_string(), (180, 200, 80, 180));
         region_colors.insert("af2".to_string(), (180, 200, 80, 180));
 
         Self {
@@ -110,9 +111,10 @@ impl CoverageConfig {
         region_colors.insert("as3".to_string(), (255, 100, 100, 200));
         // Green for AS (legacy/future Asia regions)
         region_colors.insert("as".to_string(), (100, 255, 150, 200));
-        // Yellowish-green for AF/AF1/AF2 (Africa - brighter for dark background)
+        // Cyan for AF1 (North Africa - brighter for dark background)
+        region_colors.insert("af1".to_string(), (0, 220, 240, 200));
+        // Yellowish-green for AF/AF2 (Southern Africa - brighter for dark background)
         region_colors.insert("af".to_string(), (210, 230, 120, 200));
-        region_colors.insert("af1".to_string(), (210, 230, 120, 200));
         region_colors.insert("af2".to_string(), (210, 230, 120, 200));
 
         Self {
