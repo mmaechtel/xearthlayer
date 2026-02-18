@@ -248,7 +248,8 @@ pub fn run_tui(config: TuiAppConfig) -> Result<CancellationToken, CliError> {
                 .cloned()
                 .unwrap_or_else(|| PrewarmProgress::new(&status.icao, status.total));
 
-            prewarm_progress.tiles_loaded = status.completed + status.cache_hits;
+            prewarm_progress.tiles_loaded =
+                status.completed + status.cache_hits + status.patch_skipped + status.disk_hits;
             prewarm_progress.total_tiles = status.total;
             prewarm_progress.cache_hits = status.cache_hits;
 
@@ -265,6 +266,8 @@ pub fn run_tui(config: TuiAppConfig) -> Result<CancellationToken, CliError> {
                     tracing::info!(
                         completed = status.completed,
                         cache_hits = status.cache_hits,
+                        patch_skipped = status.patch_skipped,
+                        disk_hits = status.disk_hits,
                         failed = status.failed,
                         "Prewarm complete"
                     );

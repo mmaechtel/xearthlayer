@@ -550,7 +550,7 @@ let tiles = scenery_index.tiles_in_dsf(
 
 The `OrthoUnionIndex` enables disk-based tile filtering, preventing prefetch from downloading tiles that already exist in installed ortho packages or user patches. This addresses Issue #39.
 
-#### Three-Tier Filter Chain
+#### Four-Tier Filter Chain
 
 When calculating tiles to prefetch, the coordinator applies filters in order of speed (fastest first):
 
@@ -566,12 +566,18 @@ When calculating tiles to prefetch, the coordinator applies filters in order of 
 │     • Queries moka-based LRU cache                                      │
 │     • Skips tiles already generated this session                        │
 │                                                                         │
-│  3. DISK EXISTENCE (filesystem probe)                                   │
+│  3. PATCHED REGION EXCLUSION (HashSet)                    [Issue #51]   │
+│     • Queries OrthoUnionIndex.is_patched_region(lat, lon)               │
+│     • Skips tiles in 1°×1° DSF regions owned by patches                │
+│     • DSF ownership: if a patch provides the DSF, it owns the region   │
+│                                                                         │
+│  4. DISK EXISTENCE (filesystem probe)                                   │
 │     • Queries OrthoUnionIndex.dds_tile_exists(row, col, zoom)           │
-│     • Skips tiles from installed packages and patches                   │
+│     • Uses TileCoord::chunk_origin() for tile→chunk conversion          │
+│     • Skips tiles from installed packages and XEL cache                 │
 │     • Checks all filename patterns: ZL, BI, GO2, GO                     │
 │                                                                         │
-│  Only tiles that pass ALL three filters are submitted for download      │
+│  Only tiles that pass ALL four filters are submitted for download       │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 

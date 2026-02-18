@@ -305,6 +305,7 @@ mod tests {
             dsf_count: 1,
             terrain_count: 2,
             texture_count: 0,
+            dsf_regions: Vec::new(),
             is_valid: true,
             validation_errors: Vec::new(),
         };
@@ -315,6 +316,7 @@ mod tests {
             dsf_count: 1,
             terrain_count: 2,
             texture_count: 0,
+            dsf_regions: Vec::new(),
             is_valid: true,
             validation_errors: Vec::new(),
         };

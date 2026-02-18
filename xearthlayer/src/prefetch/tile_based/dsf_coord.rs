@@ -93,6 +93,43 @@ impl DsfTileCoord {
     pub fn from_dds_filename(filename: &str) -> Option<Self> {
         // Remove .dds extension
         let stem = filename.strip_suffix(".dds")?;
+        Self::parse_scenery_stem(stem)
+    }
+
+    /// Parse a DSF filename to extract the tile coordinate.
+    ///
+    /// DSF filenames follow the pattern `[+-]\d{2}[+-]\d{3}.dsf`.
+    /// Examples: `+33-119.dsf` → `(33, -119)`, `-46+012.dsf` → `(-46, 12)`.
+    pub fn from_dsf_filename(filename: &str) -> Option<Self> {
+        let stem = filename.strip_suffix(".dsf")?;
+
+        // Must be exactly 7 chars: [+-]DD[+-]DDD
+        if stem.len() != 7 {
+            return None;
+        }
+
+        let lat: i32 = stem[0..3].parse().ok()?;
+        let lon: i32 = stem[3..7].parse().ok()?;
+        Some(Self::new(lat, lon))
+    }
+
+    /// Parse a scenery filename (DDS, TER, etc.) to extract the DSF tile.
+    ///
+    /// Filename format: `{chunk_row}_{chunk_col}_{map_type}{zoom}.{ext}`
+    /// Works with any extension — the coordinate parsing is the same.
+    /// Also handles `_sea` suffix (e.g., `10000_5000_BI16_sea.ter`).
+    pub fn from_scenery_filename(filename: &str) -> Option<Self> {
+        // Strip any extension
+        let stem = filename.rsplit_once('.')?.0;
+        Self::parse_scenery_stem(stem)
+    }
+
+    /// Parse the stem of a scenery filename (without extension).
+    ///
+    /// Handles both `row_col_typeZoom` and `row_col_typeZoom_sea` formats.
+    fn parse_scenery_stem(stem: &str) -> Option<Self> {
+        // Handle _sea suffix
+        let stem = stem.strip_suffix("_sea").unwrap_or(stem);
 
         // Split by underscore: row_col_typeZoom
         let parts: Vec<&str> = stem.split('_').collect();
@@ -103,18 +140,17 @@ impl DsfTileCoord {
         let chunk_row: u32 = parts[0].parse().ok()?;
         let chunk_col: u32 = parts[1].parse().ok()?;
 
-        // Extract zoom from the third part (e.g., "BI16" -> 16)
+        // Extract zoom from the last 2 digits of the third part.
+        // Examples: "BI16" → 16, "GO218" → 18, "GO216" → 16
+        // The map type prefix may include a trailing digit (GO2), so we
+        // cannot simply skip alphabetic chars — we must take the last 2 digits.
         let zoom_part = parts[2];
-        let zoom: u8 = zoom_part
-            .chars()
-            .skip_while(|c| c.is_alphabetic())
-            .collect::<String>()
-            .parse()
-            .ok()?;
+        if zoom_part.len() < 3 {
+            return None;
+        }
+        let zoom: u8 = zoom_part[zoom_part.len() - 2..].parse().ok()?;
 
         // Convert chunk coordinates to geographic coordinates
-        // Chunks are 256x256 pixels at chunk_zoom level
-        // DDS tiles are 16x16 chunks, so tile_zoom = chunk_zoom - 4
         let (lat, lon) = chunk_to_lat_lon(chunk_row, chunk_col, zoom);
 
         Some(Self::from_lat_lon(lat, lon))
@@ -219,13 +255,28 @@ impl std::fmt::Display for DsfTileCoord {
 /// Chunks use Web Mercator projection. This converts the tile center
 /// to latitude/longitude.
 fn chunk_to_lat_lon(chunk_row: u32, chunk_col: u32, zoom: u8) -> (f64, f64) {
+    /// Offset to convert from cell top-left to cell center.
+    ///
+    /// Using the center rather than the corner ensures correct 1° DSF region
+    /// assignment. At zoom 12 (DDS tiles), cell width is ~0.088° — the corner
+    /// can fall in a different region than the center.
+    const CELL_CENTER_OFFSET: f64 = 0.5;
+    /// Full longitude range in degrees (Web Mercator covers -180° to +180°).
+    const FULL_LONGITUDE_DEGREES: f64 = 360.0;
+    /// Longitude offset to shift from [0°, 360°] → [-180°, +180°].
+    const LONGITUDE_ORIGIN_OFFSET: f64 = 180.0;
+    /// Web Mercator normalization factor: row/n maps to [0, 1], multiplied by
+    /// this to map to the full [-π, +π] Mercator Y range.
+    const MERCATOR_Y_SCALE: f64 = 2.0;
+
     let n = 2.0_f64.powi(zoom as i32);
 
-    // Calculate tile center (add 0.5 for center of tile)
-    let lon = (chunk_col as f64 / n) * 360.0 - 180.0;
+    let col_center = chunk_col as f64 + CELL_CENTER_OFFSET;
+    let lon = (col_center / n) * FULL_LONGITUDE_DEGREES - LONGITUDE_ORIGIN_OFFSET;
 
-    // Web Mercator latitude calculation
-    let lat_rad = std::f64::consts::PI * (1.0 - 2.0 * chunk_row as f64 / n);
+    // Inverse Web Mercator latitude (cell center)
+    let row_center = chunk_row as f64 + CELL_CENTER_OFFSET;
+    let lat_rad = std::f64::consts::PI * (1.0 - MERCATOR_Y_SCALE * row_center / n);
     let lat = lat_rad.sinh().atan().to_degrees();
 
     (lat, lon)
@@ -356,5 +407,252 @@ mod tests {
         set.insert(t1);
         assert!(set.contains(&t2));
         assert!(!set.contains(&t3));
+    }
+
+    // =========================================================================
+    // from_dsf_filename tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_from_dsf_filename_positive_coords() {
+        let tile = DsfTileCoord::from_dsf_filename("+45+011.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(45, 11)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_negative_coords() {
+        let tile = DsfTileCoord::from_dsf_filename("-46+012.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(-46, 12)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_mixed_signs() {
+        let tile = DsfTileCoord::from_dsf_filename("+33-119.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(33, -119)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_zero_coords() {
+        let tile = DsfTileCoord::from_dsf_filename("+00+000.dsf");
+        assert_eq!(tile, Some(DsfTileCoord::new(0, 0)));
+    }
+
+    #[test]
+    fn test_from_dsf_filename_wrong_extension() {
+        assert!(DsfTileCoord::from_dsf_filename("+33-119.ter").is_none());
+    }
+
+    #[test]
+    fn test_from_dsf_filename_invalid_format() {
+        assert!(DsfTileCoord::from_dsf_filename("invalid.dsf").is_none());
+        assert!(DsfTileCoord::from_dsf_filename("").is_none());
+        assert!(DsfTileCoord::from_dsf_filename("+33.dsf").is_none());
+    }
+
+    // =========================================================================
+    // from_scenery_filename tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_from_scenery_filename_dds() {
+        let tile = DsfTileCoord::from_scenery_filename("10000_5000_BI16.dds");
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_ter() {
+        let tile = DsfTileCoord::from_scenery_filename("10000_5000_BI16.ter");
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_sea_suffix() {
+        let tile = DsfTileCoord::from_scenery_filename("10000_5000_BI16_sea.ter");
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_invalid() {
+        assert!(DsfTileCoord::from_scenery_filename("invalid.dds").is_none());
+        assert!(DsfTileCoord::from_scenery_filename("readme.txt").is_none());
+        assert!(DsfTileCoord::from_scenery_filename("").is_none());
+    }
+
+    #[test]
+    fn test_from_scenery_filename_matches_from_dds_filename() {
+        // For .dds files, from_scenery_filename should produce same result as from_dds_filename
+        let dds_result = DsfTileCoord::from_dds_filename("10000_5000_BI16.dds");
+        let scenery_result = DsfTileCoord::from_scenery_filename("10000_5000_BI16.dds");
+        assert_eq!(dds_result, scenery_result);
+    }
+
+    /// GO2 naming convention: `GO218` → map type "GO2", zoom 18.
+    /// The trailing digit in "GO2" must not be consumed as part of the zoom.
+    #[test]
+    fn test_from_scenery_filename_go2_convention() {
+        let bi = DsfTileCoord::from_scenery_filename("10000_5000_BI16.dds");
+        let go2 = DsfTileCoord::from_scenery_filename("10000_5000_GO216.dds");
+        // Both are the same chunk coordinates, so they should produce
+        // the same DSF region regardless of map type prefix.
+        assert_eq!(bi, go2, "BI16 and GO216 should resolve to same DSF region");
+    }
+
+    /// GO2 at zoom 18 should parse correctly.
+    #[test]
+    fn test_from_scenery_filename_go218() {
+        use crate::coord::TileCoord;
+
+        // Coordinates at zoom 18 for a known region
+        let tc = crate::coord::to_tile_coords(33.5, -118.5, 18).unwrap();
+        let filename = format!("{}_{}_GO218.dds", tc.row, tc.col);
+        let dsf = DsfTileCoord::from_scenery_filename(&filename).unwrap();
+
+        // Should map to region (33, -119) — same as TileCoord center
+        let tile = TileCoord {
+            row: tc.row,
+            col: tc.col,
+            zoom: 18,
+        };
+        let (lat, _lon) = tile.to_lat_lon();
+        assert_eq!(
+            dsf.lat,
+            lat.floor() as i32,
+            "GO218 should parse zoom as 18, not 218"
+        );
+    }
+
+    /// Property-based test: all zoom levels and map type conventions must parse
+    /// to the same DSF region for the same geographic point.
+    ///
+    /// Patches can use any zoom level (12-19) and any map type (BI, GO2, etc.).
+    /// The zoom parser must handle all combinations correctly.
+    #[test]
+    fn test_scenery_filename_zoom_parsing_all_levels_and_types() {
+        // Test coordinates at several geographic locations
+        let test_points: &[(f64, f64)] = &[
+            (33.5, -118.5), // Los Angeles
+            (43.5, 6.5),    // Nice/LFMN
+            (-33.9, 151.2), // Sydney
+            (51.5, -0.1),   // London
+        ];
+
+        // Realistic zoom levels for ortho scenery
+        let zoom_levels: &[u8] = &[12, 14, 16, 17, 18];
+
+        // Map type prefixes: BI (Bing), GO2 (Google), USA (US-specific)
+        let map_types: &[&str] = &["BI", "GO2", "USA"];
+
+        for &(lat, lon) in test_points {
+            let expected_lat = lat.floor() as i32;
+            let expected_lon = lon.floor() as i32;
+
+            for &zoom in zoom_levels {
+                let tc = crate::coord::to_tile_coords(lat, lon, zoom).unwrap();
+
+                for &map_type in map_types {
+                    let filename = format!("{}_{}_{}{}", tc.row, tc.col, map_type, zoom);
+
+                    // DDS extension
+                    let dds_file = format!("{filename}.dds");
+                    let dsf = DsfTileCoord::from_scenery_filename(&dds_file)
+                        .unwrap_or_else(|| panic!("Failed to parse: {dds_file}"));
+                    assert_eq!(
+                        dsf.lat, expected_lat,
+                        "Wrong lat for {dds_file}: got {}, expected {}",
+                        dsf.lat, expected_lat
+                    );
+                    assert_eq!(
+                        dsf.lon, expected_lon,
+                        "Wrong lon for {dds_file}: got {}, expected {}",
+                        dsf.lon, expected_lon
+                    );
+
+                    // TER extension (same coordinates)
+                    let ter_file = format!("{filename}.ter");
+                    let dsf_ter = DsfTileCoord::from_scenery_filename(&ter_file)
+                        .unwrap_or_else(|| panic!("Failed to parse: {ter_file}"));
+                    assert_eq!(
+                        dsf, dsf_ter,
+                        "DDS and TER should resolve same region: {dds_file} vs {ter_file}"
+                    );
+
+                    // _sea.ter suffix
+                    let sea_file = format!("{filename}_sea.ter");
+                    let dsf_sea = DsfTileCoord::from_scenery_filename(&sea_file)
+                        .unwrap_or_else(|| panic!("Failed to parse: {sea_file}"));
+                    assert_eq!(
+                        dsf, dsf_sea,
+                        "DDS and _sea.ter should resolve same region: {dds_file} vs {sea_file}"
+                    );
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // chunk_to_lat_lon center coordinate regression tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_chunk_to_lat_lon_uses_center_not_top_left() {
+        // chunk_to_lat_lon must use cell CENTER to determine the correct DSF region.
+        // Using top-left corner causes tiles near 1° boundaries to be assigned to
+        // the wrong region — the bug that caused DDS generation in patched regions.
+        //
+        // TileCoord::to_lat_lon() already uses center (+ 0.5). chunk_to_lat_lon
+        // must agree with it.
+        use crate::coord::TileCoord;
+
+        // LFMN regression: this tile's top-left is at lon=5.977° (+005)
+        // but its center is at lon=6.021° (+006) — the patched region.
+        let lfmn_row: u32 = 1482;
+        let lfmn_col: u32 = 2116;
+        let dds_zoom: u8 = 12;
+
+        let tile = TileCoord {
+            row: lfmn_row,
+            col: lfmn_col,
+            zoom: dds_zoom,
+        };
+        let (expected_lat, expected_lon) = tile.to_lat_lon();
+        let (actual_lat, actual_lon) = chunk_to_lat_lon(lfmn_row, lfmn_col, dds_zoom);
+
+        assert!(
+            (expected_lat - actual_lat).abs() < 0.001,
+            "lat mismatch: TileCoord={expected_lat}, chunk_to_lat_lon={actual_lat}"
+        );
+        assert!(
+            (expected_lon - actual_lon).abs() < 0.001,
+            "lon mismatch: TileCoord={expected_lon}, chunk_to_lat_lon={actual_lon}"
+        );
+    }
+
+    #[test]
+    fn test_dds_filename_region_matches_tile_coord_region() {
+        // The exact regression case from the LFMN live test.
+        // DDS file 1482_2116_ZL12.dds should resolve to DSF region +44+006,
+        // matching what TileCoord::to_dsf_tile_name() computes.
+        use crate::coord::TileCoord;
+
+        // LFMN boundary tile: top-left in +005, center in +006 (patched)
+        let lfmn_row: u32 = 1482;
+        let lfmn_col: u32 = 2116;
+        let dds_zoom: u8 = 12;
+
+        let tile = TileCoord {
+            row: lfmn_row,
+            col: lfmn_col,
+            zoom: dds_zoom,
+        };
+        let expected_dsf = tile.to_dsf_tile_name(); // "+44+006"
+
+        let dds_filename = format!("{lfmn_row}_{lfmn_col}_ZL{dds_zoom}.dds");
+        let dsf = DsfTileCoord::from_scenery_filename(&dds_filename).unwrap();
+        let actual_dsf = format!("{dsf}");
+
+        assert_eq!(
+            expected_dsf, actual_dsf,
+            "DDS filename region should match TileCoord region"
+        );
     }
 }

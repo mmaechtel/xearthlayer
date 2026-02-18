@@ -23,9 +23,9 @@ use crate::config::{DEFAULT_MAX_RETRIES, DEFAULT_REQUEST_TIMEOUT_SECS};
 /// provider. A reasonable value prevents overwhelming the provider while
 /// maintaining good throughput.
 ///
-/// 512 provides good throughput for most providers while allowing
-/// the multi-stage tile pipeline to remain saturated.
-pub const DEFAULT_MAX_CONCURRENT_HTTP: usize = 512;
+/// 256 balances throughput with system stability — tested stable with
+/// all providers and avoids overwhelming the host during heavy scene loads.
+pub const DEFAULT_MAX_CONCURRENT_HTTP: usize = 256;
 
 /// Configuration for chunk downloads.
 ///

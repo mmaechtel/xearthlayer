@@ -17,6 +17,7 @@
 //!     tiles,
 //!     dds_client,
 //!     memory_cache,
+//!     ortho_index,
 //!     &runtime_handle,
 //! );
 //!
@@ -41,6 +42,9 @@ use tracing::{debug, info, warn};
 
 use crate::coord::TileCoord;
 use crate::executor::{DdsClient, MemoryCache, Priority};
+use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
+use crate::ortho_union::OrthoUnionIndex;
+use crate::prefetch::tile_based::DsfTileCoord;
 use crate::runtime::{JobRequest, RequestOrigin};
 
 /// Maximum concurrent tile requests in flight.
@@ -64,8 +68,12 @@ pub struct PrewarmStatus {
     pub completed: usize,
     /// Tiles that failed to generate.
     pub failed: usize,
-    /// Tiles that were already in cache.
+    /// Tiles that were already in memory cache.
     pub cache_hits: usize,
+    /// Tiles skipped because their region is owned by a patch.
+    pub patch_skipped: usize,
+    /// Tiles that already exist on disk (XEL cache, etc.).
+    pub disk_hits: usize,
     /// Whether prewarm has finished (success or failure).
     pub is_complete: bool,
     /// Whether prewarm was cancelled by user.
@@ -81,6 +89,8 @@ impl PrewarmStatus {
             completed: 0,
             failed: 0,
             cache_hits: 0,
+            patch_skipped: 0,
+            disk_hits: 0,
             is_complete: false,
             was_cancelled: false,
         }
@@ -88,8 +98,9 @@ impl PrewarmStatus {
 
     /// Number of tiles currently in flight (submitted but not yet complete).
     pub fn in_flight(&self) -> usize {
-        self.total
-            .saturating_sub(self.completed + self.failed + self.cache_hits)
+        self.total.saturating_sub(
+            self.completed + self.failed + self.cache_hits + self.patch_skipped + self.disk_hits,
+        )
     }
 
     /// Progress as a fraction from 0.0 to 1.0.
@@ -97,12 +108,13 @@ impl PrewarmStatus {
         if self.total == 0 {
             return 1.0; // Empty prewarm is "complete"
         }
-        (self.completed + self.cache_hits) as f64 / self.total as f64
+        (self.completed + self.cache_hits + self.patch_skipped + self.disk_hits) as f64
+            / self.total as f64
     }
 
-    /// Total tiles that have been processed (completed + failed + cache_hits).
+    /// Total tiles that have been processed (completed + failed + cache_hits + patch_skipped + disk_hits).
     pub fn processed(&self) -> usize {
-        self.completed + self.failed + self.cache_hits
+        self.completed + self.failed + self.cache_hits + self.patch_skipped + self.disk_hits
     }
 }
 
@@ -151,6 +163,8 @@ struct PrewarmContext<M: MemoryCache> {
     tiles: Vec<TileCoord>,
     dds_client: Arc<dyn DdsClient>,
     memory_cache: Arc<M>,
+    ortho_index: Arc<OrthoUnionIndex>,
+    geo_index: Option<Arc<GeoIndex>>,
     status: Arc<Mutex<PrewarmStatus>>,
     cancellation: CancellationToken,
 }
@@ -170,12 +184,16 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
     /// * `tiles` - Tiles to prewarm
     /// * `dds_client` - Client for submitting DDS generation jobs
     /// * `memory_cache` - Cache to check for already-cached tiles
+    /// * `ortho_index` - Index for checking disk-resident tiles (patches, cache)
+    /// * `geo_index` - Geospatial index for patched region filtering
     /// * `runtime` - Tokio runtime handle to spawn the task on
     pub fn start(
         icao: String,
         tiles: Vec<TileCoord>,
         dds_client: Arc<dyn DdsClient>,
         memory_cache: Arc<M>,
+        ortho_index: Arc<OrthoUnionIndex>,
+        geo_index: Option<Arc<GeoIndex>>,
         runtime: &Handle,
     ) -> PrewarmHandle {
         let total = tiles.len();
@@ -199,6 +217,8 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
             tiles,
             dds_client,
             memory_cache,
+            ortho_index,
+            geo_index,
             status,
             cancellation,
         };
@@ -227,6 +247,37 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
             }
         }
 
+        // Step 1b: Filter out tiles in patched regions (region-level ownership)
+        let before_patch = to_generate.len();
+        if let Some(ref geo_index) = self.geo_index {
+            let gi = Arc::clone(geo_index);
+            to_generate.retain(|tile| {
+                let (lat, lon) = tile.to_lat_lon();
+                let dsf = DsfTileCoord::from_lat_lon(lat, lon);
+                !gi.contains::<PatchCoverage>(&DsfRegion::new(dsf.lat, dsf.lon))
+            });
+        }
+        let patch_skipped = before_patch - to_generate.len();
+        if patch_skipped > 0 {
+            let mut s = self.status.lock();
+            s.patch_skipped = patch_skipped;
+        }
+
+        // Step 1c: Filter out tiles already on disk (XEL cache, etc.)
+        // Use chunk_origin() for the canonical tile → chunk coordinate conversion
+        let before_disk = to_generate.len();
+        to_generate.retain(|tile| {
+            let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
+            !self
+                .ortho_index
+                .dds_tile_exists(chunk_row, chunk_col, chunk_zoom)
+        });
+        let disk_hits = before_disk - to_generate.len();
+        if disk_hits > 0 {
+            let mut s = self.status.lock();
+            s.disk_hits = disk_hits;
+        }
+
         let cache_hits = {
             let s = self.status.lock();
             s.cache_hits
@@ -235,12 +286,14 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
         info!(
             total = self.tiles.len(),
             cache_hits,
+            patch_skipped,
+            disk_hits,
             to_generate = to_generate.len(),
-            "Cache check complete"
+            "Prewarm tile filtering complete"
         );
 
         if to_generate.is_empty() {
-            // All tiles were cached
+            // All tiles were cached or already on disk
             self.mark_complete();
             return;
         }
@@ -380,6 +433,8 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
             completed = s.completed,
             failed = s.failed,
             cache_hits = s.cache_hits,
+            patch_skipped = s.patch_skipped,
+            disk_hits = s.disk_hits,
             total = s.total,
             "Prewarm complete"
         );
@@ -416,15 +471,27 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
 /// * `tiles` - Tiles to prewarm
 /// * `dds_client` - Client for submitting DDS generation jobs
 /// * `memory_cache` - Cache to check for already-cached tiles
+/// * `ortho_index` - Index for checking disk-resident tiles (patches, cache)
+/// * `geo_index` - Geospatial index for patched region filtering
 /// * `runtime` - Tokio runtime handle
 pub fn start_prewarm<M: MemoryCache + Send + Sync + 'static>(
     icao: String,
     tiles: Vec<TileCoord>,
     dds_client: Arc<dyn DdsClient>,
     memory_cache: Arc<M>,
+    ortho_index: Arc<OrthoUnionIndex>,
+    geo_index: Option<Arc<GeoIndex>>,
     runtime: &Handle,
 ) -> PrewarmHandle {
-    PrewarmContext::start(icao, tiles, dds_client, memory_cache, runtime)
+    PrewarmContext::start(
+        icao,
+        tiles,
+        dds_client,
+        memory_cache,
+        ortho_index,
+        geo_index,
+        runtime,
+    )
 }
 
 #[cfg(test)]
@@ -439,6 +506,7 @@ mod tests {
         assert_eq!(status.completed, 0);
         assert_eq!(status.failed, 0);
         assert_eq!(status.cache_hits, 0);
+        assert_eq!(status.disk_hits, 0);
         assert!(!status.is_complete);
         assert!(!status.was_cancelled);
     }
@@ -450,8 +518,9 @@ mod tests {
 
         status.completed = 30;
         status.failed = 5;
-        status.cache_hits = 15;
-        assert_eq!(status.in_flight(), 50); // 100 - 30 - 5 - 15
+        status.cache_hits = 10;
+        status.disk_hits = 5;
+        assert_eq!(status.in_flight(), 50); // 100 - 30 - 5 - 10 - 5
     }
 
     #[test]
@@ -459,8 +528,9 @@ mod tests {
         let mut status = PrewarmStatus::new("TEST".to_string(), 100);
         assert_eq!(status.progress_fraction(), 0.0);
 
-        status.completed = 40;
+        status.completed = 30;
         status.cache_hits = 10;
+        status.disk_hits = 10;
         assert!((status.progress_fraction() - 0.5).abs() < 0.001);
 
         // Empty prewarm should show as complete
@@ -473,9 +543,10 @@ mod tests {
         let mut status = PrewarmStatus::new("TEST".to_string(), 100);
         assert_eq!(status.processed(), 0);
 
-        status.completed = 30;
+        status.completed = 25;
         status.failed = 5;
-        status.cache_hits = 15;
+        status.cache_hits = 10;
+        status.disk_hits = 10;
         assert_eq!(status.processed(), 50);
     }
 
@@ -514,5 +585,320 @@ mod tests {
         let snapshot = handle.status();
         assert_eq!(snapshot.completed, 25);
         assert_eq!(snapshot.icao, "KJFK");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Integration tests: disk-existence filtering via OrthoUnionIndex
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use crate::ortho_union::{OrthoSource, OrthoUnionIndex};
+    use crate::runtime::DdsResponse;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+
+    /// Mock DdsClient that provides a sender for async job submission.
+    struct TestDdsClient {
+        sender: mpsc::Sender<JobRequest>,
+    }
+
+    impl TestDdsClient {
+        fn new() -> (Arc<Self>, mpsc::Receiver<JobRequest>) {
+            let (tx, rx) = mpsc::channel(256);
+            (Arc::new(Self { sender: tx }), rx)
+        }
+    }
+
+    impl DdsClient for TestDdsClient {
+        fn submit(&self, request: JobRequest) -> Result<(), crate::executor::DdsClientError> {
+            self.sender
+                .try_send(request)
+                .map_err(|_| crate::executor::DdsClientError::ChannelFull)
+        }
+
+        fn request_dds(
+            &self,
+            tile: TileCoord,
+            _cancellation: CancellationToken,
+        ) -> oneshot::Receiver<DdsResponse> {
+            let (tx, rx) = oneshot::channel();
+            drop(tx);
+            let _ = self.sender.try_send(JobRequest::prefetch(tile));
+            rx
+        }
+
+        fn request_dds_with_options(
+            &self,
+            tile: TileCoord,
+            _priority: crate::executor::Priority,
+            _origin: RequestOrigin,
+            cancellation: CancellationToken,
+        ) -> oneshot::Receiver<DdsResponse> {
+            self.request_dds(tile, cancellation)
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        fn sender(&self) -> Option<mpsc::Sender<JobRequest>> {
+            Some(self.sender.clone())
+        }
+    }
+
+    /// Mock MemoryCache that always returns None (empty cache).
+    struct EmptyMemoryCache;
+
+    impl MemoryCache for EmptyMemoryCache {
+        fn get(
+            &self,
+            _row: u32,
+            _col: u32,
+            _zoom: u8,
+        ) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send {
+            async { None }
+        }
+
+        fn put(
+            &self,
+            _row: u32,
+            _col: u32,
+            _zoom: u8,
+            _data: Vec<u8>,
+        ) -> impl std::future::Future<Output = ()> + Send {
+            async {}
+        }
+
+        fn size_bytes(&self) -> usize {
+            0
+        }
+
+        fn entry_count(&self) -> usize {
+            0
+        }
+    }
+
+    /// Create an OrthoUnionIndex with DDS files for specific tiles.
+    fn create_index_with_dds(temp: &TempDir, dds_files: &[&str]) -> Arc<OrthoUnionIndex> {
+        let pkg_dir = temp.path().join("test_ortho");
+        std::fs::create_dir_all(pkg_dir.join("textures")).unwrap();
+
+        for filename in dds_files {
+            std::fs::write(pkg_dir.join("textures").join(filename), b"dds content").unwrap();
+        }
+
+        let source = OrthoSource::new_package("test", &pkg_dir);
+        Arc::new(OrthoUnionIndex::with_sources(vec![source]))
+    }
+
+    #[tokio::test]
+    async fn test_prewarm_skips_tiles_on_disk() {
+        let temp = TempDir::new().unwrap();
+
+        // Prewarm uses tile-level coords (row, col, zoom), but dds_tile_exists()
+        // needs chunk-level coords (row*16, col*16, zoom+4). DDS filenames on
+        // disk use chunk coords. Tile (6, 12, 12) → chunk (96, 192, 16).
+        let index = create_index_with_dds(
+            &temp,
+            &["96_192_BI16.dds", "96_208_BI16.dds"], // chunk coords for tiles (6,12) and (6,13)
+        );
+
+        // Verify the index finds these as chunk coords
+        assert!(index.dds_tile_exists(96, 192, 16));
+        assert!(index.dds_tile_exists(96, 208, 16));
+        assert!(!index.dds_tile_exists(96, 224, 16));
+
+        // Create tiles at tile-level coords: 2 on disk + 1 not on disk
+        let tiles = vec![
+            TileCoord {
+                row: 6,
+                col: 12,
+                zoom: 12,
+            }, // chunk (96, 192, 16) — on disk
+            TileCoord {
+                row: 6,
+                col: 13,
+                zoom: 12,
+            }, // chunk (96, 208, 16) — on disk
+            TileCoord {
+                row: 6,
+                col: 14,
+                zoom: 12,
+            }, // chunk (96, 224, 16) — NOT on disk
+        ];
+
+        let (client, mut rx) = TestDdsClient::new();
+        let memory_cache = Arc::new(EmptyMemoryCache);
+
+        let handle = start_prewarm(
+            "TEST".to_string(),
+            tiles,
+            client,
+            memory_cache,
+            index,
+            None,
+            &tokio::runtime::Handle::current(),
+        );
+
+        // Respond to the ONE job that should be submitted (tile col=14)
+        if let Some(request) = rx.recv().await {
+            assert_eq!(
+                request.tile.col, 14,
+                "Only non-disk tile should be submitted"
+            );
+            if let Some(tx) = request.response_tx {
+                let _ = tx.send(DdsResponse::success(
+                    vec![0u8; 10],
+                    std::time::Duration::from_millis(1),
+                ));
+            }
+        }
+
+        // Wait for completion
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let status = handle.status();
+        assert!(status.is_complete);
+        assert_eq!(status.disk_hits, 2, "Two tiles should be disk hits");
+        assert_eq!(status.completed, 1, "One tile should be generated");
+        assert_eq!(status.cache_hits, 0, "No memory cache hits");
+    }
+
+    /// Build a test GeoIndex with patched regions for the given coordinates.
+    fn build_test_geo_index(regions: &[(i32, i32)]) -> Arc<GeoIndex> {
+        let geo_index = Arc::new(GeoIndex::new());
+        let entries: Vec<_> = regions
+            .iter()
+            .map(|&(lat, lon)| {
+                (
+                    DsfRegion::new(lat, lon),
+                    PatchCoverage {
+                        patch_name: "test_patch".to_string(),
+                    },
+                )
+            })
+            .collect();
+        geo_index.populate(entries);
+        geo_index
+    }
+
+    /// Build a test OrthoUnionIndex fixture (no patched regions — use GeoIndex).
+    fn build_test_index(temp: &TempDir) -> Arc<OrthoUnionIndex> {
+        let pkg_dir = temp.path().join("test_ortho");
+        std::fs::create_dir_all(pkg_dir.join("textures")).unwrap();
+
+        let source = OrthoSource::new_package("test", &pkg_dir);
+        let index = OrthoUnionIndex::with_sources(vec![source]);
+        Arc::new(index)
+    }
+
+    #[tokio::test]
+    async fn test_prewarm_skips_patched_regions() {
+        use crate::prefetch::tile_based::DsfTileCoord;
+
+        let temp = TempDir::new().unwrap();
+
+        // Build test index (no patched regions on the index itself)
+        let index = build_test_index(&temp);
+
+        // Build GeoIndex with patched region (33, -119)
+        let geo_index = build_test_geo_index(&[(33, -119)]);
+
+        // Create tiles: 2 in patched region + 1 outside
+        // Use to_tile_coords to get valid chunk coords in DSF region (33, -119)
+        let tc_patched = crate::coord::to_tile_coords(33.5, -118.5, 16).unwrap();
+        let tc_patched2 = crate::coord::TileCoord {
+            row: tc_patched.row + 1,
+            col: tc_patched.col,
+            zoom: 16,
+        };
+        // A tile clearly outside the patched region
+        let tc_outside = crate::coord::to_tile_coords(60.0, 10.0, 16).unwrap();
+
+        // Verify our coordinate expectations
+        let dsf = DsfTileCoord::from_lat_lon(33.5, -118.5);
+        assert_eq!(dsf.lat, 33);
+        assert_eq!(dsf.lon, -119);
+
+        let tiles = vec![tc_patched, tc_patched2, tc_outside];
+
+        let (client, mut rx) = TestDdsClient::new();
+        let memory_cache = Arc::new(EmptyMemoryCache);
+
+        let handle = start_prewarm(
+            "PATCH".to_string(),
+            tiles,
+            client,
+            memory_cache,
+            index,
+            Some(geo_index),
+            &tokio::runtime::Handle::current(),
+        );
+
+        // Only the non-patched tile should be submitted
+        if let Some(request) = rx.recv().await {
+            assert_eq!(
+                request.tile.row, tc_outside.row,
+                "Only non-patched tile should be submitted"
+            );
+            if let Some(tx) = request.response_tx {
+                let _ = tx.send(DdsResponse::success(
+                    vec![0u8; 10],
+                    std::time::Duration::from_millis(1),
+                ));
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let status = handle.status();
+        assert!(status.is_complete);
+        assert_eq!(status.patch_skipped, 2, "Two tiles should be patch-skipped");
+        assert_eq!(status.completed, 1, "One tile should be generated");
+    }
+
+    #[tokio::test]
+    async fn test_prewarm_all_tiles_on_disk() {
+        let temp = TempDir::new().unwrap();
+
+        // Tile (3, 4, 12) → chunk (48, 64, 16), tile (3, 5, 12) → chunk (48, 80, 16)
+        let index = create_index_with_dds(&temp, &["48_64_BI16.dds", "48_80_BI16.dds"]);
+
+        let tiles = vec![
+            TileCoord {
+                row: 3,
+                col: 4,
+                zoom: 12,
+            },
+            TileCoord {
+                row: 3,
+                col: 5,
+                zoom: 12,
+            },
+        ];
+
+        let (client, _rx) = TestDdsClient::new();
+        let memory_cache = Arc::new(EmptyMemoryCache);
+
+        let handle = start_prewarm(
+            "DISK".to_string(),
+            tiles,
+            client,
+            memory_cache,
+            index,
+            None,
+            &tokio::runtime::Handle::current(),
+        );
+
+        // Wait briefly for the async task to complete
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let status = handle.status();
+        assert!(
+            status.is_complete,
+            "Should complete immediately when all tiles on disk"
+        );
+        assert_eq!(status.disk_hits, 2);
+        assert_eq!(status.completed, 0, "No tiles should need generation");
+        assert_eq!(status.total, 2);
     }
 }

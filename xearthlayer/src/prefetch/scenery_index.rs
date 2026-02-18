@@ -55,19 +55,20 @@ pub struct SceneryTile {
 }
 
 impl SceneryTile {
-    /// Get the tile zoom level (chunk_zoom - 4).
+    /// Get the tile zoom level (inverse of CHUNK_ZOOM_OFFSET).
     #[inline]
     pub fn tile_zoom(&self) -> u8 {
-        self.chunk_zoom.saturating_sub(4)
+        self.chunk_zoom
+            .saturating_sub(crate::coord::CHUNK_ZOOM_OFFSET)
     }
 
     /// Convert to TileCoord for use with the pipeline.
     #[inline]
     pub fn to_tile_coord(&self) -> TileCoord {
-        // Convert chunk coordinates to tile coordinates
+        // Convert chunk coordinates to tile coordinates (inverse of chunk_origin())
         TileCoord {
-            row: self.row / 16,
-            col: self.col / 16,
+            row: self.row / crate::coord::CHUNKS_PER_TILE_SIDE,
+            col: self.col / crate::coord::CHUNKS_PER_TILE_SIDE,
             zoom: self.tile_zoom(),
         }
     }

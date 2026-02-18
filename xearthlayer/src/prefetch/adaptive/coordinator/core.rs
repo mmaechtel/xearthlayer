@@ -11,9 +11,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coord::TileCoord;
 use crate::executor::{DaemonMemoryCache, DdsClient};
+use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
 use crate::ortho_union::OrthoUnionIndex;
 use crate::prefetch::state::{AircraftState, DetailedPrefetchStats, SharedPrefetchStatus};
 use crate::prefetch::throttler::{PrefetchThrottler, ThrottleState};
+use crate::prefetch::tile_based::DsfTileCoord;
 use crate::prefetch::CircuitState;
 use crate::prefetch::SceneryIndex;
 
@@ -110,6 +112,9 @@ pub struct AdaptivePrefetchCoordinator {
     /// When set, prefetch will skip tiles that are already installed
     /// in local ortho packages or patches.
     ortho_union_index: Option<Arc<OrthoUnionIndex>>,
+
+    /// Geospatial reference index for patched region filtering.
+    geo_index: Option<Arc<GeoIndex>>,
 }
 
 impl std::fmt::Debug for AdaptivePrefetchCoordinator {
@@ -151,6 +156,7 @@ impl AdaptivePrefetchCoordinator {
             total_tiles_submitted: 0,
             total_cache_hits: 0,
             ortho_union_index: None,
+            geo_index: None,
         }
     }
 
@@ -218,6 +224,12 @@ impl AdaptivePrefetchCoordinator {
     /// ```
     pub fn with_ortho_union_index(mut self, index: Arc<OrthoUnionIndex>) -> Self {
         self.ortho_union_index = Some(index);
+        self
+    }
+
+    /// Set the geospatial reference index for patched region filtering.
+    pub fn with_geo_index(mut self, geo_index: Arc<GeoIndex>) -> Self {
+        self.geo_index = Some(geo_index);
         self
     }
 
@@ -549,25 +561,49 @@ impl AdaptivePrefetchCoordinator {
             0
         };
 
-        // Filter out tiles that already exist on disk (ortho packages, patches)
-        // This addresses Issue #39: Skip installed ortho tiles during prefetch
-        let disk_filtered = if let Some(ref index) = self.ortho_union_index {
-            let tiles_before = plan.tiles.len();
-            plan.tiles
-                .retain(|tile| !index.dds_tile_exists(tile.row, tile.col, tile.zoom));
-            let skipped_disk = tiles_before - plan.tiles.len();
+        // Step 1: Region-level filter — skip tiles in patch-owned DSF regions (Issue #51)
+        let before_patch = plan.tiles.len();
+        if let Some(ref geo_index) = self.geo_index {
+            let gi = Arc::clone(geo_index);
+            plan.tiles.retain(|tile| {
+                let (lat, lon) = tile.to_lat_lon();
+                let dsf = DsfTileCoord::from_lat_lon(lat, lon);
+                !gi.contains::<PatchCoverage>(&DsfRegion::new(dsf.lat, dsf.lon))
+            });
+        }
+        let patch_skipped = before_patch - plan.tiles.len();
 
-            if skipped_disk > 0 {
+        if patch_skipped > 0 {
+            tracing::debug!(
+                patch_skipped,
+                remaining = plan.tiles.len(),
+                "Filtered tiles in patched regions"
+            );
+        }
+
+        // Step 2: Per-file disk filter — skip installed ortho tiles (Issue #39)
+        let disk_skipped = if let Some(ref index) = self.ortho_union_index {
+            let before_disk = plan.tiles.len();
+            plan.tiles.retain(|tile| {
+                let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
+                !index.dds_tile_exists(chunk_row, chunk_col, chunk_zoom)
+            });
+            let skipped = before_disk - plan.tiles.len();
+
+            if skipped > 0 {
                 tracing::debug!(
-                    skipped = skipped_disk,
+                    skipped,
                     remaining = plan.tiles.len(),
                     "Filtered tiles already on disk"
                 );
             }
-            skipped_disk
+
+            skipped
         } else {
             0
         };
+
+        let disk_filtered = patch_skipped + disk_skipped;
 
         let submitted = if plan.is_empty() {
             0
@@ -1039,6 +1075,116 @@ mod tests {
 
         // Verify the index is set
         assert!(coord.ortho_union_index.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Patched region filtering tests (Issue #51)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Create an aircraft state at ground conditions (low speed, low AGL).
+    fn ground_state(lat: f64, lon: f64) -> AircraftState {
+        const HEADING_DEG: f32 = 90.0;
+        const GROUND_SPEED_KT: f32 = 10.0;
+        const AGL_FT: f32 = 5.0;
+        AircraftState::new(lat, lon, HEADING_DEG, GROUND_SPEED_KT, AGL_FT)
+    }
+
+    /// Build patched regions covering a radius around a DSF tile.
+    ///
+    /// Returns a HashSet covering `(center ± radius)` in both lat and lon,
+    /// ensuring all ground strategy ring tiles are captured.
+    fn patched_region_area(
+        center_lat: i32,
+        center_lon: i32,
+        radius: i32,
+    ) -> std::collections::HashSet<(i32, i32)> {
+        let mut regions = std::collections::HashSet::new();
+        for lat in (center_lat - radius)..=(center_lat + radius) {
+            for lon in (center_lon - radius)..=(center_lon + radius) {
+                regions.insert((lat, lon));
+            }
+        }
+        regions
+    }
+
+    #[tokio::test]
+    async fn test_prefetch_filters_patched_regions() {
+        use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
+        use crate::prefetch::tile_based::DsfTileCoord;
+
+        let aircraft_lat = 45.5;
+        let aircraft_lon = 11.5;
+        let aircraft_dsf = DsfTileCoord::from_lat_lon(aircraft_lat, aircraft_lon);
+
+        // Ground strategy generates ring tiles AROUND the loaded area.
+        // Cover all possible ring tiles with patched regions in GeoIndex.
+        let coverage_radius = 5; // degrees — wider than any possible ring
+        let regions = patched_region_area(aircraft_dsf.lat, aircraft_dsf.lon, coverage_radius);
+
+        let geo_index = Arc::new(GeoIndex::new());
+        let entries: Vec<_> = regions
+            .iter()
+            .map(|&(lat, lon)| {
+                (
+                    DsfRegion::new(lat, lon),
+                    PatchCoverage {
+                        patch_name: "test_patch".to_string(),
+                    },
+                )
+            })
+            .collect();
+        geo_index.populate(entries);
+
+        let mut coord = AdaptivePrefetchCoordinator::with_defaults()
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        let state = ground_state(aircraft_lat, aircraft_lon);
+
+        // Call twice — first call primes the phase detector
+        let _ = coord.process_telemetry(&state).await;
+        let result = coord.process_telemetry(&state).await;
+
+        // Tiles should be generated by ground strategy but filtered by patched region
+        assert_eq!(
+            result,
+            Some(0),
+            "No tiles should be submitted for patched region"
+        );
+        assert!(
+            coord.total_cache_hits > 0,
+            "Tiles should have been filtered by patched region (counted in cache_hits)"
+        );
+    }
+
+    #[test]
+    fn test_dds_tile_exists_uses_chunk_origin() {
+        // Verify that chunk_origin() produces the correct coordinates for
+        // matching DDS filenames. This validates the coordinate conversion
+        // used by the prefetch disk filter.
+        use crate::ortho_union::{OrthoSource, OrthoUnionIndex};
+        use tempfile::TempDir;
+
+        let tile = TileCoord {
+            row: 100,
+            col: 200,
+            zoom: 14,
+        };
+        let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
+        let filename = format!("{}_{}_BI{}.dds", chunk_row, chunk_col, chunk_zoom);
+
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("test_ortho");
+        std::fs::create_dir_all(pkg_dir.join("textures")).unwrap();
+        std::fs::write(pkg_dir.join("textures").join(&filename), b"dds").unwrap();
+
+        let source = OrthoSource::new_package("test", &pkg_dir);
+        let index = OrthoUnionIndex::with_sources(vec![source]);
+
+        // chunk_origin() coords match the DDS filename
+        assert!(index.dds_tile_exists(chunk_row, chunk_col, chunk_zoom));
+        // Tile-level coords do NOT match (this was the pre-fix bug)
+        assert!(!index.dds_tile_exists(tile.row, tile.col, tile.zoom));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

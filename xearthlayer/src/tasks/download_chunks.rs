@@ -308,9 +308,9 @@ where
     metrics.disk_cache_miss();
 
     // Calculate global coordinates for the provider
-    let global_row = tile.row * 16 + chunk_row as u32;
-    let global_col = tile.col * 16 + chunk_col as u32;
-    let chunk_zoom = tile.zoom + 4;
+    let global_row = tile.row * crate::coord::CHUNKS_PER_TILE_SIDE + chunk_row as u32;
+    let global_col = tile.col * crate::coord::CHUNKS_PER_TILE_SIDE + chunk_col as u32;
+    let chunk_zoom = tile.zoom + crate::coord::CHUNK_ZOOM_OFFSET;
 
     trace!(
         tile = ?tile,

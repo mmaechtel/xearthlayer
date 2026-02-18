@@ -6,8 +6,8 @@
 mod types;
 
 pub use types::{
-    ChunkCoord, CoordError, TileChunksIterator, TileCoord, MAX_LAT, MAX_ZOOM, MIN_LAT, MIN_LON,
-    MIN_ZOOM,
+    ChunkCoord, CoordError, TileChunksIterator, TileCoord, CHUNKS_PER_TILE_SIDE, CHUNK_ZOOM_OFFSET,
+    MAX_LAT, MAX_ZOOM, MIN_LAT, MIN_LON, MIN_ZOOM,
 };
 
 /// Format a DSF-style directory name from integer lat/lon.
@@ -85,10 +85,9 @@ pub fn to_chunk_coords(lat: f64, lon: f64, zoom: u8) -> Result<ChunkCoord, Coord
     let tile = to_tile_coords(lat, lon, zoom)?;
 
     // Now we need to find the position within the tile
-    // Each tile is divided into 16×16 chunks
-    // We calculate at chunk resolution (zoom + 4 for 2^4 = 16)
-    let chunk_zoom_offset = 4; // log2(16) = 4
-    let chunk_zoom = zoom + chunk_zoom_offset;
+    // Each tile is divided into CHUNKS_PER_TILE_SIDE × CHUNKS_PER_TILE_SIDE chunks
+    // We calculate at chunk resolution (zoom + CHUNK_ZOOM_OFFSET)
+    let chunk_zoom = zoom + CHUNK_ZOOM_OFFSET;
     let n_chunks = 2.0_f64.powi(chunk_zoom as i32);
     let max_chunk_coord = (n_chunks as u32).saturating_sub(1);
 
@@ -545,6 +544,48 @@ mod tests {
         let (global_row, global_col, _) = chunk.to_global_coords();
         assert_eq!(global_row, 10 * 16 + 15); // 175
         assert_eq!(global_col, 20 * 16 + 15); // 335
+    }
+
+    #[test]
+    fn test_tile_chunk_origin_matches_chunk_at_zero() {
+        // chunk_origin() should produce the same global coordinates
+        // as a ChunkCoord at position (0,0) within the tile.
+        let tile = TileCoord {
+            row: 50,
+            col: 75,
+            zoom: 12,
+        };
+
+        let (origin_row, origin_col, origin_zoom) = tile.chunk_origin();
+
+        let chunk = ChunkCoord {
+            tile_row: 50,
+            tile_col: 75,
+            chunk_row: 0,
+            chunk_col: 0,
+            zoom: 12,
+        };
+        let (global_row, global_col, global_zoom) = chunk.to_global_coords();
+
+        assert_eq!(origin_row, global_row);
+        assert_eq!(origin_col, global_col);
+        assert_eq!(origin_zoom, global_zoom);
+    }
+
+    #[test]
+    fn test_tile_chunk_origin_uses_named_constants() {
+        // Verify the conversion uses CHUNKS_PER_TILE_SIDE and CHUNK_ZOOM_OFFSET
+        let tile = TileCoord {
+            row: 100,
+            col: 200,
+            zoom: 14,
+        };
+
+        let (row, col, zoom) = tile.chunk_origin();
+
+        assert_eq!(row, 100 * CHUNKS_PER_TILE_SIDE);
+        assert_eq!(col, 200 * CHUNKS_PER_TILE_SIDE);
+        assert_eq!(zoom, 14 + CHUNK_ZOOM_OFFSET);
     }
 
     #[test]

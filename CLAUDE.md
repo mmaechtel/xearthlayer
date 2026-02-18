@@ -109,7 +109,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - `CircuitBreaker` - Pauses prefetch during X-Plane scene loading
     - Submits jobs to shared job executor daemon via `DdsClient` trait
     - Mode selection: Aggressive (>30 tiles/sec), Opportunistic (10-30), or Disabled
-    - **Three-tier filtering**: Local tracking → Memory cache → Disk existence (via `OrthoUnionIndex`)
+    - **Four-tier filtering**: Local tracking → Memory cache → Patched region exclusion (via `GeoIndex`) → Disk existence (via `OrthoUnionIndex`)
     - See `docs/dev/adaptive-prefetch-design.md` for design details
 
 12. **Ortho Union Index** (`xearthlayer/src/ortho_union/`)
@@ -121,6 +121,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - `IndexBuildProgress` - Progress reporting with factory methods
     - Priority resolution: patches (`_patches/*`) sort before regional packages
     - `dds_tile_exists(row, col, zoom)` - Checks if DDS tile exists on disk (used by prefetch)
+    - `resolve_lazy_filtered(path, predicate)` - Source-filtered lazy resolution (used by FUSE with GeoIndex)
+
+13. **GeoIndex** (`xearthlayer/src/geo_index/`)
+    - `GeoIndex` - Type-keyed, region-indexed geospatial reference database (thread-safe, ACID)
+    - `DsfRegion` - 1°×1° DSF region coordinate type
+    - `GeoLayer` trait - Marker trait for storable layer types (`Clone + Send + Sync + 'static`)
+    - `PatchCoverage` - Layer type indicating a region is owned by a scenery patch
+    - Locking: `RwLock<HashMap<TypeId, DashMap>>` — rare write locks, concurrent reads via DashMap shards
+    - `populate()` provides atomic bulk loading (builds outside lock, swaps in)
+    - Used by FUSE (`is_geo_filtered`), prewarm, and prefetch for patch region exclusion
+    - See `docs/dev/geo-index-design.md` for design details
 
 ### Module Dependencies
 
@@ -137,11 +148,13 @@ xearthlayer-cli
             │                       └─→ tasks (Download, Assemble, ...)  │
             │                                                            │
             ├─→ fuse/fuse3 (async multi-threaded FUSE) ─────────────────┤
-            │       └─→ uses DdsClient for tile requests                │
+            │       ├─→ uses DdsClient for tile requests                │
+            │       └─→ uses GeoIndex for patch region filtering        │
             │                                                            │
             ├─→ prefetch (AdaptivePrefetchCoordinator) ────────────────┘
-            │       └─→ uses DdsClient for background prefetch
+            │       └─→ uses DdsClient + GeoIndex for background prefetch
             │
+            ├─→ geo_index (geospatial reference database)
             ├─→ provider (Bing, Go2, Google - async variants)
             └─→ texture (DDS encoding)
 ```
@@ -152,6 +165,8 @@ Uses **Web Mercator** (Slippy Map) projection:
 - Tile coordinates: (row, col, zoom)
 - Each tile = 16×16 chunks of 256×256 pixels = 4096×4096 total
 - Chunk zoom = tile zoom + 4 (e.g., tile zoom 12 → chunk zoom 16)
+- Named constants: `CHUNKS_PER_TILE_SIDE` (16), `CHUNK_ZOOM_OFFSET` (4) in `coord/types.rs`
+- Canonical conversion: `TileCoord::chunk_origin()` → (chunk_row, chunk_col, chunk_zoom)
 
 ### Threading Model
 
@@ -256,6 +271,7 @@ xearthlayer publish gaps --region <code> [--tile <lat,lon>] [--format <fmt>] [-o
 | `xearthlayer/src/fuse/fuse3/` | Fuse3 async multi-threaded filesystem |
 | `xearthlayer/src/fuse/fuse3/shared.rs` | Shared FUSE traits (FileAttrBuilder, DdsRequestor) |
 | `xearthlayer/src/fuse/fuse3/ortho_union_fs.rs` | Consolidated ortho FUSE mount |
+| `xearthlayer/src/geo_index/` | GeoIndex geospatial reference database |
 | `xearthlayer/src/ortho_union/` | Ortho union index module |
 | `xearthlayer/src/ortho_union/index.rs` | OrthoUnionIndex implementation |
 | `xearthlayer/src/ortho_union/builder.rs` | OrthoUnionIndexBuilder (with progress + caching) |
@@ -357,5 +373,6 @@ CI will fail if pre-commit checks were not run.
 - Zoom level overlap management: `docs/dev/zoom-level-overlap-design.md` (dedupe, gap analysis)
 - Scenery package plan: `docs/dev/scenery-package-plan.md`
 - **Consolidated FUSE mounting**: Plan file describes single ortho mount architecture (patches + packages)
+- **GeoIndex design**: `docs/dev/geo-index-design.md` (geospatial reference database, patch region ownership)
 - memorize review allow(dead_code) macros at major checkpoints. Refactor aggresively to remove them when appropriate.
 - memorize ensure to update the projects documentation to reflect the current state of the project before committing changes
