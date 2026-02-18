@@ -356,15 +356,21 @@ impl Fuse3OrthoUnionFS {
 
     /// Resolve a lazy path with geospatial awareness.
     ///
-    /// If the file is in a patch-owned region (per GeoIndex), only patch sources
-    /// are searched. Otherwise, all sources are searched (normal behavior).
+    /// If the file is in a patch-owned region (per GeoIndex), patch sources are
+    /// searched first. If the file isn't found in patches, all sources are tried
+    /// as fallback — this handles cross-region DSF references where a non-patched
+    /// DSF references terrain (e.g., `_sea.ter`) in a patched region.
+    ///
+    /// DDS generation blocking is handled separately by the passthrough gate in
+    /// `lookup()`, not here.
     ///
     /// This is the composition point: GeoIndex (geography) + OrthoUnionIndex (files).
     fn resolve_lazy_geo(&self, virtual_path: &std::path::Path, filename: &str) -> Option<PathBuf> {
         if self.is_geo_filtered(filename) {
-            // Patched region: only patch sources
+            // Patched region: patches first, packages fill gaps
             self.index
                 .resolve_lazy_filtered(virtual_path, |s| s.is_patch())
+                .or_else(|| self.index.resolve_lazy(virtual_path))
         } else {
             // Normal: all sources
             self.index.resolve_lazy(virtual_path)
@@ -1401,6 +1407,89 @@ mod tests {
         assert!(
             result.is_err(),
             "Lookup for DDS in patched region should return ENOENT, got: {:?}",
+            result
+        );
+    }
+
+    /// Test that package terrain files in patched regions are served as fallback.
+    ///
+    /// When a patch owns a region but doesn't include a specific file (e.g., _sea.ter),
+    /// FUSE should fall through to the package source instead of returning ENOENT.
+    /// This handles cross-region DSF references where a non-patched DSF references
+    /// terrain in a patched region.
+    #[tokio::test]
+    async fn test_lookup_patched_region_falls_through_to_package_for_terrain() {
+        use fuse3::raw::Filesystem;
+
+        use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
+
+        let temp = TempDir::new().unwrap();
+
+        // Create a patch owning region (33, -119)
+        let patches_dir = temp.path().join("patches");
+        let patch_dir = patches_dir.join("LIPX_Mesh");
+        let nav_dir = patch_dir.join("Earth nav data/+30-120");
+        std::fs::create_dir_all(&nav_dir).unwrap();
+        std::fs::write(nav_dir.join("+33-119.dsf"), b"fake dsf").unwrap();
+        std::fs::create_dir_all(patch_dir.join("terrain")).unwrap();
+
+        // Create a package with a _sea.ter file whose chunk coords fall in region (33, -119).
+        // This simulates X-Plane's cross-region DSF references where a non-patched DSF
+        // references sea terrain in a patched region.
+        let na_pkg = create_test_package(&temp, "na");
+
+        // Place a terrain file in the package's terrain dir with coords in the patched region
+        use crate::coord::to_tile_coords;
+        let tc = to_tile_coords(33.5, -118.5, 16).unwrap();
+        let sea_ter_name = format!("{}_{}_BI16_sea.ter", tc.row, tc.col);
+        let pkg_terrain_dir = temp.path().join("na_ortho/terrain");
+        std::fs::write(pkg_terrain_dir.join(&sea_ter_name), b"sea terrain data").unwrap();
+
+        // Verify this filename maps to the patched region
+        use crate::prefetch::tile_based::DsfTileCoord;
+        let dsf = DsfTileCoord::from_scenery_filename(&sea_ter_name).unwrap();
+        assert_eq!(dsf.lat, 33, "sea.ter filename should map to lat 33");
+        assert_eq!(dsf.lon, -119, "sea.ter filename should map to lon -119");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .with_patches_dir(&patches_dir)
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        // Build GeoIndex with PatchCoverage for region (33, -119)
+        let geo_index = Arc::new(GeoIndex::new());
+        geo_index.populate(vec![(
+            DsfRegion::new(33, -119),
+            PatchCoverage {
+                patch_name: "LIPX_Mesh".to_string(),
+            },
+        )]);
+
+        let client = create_test_client();
+        let fs = Fuse3OrthoUnionFS::new(index, client, 1024).with_geo_index(Arc::clone(&geo_index));
+
+        let terrain_inode = fs
+            .inode_manager
+            .get_or_create_inode(std::path::Path::new("terrain"));
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        // Lookup should succeed: the file exists in the package, and even though
+        // the region is patched, FUSE should fall through to the package source
+        // when the patch doesn't have the file.
+        let result = fs
+            .lookup(req, terrain_inode, std::ffi::OsStr::new(&sea_ter_name))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Lookup for package terrain in patched region should fall through, got: {:?}",
             result
         );
     }

@@ -254,13 +254,28 @@ impl std::fmt::Display for DsfTileCoord {
 /// Chunks use Web Mercator projection. This converts the tile center
 /// to latitude/longitude.
 fn chunk_to_lat_lon(chunk_row: u32, chunk_col: u32, zoom: u8) -> (f64, f64) {
+    /// Offset to convert from cell top-left to cell center.
+    ///
+    /// Using the center rather than the corner ensures correct 1° DSF region
+    /// assignment. At zoom 12 (DDS tiles), cell width is ~0.088° — the corner
+    /// can fall in a different region than the center.
+    const CELL_CENTER_OFFSET: f64 = 0.5;
+    /// Full longitude range in degrees (Web Mercator covers -180° to +180°).
+    const FULL_LONGITUDE_DEGREES: f64 = 360.0;
+    /// Longitude offset to shift from [0°, 360°] → [-180°, +180°].
+    const LONGITUDE_ORIGIN_OFFSET: f64 = 180.0;
+    /// Web Mercator normalization factor: row/n maps to [0, 1], multiplied by
+    /// this to map to the full [-π, +π] Mercator Y range.
+    const MERCATOR_Y_SCALE: f64 = 2.0;
+
     let n = 2.0_f64.powi(zoom as i32);
 
-    // Calculate tile center (add 0.5 for center of tile)
-    let lon = (chunk_col as f64 / n) * 360.0 - 180.0;
+    let col_center = chunk_col as f64 + CELL_CENTER_OFFSET;
+    let lon = (col_center / n) * FULL_LONGITUDE_DEGREES - LONGITUDE_ORIGIN_OFFSET;
 
-    // Web Mercator latitude calculation
-    let lat_rad = std::f64::consts::PI * (1.0 - 2.0 * chunk_row as f64 / n);
+    // Inverse Web Mercator latitude (cell center)
+    let row_center = chunk_row as f64 + CELL_CENTER_OFFSET;
+    let lat_rad = std::f64::consts::PI * (1.0 - MERCATOR_Y_SCALE * row_center / n);
     let lat = lat_rad.sinh().atan().to_degrees();
 
     (lat, lon)
@@ -468,5 +483,72 @@ mod tests {
         let dds_result = DsfTileCoord::from_dds_filename("10000_5000_BI16.dds");
         let scenery_result = DsfTileCoord::from_scenery_filename("10000_5000_BI16.dds");
         assert_eq!(dds_result, scenery_result);
+    }
+
+    // =========================================================================
+    // chunk_to_lat_lon center coordinate regression tests (Issue #51)
+    // =========================================================================
+
+    #[test]
+    fn test_chunk_to_lat_lon_uses_center_not_top_left() {
+        // chunk_to_lat_lon must use cell CENTER to determine the correct DSF region.
+        // Using top-left corner causes tiles near 1° boundaries to be assigned to
+        // the wrong region — the bug that caused DDS generation in patched regions.
+        //
+        // TileCoord::to_lat_lon() already uses center (+ 0.5). chunk_to_lat_lon
+        // must agree with it.
+        use crate::coord::TileCoord;
+
+        // LFMN regression: this tile's top-left is at lon=5.977° (+005)
+        // but its center is at lon=6.021° (+006) — the patched region.
+        let lfmn_row: u32 = 1482;
+        let lfmn_col: u32 = 2116;
+        let dds_zoom: u8 = 12;
+
+        let tile = TileCoord {
+            row: lfmn_row,
+            col: lfmn_col,
+            zoom: dds_zoom,
+        };
+        let (expected_lat, expected_lon) = tile.to_lat_lon();
+        let (actual_lat, actual_lon) = chunk_to_lat_lon(lfmn_row, lfmn_col, dds_zoom);
+
+        assert!(
+            (expected_lat - actual_lat).abs() < 0.001,
+            "lat mismatch: TileCoord={expected_lat}, chunk_to_lat_lon={actual_lat}"
+        );
+        assert!(
+            (expected_lon - actual_lon).abs() < 0.001,
+            "lon mismatch: TileCoord={expected_lon}, chunk_to_lat_lon={actual_lon}"
+        );
+    }
+
+    #[test]
+    fn test_dds_filename_region_matches_tile_coord_region() {
+        // The exact regression case from the LFMN live test.
+        // DDS file 1482_2116_ZL12.dds should resolve to DSF region +44+006,
+        // matching what TileCoord::to_dsf_tile_name() computes.
+        use crate::coord::TileCoord;
+
+        // LFMN boundary tile: top-left in +005, center in +006 (patched)
+        let lfmn_row: u32 = 1482;
+        let lfmn_col: u32 = 2116;
+        let dds_zoom: u8 = 12;
+
+        let tile = TileCoord {
+            row: lfmn_row,
+            col: lfmn_col,
+            zoom: dds_zoom,
+        };
+        let expected_dsf = tile.to_dsf_tile_name(); // "+44+006"
+
+        let dds_filename = format!("{lfmn_row}_{lfmn_col}_ZL{dds_zoom}.dds");
+        let dsf = DsfTileCoord::from_scenery_filename(&dds_filename).unwrap();
+        let actual_dsf = format!("{dsf}");
+
+        assert_eq!(
+            expected_dsf, actual_dsf,
+            "DDS filename region should match TileCoord region"
+        );
     }
 }
