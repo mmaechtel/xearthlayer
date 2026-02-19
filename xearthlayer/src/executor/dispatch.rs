@@ -52,7 +52,10 @@ impl JobExecutor {
         let mut found = None;
 
         while let Some(queued) = queue.pop() {
-            if let Some(permit) = self.resource_pools.try_acquire(queued.resource_type) {
+            if let Some(permit) = self
+                .resource_pools
+                .try_acquire_for_priority(queued.resource_type, queued.priority)
+            {
                 found = Some(DispatchableTask {
                     task: queued.task,
                     job_id: queued.job_id,

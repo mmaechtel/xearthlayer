@@ -350,11 +350,7 @@ impl JobExecutor {
         let mut blocked = Vec::new();
 
         while let Some(waiting) = self.waiting_for_permit.pop() {
-            let group_name = waiting
-                .submitted
-                .job
-                .concurrency_group()
-                .map(String::from);
+            let group_name = waiting.submitted.job.concurrency_group().map(String::from);
 
             let Some(group) = group_name else {
                 // No concurrency group — start immediately
