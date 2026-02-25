@@ -177,11 +177,9 @@ max_tiles_per_cycle = {}
 ; Higher values reduce prefetch aggressiveness
 cycle_interval_ms = {}
 
-; Circuit breaker (pause prefetch during X-Plane scenery loading)
-; Only counts FUSE-originated requests, not prefetch jobs
-; FUSE jobs per second threshold to trip the breaker (default: 5.0)
-circuit_breaker_threshold = {}
-; Duration (milliseconds) high FUSE rate must be sustained to open circuit (default: 500)
+; Circuit breaker (pause prefetch during system resource saturation)
+; Uses resource pool utilization (network, CPU, disk I/O) to detect heavy load
+; Duration (milliseconds) resource saturation must be sustained to open circuit (default: 500)
 circuit_breaker_open_ms = {}
 ; Cooloff time (seconds) before trying to close the circuit (default: 5)
 circuit_breaker_half_open_secs = {}
@@ -289,7 +287,6 @@ max_stale_secs = {}
         config.prefetch.udp_port,
         config.prefetch.max_tiles_per_cycle,
         config.prefetch.cycle_interval_ms,
-        config.prefetch.circuit_breaker_threshold,
         config.prefetch.circuit_breaker_open_ms,
         config.prefetch.circuit_breaker_half_open_secs,
         config.prefetch.calibration_aggressive_threshold,

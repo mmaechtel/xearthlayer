@@ -147,12 +147,7 @@ pub const DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE: usize = 200;
 /// Default interval between prefetch cycles in milliseconds.
 pub const DEFAULT_PREFETCH_CYCLE_INTERVAL_MS: u64 = 2000;
 
-/// Default circuit breaker threshold: FUSE jobs per second to trip.
-/// Normal flight activity is typically 5-30 jobs/sec, scene loading is 90-500+.
-/// Set at 50 to cleanly separate flight activity from scene loading.
-pub const DEFAULT_CIRCUIT_BREAKER_THRESHOLD: f64 = 50.0;
-
-/// Default duration (milliseconds) high FUSE rate must be sustained to open circuit.
+/// Default duration (milliseconds) resource saturation must be sustained to open circuit.
 /// Set low (500ms) to catch bursty scene loading patterns quickly.
 pub const DEFAULT_CIRCUIT_BREAKER_OPEN_MS: u64 = 500;
 
@@ -295,7 +290,6 @@ impl Default for ConfigFile {
                 udp_port: DEFAULT_PREFETCH_UDP_PORT,
                 max_tiles_per_cycle: DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
                 cycle_interval_ms: DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
-                circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
                 circuit_breaker_open_ms: DEFAULT_CIRCUIT_BREAKER_OPEN_MS,
                 circuit_breaker_half_open_secs: DEFAULT_CIRCUIT_BREAKER_HALF_OPEN_SECS,
                 calibration_aggressive_threshold: DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD,

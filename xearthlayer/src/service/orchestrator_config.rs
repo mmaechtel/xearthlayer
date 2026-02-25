@@ -177,7 +177,6 @@ impl OrchestratorConfig {
             max_tiles_per_cycle: config.prefetch.max_tiles_per_cycle,
             cycle_interval_ms: config.prefetch.cycle_interval_ms,
             circuit_breaker: CircuitBreakerConfig {
-                threshold_jobs_per_sec: config.prefetch.circuit_breaker_threshold,
                 open_duration: Duration::from_millis(config.prefetch.circuit_breaker_open_ms),
                 half_open_duration: Duration::from_secs(
                     config.prefetch.circuit_breaker_half_open_secs,

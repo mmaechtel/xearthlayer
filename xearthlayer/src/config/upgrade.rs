@@ -80,6 +80,8 @@ pub const DEPRECATED_KEYS: &[&str] = &[
     "prefetch.cone_angle",
     "prefetch.inner_radius_nm",
     "prefetch.outer_radius_nm",
+    // Removed in #59 - circuit breaker now uses resource pool utilization, not FUSE rate
+    "prefetch.circuit_breaker_threshold",
 ];
 
 /// Result of analyzing a configuration file for upgrade needs.

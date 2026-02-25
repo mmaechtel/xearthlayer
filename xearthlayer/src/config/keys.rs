@@ -79,7 +79,6 @@ pub enum ConfigKey {
     PrefetchUdpPort,
     PrefetchMaxTilesPerCycle,
     PrefetchCycleIntervalMs,
-    PrefetchCircuitBreakerThreshold,
     PrefetchCircuitBreakerOpenMs,
     PrefetchCircuitBreakerHalfOpenSecs,
 
@@ -166,7 +165,6 @@ impl FromStr for ConfigKey {
             "prefetch.udp_port" => Ok(ConfigKey::PrefetchUdpPort),
             "prefetch.max_tiles_per_cycle" => Ok(ConfigKey::PrefetchMaxTilesPerCycle),
             "prefetch.cycle_interval_ms" => Ok(ConfigKey::PrefetchCycleIntervalMs),
-            "prefetch.circuit_breaker_threshold" => Ok(ConfigKey::PrefetchCircuitBreakerThreshold),
             "prefetch.circuit_breaker_open_ms" => Ok(ConfigKey::PrefetchCircuitBreakerOpenMs),
             "prefetch.circuit_breaker_half_open_secs" => {
                 Ok(ConfigKey::PrefetchCircuitBreakerHalfOpenSecs)
@@ -256,7 +254,6 @@ impl ConfigKey {
             ConfigKey::PrefetchUdpPort => "prefetch.udp_port",
             ConfigKey::PrefetchMaxTilesPerCycle => "prefetch.max_tiles_per_cycle",
             ConfigKey::PrefetchCycleIntervalMs => "prefetch.cycle_interval_ms",
-            ConfigKey::PrefetchCircuitBreakerThreshold => "prefetch.circuit_breaker_threshold",
             ConfigKey::PrefetchCircuitBreakerOpenMs => "prefetch.circuit_breaker_open_ms",
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs => {
                 "prefetch.circuit_breaker_half_open_secs"
@@ -383,9 +380,6 @@ impl ConfigKey {
             ConfigKey::PrefetchUdpPort => config.prefetch.udp_port.to_string(),
             ConfigKey::PrefetchMaxTilesPerCycle => config.prefetch.max_tiles_per_cycle.to_string(),
             ConfigKey::PrefetchCycleIntervalMs => config.prefetch.cycle_interval_ms.to_string(),
-            ConfigKey::PrefetchCircuitBreakerThreshold => {
-                config.prefetch.circuit_breaker_threshold.to_string()
-            }
             ConfigKey::PrefetchCircuitBreakerOpenMs => {
                 config.prefetch.circuit_breaker_open_ms.to_string()
             }
@@ -573,9 +567,6 @@ impl ConfigKey {
             ConfigKey::PrefetchCycleIntervalMs => {
                 config.prefetch.cycle_interval_ms = value.parse().unwrap();
             }
-            ConfigKey::PrefetchCircuitBreakerThreshold => {
-                config.prefetch.circuit_breaker_threshold = value.parse().unwrap();
-            }
             ConfigKey::PrefetchCircuitBreakerOpenMs => {
                 config.prefetch.circuit_breaker_open_ms = value.parse().unwrap();
             }
@@ -723,7 +714,6 @@ impl ConfigKey {
             ConfigKey::PrefetchUdpPort => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchMaxTilesPerCycle => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCycleIntervalMs => Box::new(PositiveIntegerSpec),
-            ConfigKey::PrefetchCircuitBreakerThreshold => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchCircuitBreakerOpenMs => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCalibrationAggressiveThreshold => Box::new(PositiveNumberSpec),
@@ -796,7 +786,6 @@ impl ConfigKey {
             ConfigKey::PrefetchUdpPort,
             ConfigKey::PrefetchMaxTilesPerCycle,
             ConfigKey::PrefetchCycleIntervalMs,
-            ConfigKey::PrefetchCircuitBreakerThreshold,
             ConfigKey::PrefetchCircuitBreakerOpenMs,
             ConfigKey::PrefetchCircuitBreakerHalfOpenSecs,
             ConfigKey::PrefetchCalibrationAggressiveThreshold,
