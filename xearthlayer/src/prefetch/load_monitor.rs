@@ -1,20 +1,20 @@
-//! FUSE load monitoring for circuit breaker decisions.
+//! FUSE load monitoring for diagnostics and scene tracking.
 //!
-//! This module provides an abstraction for tracking FUSE request load,
-//! following the Interface Segregation Principle. Prefetchers and circuit
-//! breakers depend on this minimal trait rather than the full `PipelineMetrics`.
-//!
-//! # Design
-//!
+//! This module provides an abstraction for tracking FUSE request load.
 //! The `FuseLoadMonitor` trait provides a single-responsibility interface
-//! for recording and querying FUSE request counts. This follows the pattern
-//! established by `StageObserver` for pipeline stage callbacks.
+//! for recording and querying FUSE request counts.
+//!
+//! # Note
+//!
+//! As of issue #59, the circuit breaker uses resource pool utilization
+//! rather than FUSE request rate for trip decisions. The load monitor is
+//! retained for diagnostics logging and scene tracker integration.
 //!
 //! # Thread Safety
 //!
 //! Implementations must be `Send + Sync` for use across the async runtime
 //! and FUSE threads. `SharedFuseLoadMonitor` uses atomic operations for
-//! lock-free updates, following the `HttpConcurrencyLimiter` pattern.
+//! lock-free updates.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

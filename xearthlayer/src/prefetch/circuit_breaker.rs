@@ -313,13 +313,6 @@ mod tests {
         (cb, load_monitor)
     }
 
-    /// Helper to simulate high FUSE load by adding requests to the monitor.
-    fn simulate_high_load(monitor: &SharedFuseLoadMonitor, count: u64) {
-        for _ in 0..count {
-            monitor.record_request();
-        }
-    }
-
     #[test]
     fn test_circuit_breaker_initial_state() {
         let pools = create_test_pools(4);
