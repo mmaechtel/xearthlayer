@@ -34,21 +34,22 @@ use super::telemetry::extract_track;
 // Backpressure constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Channel pressure threshold above which prefetch cycles are deferred entirely.
+/// Executor load threshold above which prefetch cycles are deferred entirely.
 ///
-/// When the executor channel is over 80% full, the prefetch coordinator skips
-/// the current cycle to avoid starving on-demand FUSE requests.
+/// When any resource pool (Network, CPU, DiskIO) exceeds 80% utilization,
+/// the prefetch coordinator skips the current cycle to avoid starving
+/// on-demand FUSE requests.
 pub const BACKPRESSURE_DEFER_THRESHOLD: f64 = 0.8;
 
-/// Channel pressure threshold above which prefetch submission is reduced.
+/// Executor load threshold above which prefetch submission is reduced.
 ///
-/// When the executor channel is over 50% full, the coordinator submits only
-/// half the planned tiles to give on-demand requests more headroom.
+/// When any resource pool exceeds 50% utilization, the coordinator submits
+/// only half the planned tiles to give on-demand requests more headroom.
 pub const BACKPRESSURE_REDUCE_THRESHOLD: f64 = 0.5;
 
 /// Fraction of the prefetch plan to submit under moderate backpressure.
 ///
-/// When channel pressure is between [`BACKPRESSURE_REDUCE_THRESHOLD`] and
+/// When executor load is between [`BACKPRESSURE_REDUCE_THRESHOLD`] and
 /// [`BACKPRESSURE_DEFER_THRESHOLD`], only this fraction of tiles is submitted.
 pub const BACKPRESSURE_REDUCED_FRACTION: f64 = 0.5;
 
@@ -382,9 +383,9 @@ impl AdaptivePrefetchCoordinator {
 
     /// Execute a prefetch plan by submitting tiles to the DDS client.
     ///
-    /// Applies backpressure-aware submission:
-    /// - Pressure > [`BACKPRESSURE_DEFER_THRESHOLD`]: skips this cycle (deferred)
-    /// - Pressure > [`BACKPRESSURE_REDUCE_THRESHOLD`]: submits reduced fraction
+    /// Applies backpressure-aware submission based on executor resource utilization:
+    /// - Load > [`BACKPRESSURE_DEFER_THRESHOLD`]: skips this cycle (deferred)
+    /// - Load > [`BACKPRESSURE_REDUCE_THRESHOLD`]: submits reduced fraction
     /// - Stops immediately on `ChannelFull` error
     ///
     /// # Arguments
@@ -401,24 +402,24 @@ impl AdaptivePrefetchCoordinator {
             return 0;
         };
 
-        // Check channel pressure before submitting
-        let pressure = client.channel_pressure();
-        if pressure > BACKPRESSURE_DEFER_THRESHOLD {
+        // Check executor resource utilization before submitting
+        let load = client.executor_load();
+        if load > BACKPRESSURE_DEFER_THRESHOLD {
             self.total_deferred_cycles += 1;
             tracing::info!(
-                pressure = format!("{:.1}%", pressure * 100.0),
+                load = format!("{:.1}%", load * 100.0),
                 tiles_planned = plan.tiles.len(),
                 "Executor backpressure — deferring prefetch cycle"
             );
             return 0;
         }
 
-        // Determine how many tiles to submit based on pressure
-        let max_tiles = if pressure > BACKPRESSURE_REDUCE_THRESHOLD {
+        // Determine how many tiles to submit based on executor load
+        let max_tiles = if load > BACKPRESSURE_REDUCE_THRESHOLD {
             let reduced =
                 ((plan.tiles.len() as f64) * BACKPRESSURE_REDUCED_FRACTION).ceil() as usize;
             tracing::debug!(
-                pressure = format!("{:.1}%", pressure * 100.0),
+                load = format!("{:.1}%", load * 100.0),
                 full_plan = plan.tiles.len(),
                 reduced_to = reduced,
                 "Moderate backpressure — reducing prefetch submission"
@@ -1330,8 +1331,9 @@ mod tests {
     // Backpressure tests (Phase 5)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Mock DDS client with configurable channel pressure and submission tracking.
+    /// Mock DDS client with configurable executor load and submission tracking.
     struct BackpressureMockClient {
+        /// Simulated executor load (0.0 to 1.0).
         pressure: f64,
         submitted: std::sync::atomic::AtomicUsize,
         /// If Some, return ChannelFull after this many successful submits.
@@ -1397,7 +1399,7 @@ mod tests {
             true
         }
 
-        fn channel_pressure(&self) -> f64 {
+        fn executor_load(&self) -> f64 {
             self.pressure
         }
     }
@@ -1423,7 +1425,10 @@ mod tests {
         let plan = test_plan(10);
         let submitted = coord.execute(&plan, CancellationToken::new());
 
-        assert_eq!(submitted, 0, "Should defer all tiles under high pressure");
+        assert_eq!(
+            submitted, 0,
+            "Should defer all tiles under high executor load"
+        );
         assert_eq!(coord.total_deferred_cycles, 1);
         assert_eq!(client.submitted_count(), 0);
     }
@@ -1440,7 +1445,7 @@ mod tests {
         // 50% of 10 = 5
         assert_eq!(
             submitted, 5,
-            "Should submit ~50% of tiles under moderate pressure"
+            "Should submit ~50% of tiles under moderate executor load"
         );
         assert_eq!(coord.total_deferred_cycles, 0);
         assert_eq!(client.submitted_count(), 5);
@@ -1455,7 +1460,10 @@ mod tests {
         let plan = test_plan(10);
         let submitted = coord.execute(&plan, CancellationToken::new());
 
-        assert_eq!(submitted, 10, "Should submit all tiles under low pressure");
+        assert_eq!(
+            submitted, 10,
+            "Should submit all tiles under low executor load"
+        );
         assert_eq!(client.submitted_count(), 10);
     }
 

@@ -6,7 +6,7 @@
 //!
 //! # Resource Types
 //!
-//! - [`ResourceType::Network`]: HTTP connections (~256 concurrent)
+//! - [`ResourceType::Network`]: HTTP connections (pipeline-balanced, ~8–48 concurrent)
 //! - [`ResourceType::DiskIO`]: File operations (~64 concurrent)
 //! - [`ResourceType::CPU`]: Compute-bound work (~num_cpus concurrent)
 //!
@@ -59,8 +59,25 @@ pub const DEFAULT_MAX_PREFETCH_FRACTION: f64 = 0.75;
 // Resource Pool Configuration Constants
 // =============================================================================
 
-/// Default network pool capacity (HTTP connections).
-pub const DEFAULT_NETWORK_CAPACITY: usize = 256;
+/// Network pool capacity multiplier relative to CPU pool size.
+///
+/// The network pool is sized as a multiple of the CPU pool capacity to keep
+/// the download → encode pipeline balanced. A value of 1.5 means downloads
+/// slightly outpace encodes, keeping the CPU pipeline fed without excessive
+/// WIP buildup.
+pub const DEFAULT_NETWORK_CAPACITY_MULTIPLIER: f64 = 1.5;
+
+/// Minimum network pool capacity.
+///
+/// Ensures meaningful concurrency even on low-core systems.
+pub const MIN_NETWORK_CAPACITY: usize = 8;
+
+/// Maximum network pool capacity.
+///
+/// Caps concurrent download tasks to prevent bandwidth starvation. With an
+/// HTTP semaphore of 256 shared across all downloads, 48 concurrent tiles
+/// each get ~5 HTTP connections — enough for ~2s per-tile latency.
+pub const MAX_NETWORK_CAPACITY: usize = 48;
 
 /// Default disk I/O pool capacity (SSD profile).
 pub const DEFAULT_DISK_IO_CAPACITY: usize = 64;
@@ -93,7 +110,8 @@ pub const DISK_IO_CAPACITY_NVME: usize = 256;
 pub enum ResourceType {
     /// Network I/O (HTTP connections).
     ///
-    /// Default capacity: `min(num_cpus * 16, 256)`
+    /// Default capacity: `clamp(ceil(cpu_capacity * 1.5), 8, 48)`
+    /// Pipeline-balanced with CPU pool to prevent bandwidth starvation.
     Network,
 
     /// Disk I/O (file read/write).
@@ -390,11 +408,14 @@ impl Default for ResourcePoolConfig {
             .map(|p| p.get())
             .unwrap_or(4);
 
+        let cpu_capacity = ((cpus as f64 * DEFAULT_CPU_CAPACITY_MULTIPLIER).ceil() as usize)
+            .max(cpus + MIN_CPU_CAPACITY_ADDITION);
+
         Self {
-            network: (cpus * 16).min(DEFAULT_NETWORK_CAPACITY),
+            network: ((cpu_capacity as f64 * DEFAULT_NETWORK_CAPACITY_MULTIPLIER).ceil() as usize)
+                .clamp(MIN_NETWORK_CAPACITY, MAX_NETWORK_CAPACITY),
             disk_io: DEFAULT_DISK_IO_CAPACITY,
-            cpu: ((cpus as f64 * DEFAULT_CPU_CAPACITY_MULTIPLIER).ceil() as usize)
-                .max(cpus + MIN_CPU_CAPACITY_ADDITION),
+            cpu: cpu_capacity,
             max_prefetch_fraction: DEFAULT_MAX_PREFETCH_FRACTION,
         }
     }
@@ -661,8 +682,24 @@ mod tests {
     fn test_resource_pool_config_default() {
         let config = ResourcePoolConfig::default();
         assert!(config.network > 0);
+        assert!(config.network >= MIN_NETWORK_CAPACITY);
+        assert!(config.network <= MAX_NETWORK_CAPACITY);
         assert!(config.disk_io > 0);
         assert!(config.cpu > 0);
+    }
+
+    #[test]
+    fn test_network_pool_balanced_with_cpu() {
+        let config = ResourcePoolConfig::default();
+
+        // Network pool should be approximately 1.5x CPU pool, clamped to [8, 48]
+        let expected = ((config.cpu as f64 * DEFAULT_NETWORK_CAPACITY_MULTIPLIER).ceil() as usize)
+            .clamp(MIN_NETWORK_CAPACITY, MAX_NETWORK_CAPACITY);
+        assert_eq!(
+            config.network, expected,
+            "Network pool ({}) should be pipeline-balanced with CPU pool ({})",
+            config.network, config.cpu
+        );
     }
 
     #[test]

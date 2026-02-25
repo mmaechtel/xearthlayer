@@ -34,15 +34,23 @@
 //! ```
 
 use crate::coord::TileCoord;
+use crate::executor::resource_pool::ResourcePools;
 use crate::executor::Priority;
 use crate::runtime::{DdsResponse, JobRequest, RequestOrigin};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Timeout for background send when the channel is full for ON_DEMAND requests.
 const ON_DEMAND_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Default executor load when resource pools are not available.
+///
+/// Returns 0.0 (idle) so that prefetch is not throttled when load
+/// information is unavailable (e.g., in tests or mock clients).
+const EXECUTOR_LOAD_UNKNOWN: f64 = 0.0;
 
 // =============================================================================
 // Error Types
@@ -212,6 +220,20 @@ pub trait DdsClient: Send + Sync + 'static {
         0.0
     }
 
+    /// Returns executor resource utilization as a value between 0.0 and 1.0.
+    ///
+    /// This reflects the maximum utilization across all resource pools
+    /// (Network, CPU, DiskIO). Unlike `channel_pressure()`, this measures
+    /// actual resource consumption, not just channel depth.
+    ///
+    /// - 0.0: All pools idle
+    /// - 1.0: At least one pool fully saturated
+    ///
+    /// Default implementation returns [`EXECUTOR_LOAD_UNKNOWN`] for mock clients.
+    fn executor_load(&self) -> f64 {
+        EXECUTOR_LOAD_UNKNOWN
+    }
+
     /// Returns a clone of the underlying sender for async operations.
     ///
     /// This allows callers to use `send().await` for backpressure-aware
@@ -252,6 +274,13 @@ pub trait DdsClient: Send + Sync + 'static {
 pub struct ChannelDdsClient {
     /// Channel sender for requests.
     tx: mpsc::Sender<JobRequest>,
+
+    /// Resource pools for reporting executor load.
+    ///
+    /// When present, `executor_load()` returns the maximum utilization
+    /// across all pools. This provides accurate backpressure signaling
+    /// based on actual resource consumption rather than channel depth.
+    resource_pools: Option<Arc<ResourcePools>>,
 }
 
 impl ChannelDdsClient {
@@ -261,7 +290,30 @@ impl ChannelDdsClient {
     ///
     /// * `tx` - The channel sender for submitting requests
     pub fn new(tx: mpsc::Sender<JobRequest>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            resource_pools: None,
+        }
+    }
+
+    /// Creates a new channel client with resource pool awareness.
+    ///
+    /// The resource pools enable `executor_load()` to return actual
+    /// pool utilization, providing meaningful backpressure for the
+    /// prefetch coordinator.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The channel sender for submitting requests
+    /// * `resource_pools` - Shared resource pools from the executor daemon
+    pub fn with_resource_pools(
+        tx: mpsc::Sender<JobRequest>,
+        resource_pools: Arc<ResourcePools>,
+    ) -> Self {
+        Self {
+            tx,
+            resource_pools: Some(resource_pools),
+        }
     }
 }
 
@@ -359,6 +411,12 @@ impl DdsClient for ChannelDdsClient {
         }
         let available = self.tx.capacity();
         1.0 - (available as f64 / max as f64)
+    }
+
+    fn executor_load(&self) -> f64 {
+        self.resource_pools
+            .as_ref()
+            .map_or(EXECUTOR_LOAD_UNKNOWN, |pools| pools.max_utilization())
     }
 
     fn sender(&self) -> Option<mpsc::Sender<JobRequest>> {
@@ -689,6 +747,85 @@ mod tests {
         assert!(
             (client.channel_pressure() - 0.0).abs() < f64::EPSILON,
             "Default trait impl should return 0.0"
+        );
+    }
+
+    #[test]
+    fn test_executor_load_default_trait_impl() {
+        // Mock client using default trait impl should return EXECUTOR_LOAD_UNKNOWN
+        struct MockClient;
+        impl DdsClient for MockClient {
+            fn submit(&self, _: JobRequest) -> Result<(), DdsClientError> {
+                Ok(())
+            }
+            fn request_dds(
+                &self,
+                _: TileCoord,
+                _: CancellationToken,
+            ) -> oneshot::Receiver<DdsResponse> {
+                let (_, rx) = oneshot::channel();
+                rx
+            }
+            fn request_dds_with_options(
+                &self,
+                _: TileCoord,
+                _: Priority,
+                _: RequestOrigin,
+                _: CancellationToken,
+            ) -> oneshot::Receiver<DdsResponse> {
+                let (_, rx) = oneshot::channel();
+                rx
+            }
+            fn is_connected(&self) -> bool {
+                true
+            }
+        }
+
+        let client = MockClient;
+        assert!(
+            (client.executor_load() - EXECUTOR_LOAD_UNKNOWN).abs() < f64::EPSILON,
+            "Default trait impl should return EXECUTOR_LOAD_UNKNOWN"
+        );
+    }
+
+    #[test]
+    fn test_executor_load_without_pools() {
+        let (tx, _rx) = mpsc::channel::<JobRequest>(10);
+        let client = ChannelDdsClient::new(tx);
+
+        assert!(
+            (client.executor_load() - EXECUTOR_LOAD_UNKNOWN).abs() < f64::EPSILON,
+            "Client without resource pools should return EXECUTOR_LOAD_UNKNOWN"
+        );
+    }
+
+    #[test]
+    fn test_executor_load_with_resource_pools() {
+        use crate::executor::{ResourcePoolConfig, ResourcePools};
+
+        let (tx, _rx) = mpsc::channel::<JobRequest>(10);
+        let config = ResourcePoolConfig::new(4, 4, 4);
+        let pools = Arc::new(ResourcePools::new(config));
+        let client = ChannelDdsClient::with_resource_pools(tx, Arc::clone(&pools));
+
+        // Empty pools — load should be 0.0
+        assert!(
+            (client.executor_load() - 0.0).abs() < f64::EPSILON,
+            "Empty pools should report 0.0 load"
+        );
+
+        // Acquire 2 of 4 CPU permits → 50% utilization on CPU pool
+        let _p1 = pools
+            .try_acquire(crate::executor::ResourceType::CPU)
+            .unwrap();
+        let _p2 = pools
+            .try_acquire(crate::executor::ResourceType::CPU)
+            .unwrap();
+
+        assert!(
+            (client.executor_load() - 0.5).abs() < f64::EPSILON,
+            "50% CPU utilization should report 0.5 load, got {}",
+            client.executor_load()
         );
     }
 }

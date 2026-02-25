@@ -197,13 +197,16 @@ impl XEarthLayerRuntime {
             ),
         };
 
-        // Create the DDS client for producers
-        let dds_client = Arc::new(ChannelDdsClient::new(job_tx));
-
         // Extract the job submitter and resource pools before spawning the daemon
         // (daemon is moved into the spawned task)
         let job_submitter = daemon.job_submitter();
         let resource_pools = daemon.resource_pools();
+
+        // Create the DDS client with resource pool awareness for executor load reporting
+        let dds_client = Arc::new(ChannelDdsClient::with_resource_pools(
+            job_tx,
+            Arc::clone(&resource_pools),
+        ));
 
         // Create shutdown token for coordinating shutdown
         let shutdown_token = CancellationToken::new();
