@@ -25,6 +25,7 @@ use super::super::cruise_strategy::CruiseStrategy;
 use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
 use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
+use super::super::transition_throttle::TransitionThrottle;
 use super::super::turn_detector::TurnDetector;
 
 use super::status::CoordinatorStatus;
@@ -95,6 +96,9 @@ pub struct AdaptivePrefetchCoordinator {
     /// Turn detector.
     turn_detector: TurnDetector,
 
+    /// Transition throttle for takeoff ramp-up.
+    transition_throttle: TransitionThrottle,
+
     /// Ground strategy.
     ground_strategy: GroundStrategy,
 
@@ -160,6 +164,7 @@ impl AdaptivePrefetchCoordinator {
     pub fn new(config: AdaptivePrefetchConfig) -> Self {
         let phase_detector = PhaseDetector::new(&config);
         let turn_detector = TurnDetector::new(&config);
+        let transition_throttle = TransitionThrottle::new();
         let ground_strategy = GroundStrategy::new(&config);
         let cruise_strategy = CruiseStrategy::new(&config);
 
@@ -168,6 +173,7 @@ impl AdaptivePrefetchCoordinator {
             calibration: None,
             phase_detector,
             turn_detector,
+            transition_throttle,
             ground_strategy,
             cruise_strategy,
             throttler: None,
@@ -314,10 +320,15 @@ impl AdaptivePrefetchCoordinator {
             return None;
         }
 
-        // Update phase detector
-        self.phase_detector.update(ground_speed_kt, agl_ft);
+        // Update phase detector and notify transition throttle on phase change
+        let previous_phase = self.phase_detector.current_phase();
+        let phase_changed = self.phase_detector.update(ground_speed_kt, agl_ft);
         let phase = self.phase_detector.current_phase();
         self.status.phase = phase;
+
+        if phase_changed {
+            self.transition_throttle.on_phase_change(previous_phase, phase);
+        }
 
         // Update turn detector
         self.turn_detector.update(track);
@@ -427,6 +438,25 @@ impl AdaptivePrefetchCoordinator {
             reduced
         } else {
             plan.tiles.len()
+        };
+
+        // Apply transition throttle (takeoff ramp-up)
+        let max_tiles = if self.transition_throttle.is_active() {
+            let fraction = self.transition_throttle.fraction();
+            if fraction == 0.0 {
+                tracing::debug!("Transition throttle — grace period, deferring");
+                return 0;
+            }
+            let throttled = ((max_tiles as f64) * fraction).ceil() as usize;
+            tracing::debug!(
+                fraction = format!("{:.0}%", fraction * 100.0),
+                full = max_tiles,
+                throttled_to = throttled,
+                "Transition throttle — ramping up"
+            );
+            throttled
+        } else {
+            max_tiles
         };
 
         let mut submitted = 0;
