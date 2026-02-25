@@ -25,6 +25,7 @@ use super::super::cruise_strategy::CruiseStrategy;
 use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
 use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
+use super::super::boundary_prioritizer;
 use super::super::transition_throttle::TransitionThrottle;
 use super::super::turn_detector::TurnDetector;
 
@@ -706,6 +707,13 @@ impl AdaptivePrefetchCoordinator {
         };
 
         let disk_filtered = patch_skipped + disk_skipped;
+
+        // Re-sort tiles by DSF boundary urgency (Issue #58)
+        // Tiles in DSF columns/rows the aircraft is about to cross
+        // are prioritized over tiles that are merely close by distance.
+        if !plan.tiles.is_empty() {
+            boundary_prioritizer::prioritize(position, track, &mut plan.tiles);
+        }
 
         let submitted = if plan.is_empty() {
             0
