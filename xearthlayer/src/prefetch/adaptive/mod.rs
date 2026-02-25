@@ -13,6 +13,10 @@
 //!   cruise (band) operations
 //! - **Track-Based Turn Detection**: Uses ground track (not heading) to detect
 //!   turns and pause prefetch until stable
+//! - **DSF Boundary-Aware Ordering**: Tiles sorted by DSF column/row urgency
+//!   to match X-Plane's scenery loading pattern (#58)
+//! - **Takeoff Transition Throttle**: Grace period + ramp-up after Ground→Cruise
+//!   to avoid resource contention during takeoff (#62)
 //! - **Rolling Recalibration**: Adjusts mode if throughput degrades during flight
 //!
 //! # Strategy Modes
@@ -37,10 +41,12 @@
 //! │   └── rolling.rs          # Rolling recalibration
 //! ├── strategy.rs             # AdaptivePrefetchStrategy trait
 //! ├── band_calculator.rs      # DSF-aligned band geometry
+//! ├── boundary_prioritizer.rs # DSF boundary-aware tile ordering (#58)
 //! ├── cruise_strategy.rs      # Cruise flight prefetch
 //! ├── ground_strategy.rs      # Ground operations prefetch
 //! ├── phase_detector.rs       # Ground/cruise detection
 //! ├── turn_detector.rs        # Track stability monitoring
+//! ├── transition_throttle.rs  # Takeoff ramp-up throttle (#62)
 //! └── coordinator.rs          # Central orchestration
 //! ```
 //!
