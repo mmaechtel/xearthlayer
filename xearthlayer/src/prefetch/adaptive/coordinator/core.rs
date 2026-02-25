@@ -1517,4 +1517,46 @@ mod tests {
         assert_eq!(submitted, 3, "Should stop at first ChannelFull error");
         assert_eq!(client.submitted_count(), 3);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Transition throttle integration tests (#62)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_phase_change_activates_throttle() {
+        let mut coord =
+            AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Start on ground
+        coord.update((47.5, 10.5), 270.0, 10.0, 0.0);
+        assert!(!coord.transition_throttle.is_active());
+
+        // Trigger cruise (high speed, wait for hysteresis)
+        coord.update((47.5, 10.5), 270.0, 100.0, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((47.5, 10.5), 270.0, 100.0, 0.0);
+
+        // Throttle should now be active (grace period)
+        assert!(coord.transition_throttle.is_active());
+    }
+
+    #[test]
+    fn test_throttle_resets_on_landing() {
+        let mut coord =
+            AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Transition to cruise
+        coord.update((47.5, 10.5), 270.0, 100.0, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((47.5, 10.5), 270.0, 100.0, 0.0);
+        assert!(coord.transition_throttle.is_active());
+
+        // Transition back to ground
+        coord.update((47.5, 10.5), 270.0, 10.0, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((47.5, 10.5), 270.0, 10.0, 0.0);
+        assert!(!coord.transition_throttle.is_active());
+    }
 }

@@ -84,7 +84,7 @@ pub struct PhaseDetector {
     pending_transition: Option<(FlightPhase, Instant)>,
 
     /// Hysteresis duration (how long conditions must persist).
-    hysteresis_duration: std::time::Duration,
+    pub(crate) hysteresis_duration: std::time::Duration,
 }
 
 impl PhaseDetector {
