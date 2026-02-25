@@ -70,6 +70,7 @@
 //! - Research basis: `docs/dev/xplane-scenery-loading-whitepaper.md`
 
 mod band_calculator;
+mod boundary_prioritizer;
 mod calibration;
 mod config;
 mod coordinator;
@@ -77,10 +78,12 @@ mod cruise_strategy;
 mod ground_strategy;
 mod phase_detector;
 mod strategy;
+mod transition_throttle;
 mod turn_detector;
 
 // Re-export public types
 pub use band_calculator::{BandCalculator, DsfTileCoord};
+pub use boundary_prioritizer::prioritize as prioritize_by_boundary;
 pub use calibration::{
     create_throughput_observer, create_throughput_observer_with_config, PerformanceCalibration,
     PerformanceCalibrator, RecalibrationResult, RollingCalibrator, SharedThroughputObserver,
@@ -92,4 +95,5 @@ pub use cruise_strategy::CruiseStrategy;
 pub use ground_strategy::{GroundStrategy, LoadedAreaBounds};
 pub use phase_detector::{FlightPhase, PhaseDetector};
 pub use strategy::{AdaptivePrefetchStrategy, PrefetchPlan, PrefetchPlanMetadata, TrackQuadrant};
+pub use transition_throttle::TransitionThrottle;
 pub use turn_detector::{TurnDetector, TurnState};
