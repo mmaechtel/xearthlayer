@@ -44,7 +44,7 @@ use crate::fuse::coalesce::RequestCoalescer;
 use crate::fuse::{get_default_placeholder, parse_dds_filename};
 use crate::geo_index::GeoIndex;
 use crate::ortho_union::OrthoUnionIndex;
-use crate::prefetch::{DdsAccessEvent, DsfTileCoord, FuseLoadMonitor, TileRequestCallback};
+use crate::prefetch::{DdsAccessEvent, DsfTileCoord, TileRequestCallback};
 use crate::scene_tracker::{DdsTileCoord, FuseAccessEvent};
 use bytes::Bytes;
 use fuse3::raw::prelude::*;
@@ -129,11 +129,6 @@ pub struct Fuse3OrthoUnionFS {
     /// sends raw DDS tile coordinates (row, col, zoom) for Scene Tracker
     /// to store as empirical data.
     scene_tracker_tx: Option<mpsc::UnboundedSender<FuseAccessEvent>>,
-    /// Optional load monitor for circuit breaker integration.
-    ///
-    /// When set, records each DDS request so the circuit breaker can
-    /// detect when X-Plane is heavily loading scenery and pause prefetching.
-    load_monitor: Option<Arc<dyn FuseLoadMonitor>>,
     /// Optional metrics client for reporting FUSE-level metrics.
     ///
     /// When set, reports coalesced requests and other FUSE-specific metrics.
@@ -185,7 +180,6 @@ impl Fuse3OrthoUnionFS {
             request_coalescer,
             dds_access_tx: None,
             scene_tracker_tx: None,
-            load_monitor: None,
             metrics_client: None,
         }
     }
@@ -215,7 +209,6 @@ impl Fuse3OrthoUnionFS {
             request_coalescer,
             dds_access_tx: None,
             scene_tracker_tx: None,
-            load_monitor: None,
             metrics_client: None,
         }
     }
@@ -287,25 +280,6 @@ impl Fuse3OrthoUnionFS {
         tx: mpsc::UnboundedSender<FuseAccessEvent>,
     ) -> Self {
         self.scene_tracker_tx = Some(tx);
-        self
-    }
-
-    /// Set the load monitor for circuit breaker integration.
-    ///
-    /// When set, the filesystem calls [`FuseLoadMonitor::record_request()`]
-    /// for each DDS texture read. This enables the circuit breaker to detect
-    /// when X-Plane is heavily loading scenery (e.g., during scene load) and
-    /// pause prefetching to avoid competing for resources.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let monitor = Arc::new(SharedFuseLoadMonitor::new());
-    /// let fs = Fuse3OrthoUnionFS::new(index, client, size)
-    ///     .with_load_monitor(monitor);
-    /// ```
-    pub fn with_load_monitor(mut self, monitor: Arc<dyn FuseLoadMonitor>) -> Self {
-        self.load_monitor = Some(monitor);
         self
     }
 
@@ -702,11 +676,6 @@ impl Filesystem for Fuse3OrthoUnionFS {
                 .inode_manager
                 .get_virtual_dds(ino)
                 .ok_or(Errno::from(libc::ENOENT))?;
-
-            // Record request for circuit breaker (tracks X-Plane load rate)
-            if let Some(ref monitor) = self.load_monitor {
-                monitor.record_request();
-            }
 
             // Send DDS access event to tile-based prefetcher (fire-and-forget)
             if let Some(ref tx) = self.dds_access_tx {

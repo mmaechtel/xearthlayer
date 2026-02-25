@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::aircraft_position::AircraftPositionBroadcaster;
-use crate::executor::{DdsClient, MemoryCache};
+use crate::executor::{DdsClient, MemoryCache, ResourcePoolConfig, ResourcePools};
 use crate::prefetch::{
     warn_if_legacy, AdaptivePrefetchConfig, AdaptivePrefetchCoordinator, CircuitBreaker, Prefetcher,
 };
@@ -140,15 +140,25 @@ impl ServiceOrchestrator {
         // Wire memory cache for tile existence checks (Bug 5 fix)
         coordinator = coordinator.with_memory_cache(memory_cache);
 
-        // Wire circuit breaker as throttler (with optional resource pool monitoring)
-        let mut circuit_breaker = CircuitBreaker::new(
-            config.circuit_breaker.clone(),
-            self.mount_manager.load_monitor(),
-        );
-        if let Some(ref pools) = resource_pools {
-            circuit_breaker = circuit_breaker.with_resource_pools(Arc::clone(pools));
-            tracing::info!("Resource pool utilization monitoring wired to circuit breaker");
-        }
+        // Wire circuit breaker as throttler (resource pool utilization based)
+        let circuit_breaker = if let Some(ref pools) = resource_pools {
+            CircuitBreaker::new(
+                config.circuit_breaker.clone(),
+                self.mount_manager.load_monitor(),
+                Arc::clone(pools),
+            )
+        } else {
+            // Fallback: create minimal resource pools for circuit breaker.
+            // This shouldn't happen in production — runtime always provides pools.
+            tracing::warn!("No resource pools available — circuit breaker using default pools");
+            let fallback_pools = Arc::new(ResourcePools::new(ResourcePoolConfig::default()));
+            CircuitBreaker::new(
+                config.circuit_breaker.clone(),
+                self.mount_manager.load_monitor(),
+                fallback_pools,
+            )
+        };
+        tracing::info!("Circuit breaker wired with resource pool utilization monitoring");
         coordinator = coordinator.with_throttler(Arc::new(circuit_breaker));
 
         // Wire scenery index if available

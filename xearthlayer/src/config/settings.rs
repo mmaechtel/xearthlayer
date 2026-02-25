@@ -179,10 +179,7 @@ pub struct PrefetchSettings {
     /// Interval between prefetch cycles in milliseconds. Default: 2000ms.
     /// Higher values reduce prefetch aggressiveness.
     pub cycle_interval_ms: u64,
-    /// Circuit breaker threshold: FUSE jobs per second to trip the breaker.
-    /// When X-Plane is loading scenery, FUSE request rate spikes. Default: 10.0.
-    pub circuit_breaker_threshold: f64,
-    /// How long (milliseconds) high FUSE rate must be sustained to open circuit.
+    /// How long (milliseconds) resource saturation must be sustained to open circuit.
     /// Default: 500ms (0.5 seconds) to catch bursty loads.
     pub circuit_breaker_open_ms: u64,
     /// Cooloff time (seconds) before trying to close the circuit.

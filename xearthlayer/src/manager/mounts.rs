@@ -488,14 +488,12 @@ impl MountManager {
         let index_for_prefetch = Arc::new(index);
 
         // Create and mount the consolidated ortho union filesystem with DDS access channel
-        // Also wire the load monitor so circuit breaker can detect X-Plane load
         // Wire Scene Tracker channel for empirical scenery tracking
         let mut ortho_union_fs =
             Fuse3OrthoUnionFS::new((*index_for_prefetch).clone(), dds_client, expected_dds_size)
                 .with_geo_index(Arc::clone(&geo_index))
                 .with_dds_access_channel(dds_access_tx)
-                .with_scene_tracker_channel(scene_tracker_tx)
-                .with_load_monitor(Arc::clone(&self.scene_tracker) as Arc<dyn FuseLoadMonitor>);
+                .with_scene_tracker_channel(scene_tracker_tx);
 
         // Wire metrics client for coalesced request tracking
         if let Some(metrics) = service.metrics_client() {
