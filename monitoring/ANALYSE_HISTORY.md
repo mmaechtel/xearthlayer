@@ -551,31 +551,77 @@ Detailanalyse: [ANALYSE_RUN_N_20260225.md](ANALYSE_RUN_N_20260225.md)
 
 ---
 
+## Run P — Wasserflug LGIR→LGTS (2026-02-26, 93 Min)
+
+Route: LGIR (Heraklion) → LGTS (Thessaloniki), 645 km, FL317, ~75% über Wasser. XEL mit DEBUG-Logging. Keine Config-Änderungen seit Run O.
+
+| Metrik | Run O (92 Min) | **Run P (93 Min)** | Trend |
+|--------|----------------|---------------------|-------|
+| FPS Mean / Median | 29,4 / 29,7 | **30,1 / 29,9** | ↑ |
+| FPS < 25 | 2,5% | **0,81%** | **↓↓↓** |
+| Takeoff-Stutter | 0s | **0s** | = |
+| Degradation Events | ~14 | **2 (25s gesamt)** | **↓↓↓** |
+| allocstall Samples | ~200 | **54** | **↓↓** |
+| allocstall max/s | 10.341 | **6.064** | ↓ |
+| Direct Reclaim (bpf) | — | **27.045** | — |
+| Main Thread Reclaim | — | **20.548 (76%)** | — |
+| Main Thread >10ms | — | **0** | Excellent |
+| Swap Peak | — | **1.915 MB** | — |
+| NVMe Swap | 0 | **0** | = |
+| VRAM Peak | 21,3 GB (87%) | **13,9 GB (57%)** | **↓↓** |
+| Slow IO (>5ms) | 28.099 | **5.001** | **↓↓↓** |
+| EMFILE | 0 | **1.635** | ↑ |
+| CB Trips | — | **0** | Excellent |
+| PSI | — | **0,00** | Excellent |
+
+**Kernbefunde:**
+1. **Sauberster Run der Messreihe:** 0,81% FPS<25, 0 Takeoff-Stutter, 0 CB-Trips, 0 PSI
+2. **Wasser-Route = leichter Workload:** 87% Prefetch-Zyklen = 0 Tiles (GeoIndex filtert alles)
+3. **EMFILE bei Descent (09:01:38):** 1.635 Errors in <2s, 168 gleichzeitige DDS-Requests → 9 Timeout-Tiles
+4. **Steady State ab Min 74 makellos:** 0 allocstalls, 0 Reclaim
+5. **Direct Reclaim max auf Main Thread: 8,7ms** — weit unter 33ms Frame-Budget
+
+**Caveat:** Verbesserungen reflektieren primär den leichteren Workload, nicht Tuning-Änderungen.
+
+Detailanalyse: [ANALYSE_RUN_P_20260226.md](ANALYSE_RUN_P_20260226.md)
+
+---
+
 ## Gesamtentwicklung — Schlüsselmetriken
 
-| Metrik | A (Baseline) | D (+IO) | E (90 Min) | F/2 (Steady) | G (Steady) | H (Steady) | I (Normalflug) | J (Gesamt)* | K (Steady)** | M (Gesamt)*** | N (Gesamt)**** | O (Gesamt)† |
-|--------|-------------|---------|------------|---------------|------------|------------|-----------------|-------------|-------------|---------------|----------------|-------------|
-| Direct Reclaim max/s | 75.183 | 0 | 2.122.555 | **0** | **0** | **0** | **0** | 1.293.750 | **0** | 451.643 | 1.522.360 | — |
-| Alloc Stalls max/s | 1.042 | 0 | 13.383 | **0** | **0** | **0** | **0** | 8.833 | **0** | 8.324 | 6.948 | **10.341** |
-| Write-Lat avg (ms) | 36–47 | 1,8 | 16,1 | — | — | 0,25 | 0,21–0,24 | 0,37–0,50 | <0,5 | 0,03–0,09 | — | — |
-| Write-Lat max (ms) | 260–312 | 283 | 699 | **44** | — | 53,8 | 120,3 | **6,1** | <4 | 18,3 | — | — |
-| Dirty Pages avg (MB) | 502 | 30 | 39 | **2,4** | ~2 | ~16 | 45 | 1,7 | ~2 | ~5 | — | — |
-| Swap auf NVMe | ja | ja | 11,6 GB | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
-| Slow IO (>5ms) | — | — | — | — | 12.383 | **339** | ~1.539 | **35** | **0** | 1.806 | 44 | **28.099** |
-| EMFILE | — | — | 3.474 | — | — | 1.126 | 16.079 | **0** | **0** | 0 | 0 | 0 |
-| FPS avg / median | — | — | — | — | — | — | — | — | — | 29,8 / — | 30,9 / 29,9 | **29,4 / 29,7** |
-| FPS < 25 | — | — | — | — | — | — | — | — | — | — | ~8%†† | **2,5%** |
-| Takeoff-Stutter | — | — | — | — | — | — | — | — | — | — | **57s** | **0s** |
-| Approach-Stutter | — | — | — | — | — | — | — | — | — | — | **61s** | **6,2s** |
-| GPU Time max (ms) | — | — | — | — | — | — | — | — | — | 42,0 | 1713‡ | **132** |
-| VRAM Peak (GB) | — | — | — | — | — | — | — | — | — | — | 20,1 (82%) | **21,3 (87%)** |
+| Metrik | A (Baseline) | D (+IO) | E (90 Min) | F/2 (Steady) | G (Steady) | H (Steady) | I (Normalflug) | J (Gesamt)* | K (Steady)** | M (Gesamt)*** | N (Gesamt)**** | O (Gesamt)† | P (Gesamt)†† |
+|--------|-------------|---------|------------|---------------|------------|------------|-----------------|-------------|-------------|---------------|----------------|-------------|-------------|
+| Direct Reclaim max/s | 75.183 | 0 | 2.122.555 | **0** | **0** | **0** | **0** | 1.293.750 | **0** | 451.643 | 1.522.360 | — | — |
+| Alloc Stalls max/s | 1.042 | 0 | 13.383 | **0** | **0** | **0** | **0** | 8.833 | **0** | 8.324 | 6.948 | **10.341** | **6.064** |
+| Write-Lat avg (ms) | 36–47 | 1,8 | 16,1 | — | — | 0,25 | 0,21–0,24 | 0,37–0,50 | <0,5 | 0,03–0,09 | — | — | 0,14–0,17 |
+| Write-Lat max (ms) | 260–312 | 283 | 699 | **44** | — | 53,8 | 120,3 | **6,1** | <4 | 18,3 | — | — | 46 |
+| Dirty Pages avg (MB) | 502 | 30 | 39 | **2,4** | ~2 | ~16 | 45 | 1,7 | ~2 | ~5 | — | — | 20,5 |
+| Swap auf NVMe | ja | ja | 11,6 GB | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+| Slow IO (>5ms) | — | — | — | — | 12.383 | **339** | ~1.539 | **35** | **0** | 1.806 | 44 | **28.099** | **5.001** |
+| EMFILE | — | — | 3.474 | — | — | 1.126 | 16.079 | **0** | **0** | 0 | 0 | 0 | **1.635** |
+| FPS avg / median | — | — | — | — | — | — | — | — | — | 29,8 / — | 30,9 / 29,9 | **29,4 / 29,7** | **30,1 / 29,9** |
+| FPS < 25 | — | — | — | — | — | — | — | — | — | — | ~8%†† | **2,5%** | **0,81%** |
+| Takeoff-Stutter | — | — | — | — | — | — | — | — | — | — | **57s** | **0s** | **0s** |
+| Approach-Stutter | — | — | — | — | — | — | — | — | — | — | **61s** | **6,2s** | **4,1s** |
+| GPU Time max (ms) | — | — | — | — | — | — | — | — | — | 42,0 | 1713‡ | **132** | **252** |
+| VRAM Peak (GB) | — | — | — | — | — | — | — | — | — | — | 20,1 (82%) | **21,3 (87%)** | **13,9 (57%)** |
 
 *Run J: Ortho4XP-Szenerie, Freeze bei Min 39.
 **Run K Steady: Ab Min 88, Cold Start 22k Tiles.
 ***Run M: DSF-Burst-Phase, Stalls nur bei Boundary-Crossings.
 ****Run N: Stalls nur beim Approach (61s Dreifach-Problem). Takeoff-Stutter rein CPU-bedingt.
 †Run O: Circuit-Breaker-Tuning (Pools 128→48). allocstalls höher in Summe, aber nur kurze Bursts statt Mega-Events.
-††Run N FPS<25 geschätzt aus Airborne-Stutter 4,6% + Gate-Loading.
+††Run P: Wasser-Route LGIR→LGTS, leichter Workload. 0 CB-Trips, 0 PSI. EMFILE bei Descent (168 conc. requests).
 ‡GPU Time 1713ms = Measurement-Artefakt (Airport Object Loading), kein Render-Stall.
 
-**Zeitraum:** 2026-02-17 bis 2026-02-25
+**Zeitraum:** 2026-02-17 bis 2026-02-26
+
+---
+
+## Änderung 13 — swappiness erhöhen (2026-02-26)
+
+```
+vm.swappiness                8 (war 5)       Graduellerer Swap statt Panik-Burst bei Phasen-Übergang
+```
+
+**Begründung:** Run P zeigte 65,6% aller allocstalls in einem 3s Swap-Out-Burst bei Min 74. swappiness=8 soll den Übergang glätten (früher, kleiner swappen statt alles auf einmal).
