@@ -41,6 +41,10 @@ tarpaulin-report.html
 cobertura.xml
 lcov.info
 
+# Python
+__pycache__/
+*.pyc
+
 # Platform-specific
 Thumbs.db
 .Spotlight-V100
