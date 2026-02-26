@@ -129,7 +129,7 @@ impl Default for AdaptivePrefetchConfig {
             mode: PrefetchMode::Auto,
             low_performance_killswitch: KillswitchMode::Auto,
             trigger_position: 0.35,
-            lead_distance: 2,
+            lead_distance: 3,
             band_width: 2,
             max_tiles_per_cycle: 3000,
             ground_ring_radius: 1.0,
@@ -368,7 +368,7 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.mode, PrefetchMode::Auto);
         assert_eq!(config.trigger_position, 0.35);
-        assert_eq!(config.lead_distance, 2);
+        assert_eq!(config.lead_distance, 3);
         assert_eq!(config.band_width, 2);
         assert_eq!(config.max_tiles_per_cycle, 3000);
     }

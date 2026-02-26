@@ -19,13 +19,13 @@ use crate::prefetch::tile_based::DsfTileCoord;
 use crate::prefetch::CircuitState;
 use crate::prefetch::SceneryIndex;
 
+use super::super::boundary_prioritizer;
 use super::super::calibration::{PerformanceCalibration, StrategyMode};
 use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
 use super::super::cruise_strategy::CruiseStrategy;
 use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
 use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
-use super::super::boundary_prioritizer;
 use super::super::transition_throttle::TransitionThrottle;
 use super::super::turn_detector::TurnDetector;
 
@@ -328,7 +328,8 @@ impl AdaptivePrefetchCoordinator {
         self.status.phase = phase;
 
         if phase_changed {
-            self.transition_throttle.on_phase_change(previous_phase, phase);
+            self.transition_throttle
+                .on_phase_change(previous_phase, phase);
         }
 
         // Update turn detector

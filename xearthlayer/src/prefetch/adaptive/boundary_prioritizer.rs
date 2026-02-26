@@ -249,9 +249,9 @@ mod tests {
 
         // Tile ahead on both axes (north and west)
         let tile_nw = tile_at(54.5, 8.5); // DSF lat 54, lon 8
-        // Tile ahead on lat only
+                                          // Tile ahead on lat only
         let tile_n = tile_at(54.5, 9.5); // DSF lat 54, lon 9
-        // Tile behind on both
+                                         // Tile behind on both
         let tile_se = tile_at(52.5, 10.5); // DSF lat 52, lon 10
 
         let mut tiles = vec![tile_se, tile_n, tile_nw];
@@ -345,10 +345,16 @@ mod tests {
         // Moving in positive direction (north or east), velocity > 0
 
         // Next cell ahead: rank 0
-        assert!((axis_rank(53.3, 54.5, 1.0) - 0.0).abs() < 0.001, "next cell ahead = rank 0");
+        assert!(
+            (axis_rank(53.3, 54.5, 1.0) - 0.0).abs() < 0.001,
+            "next cell ahead = rank 0"
+        );
 
         // Two cells ahead: rank 1
-        assert!((axis_rank(53.3, 55.5, 1.0) - 1.0).abs() < 0.001, "two cells ahead = rank 1");
+        assert!(
+            (axis_rank(53.3, 55.5, 1.0) - 1.0).abs() < 0.001,
+            "two cells ahead = rank 1"
+        );
 
         // Same cell: rank 0.5
         assert!(
@@ -358,7 +364,11 @@ mod tests {
 
         // Behind: rank 100+
         let behind_rank = axis_rank(53.3, 52.5, 1.0);
-        assert!(behind_rank >= 100.0, "behind = rank 100+, got {}", behind_rank);
+        assert!(
+            behind_rank >= 100.0,
+            "behind = rank 100+, got {}",
+            behind_rank
+        );
     }
 
     #[test]
