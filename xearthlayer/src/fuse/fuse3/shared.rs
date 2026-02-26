@@ -32,6 +32,15 @@ use crate::fuse::{get_default_placeholder, validate_dds_or_placeholder, DdsFilen
 /// This value is shared across all filesystem implementations.
 pub const TTL: Duration = Duration::from_secs(1);
 
+/// FUSE open flag: bypass kernel page cache for this file.
+///
+/// Prevents virtual DDS tiles from filling `Inactive(file)` page cache.
+/// XEL's own moka memory cache handles re-reads, so kernel caching is
+/// redundant and wastes memory that competes with application allocations.
+///
+/// Value from Linux kernel `include/uapi/linux/fuse.h`.
+pub const FOPEN_DIRECT_IO: u32 = 1;
+
 // =============================================================================
 // VirtualDdsConfig - Shared DDS file configuration
 // =============================================================================
