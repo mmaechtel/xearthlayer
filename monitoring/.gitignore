@@ -1,0 +1,12 @@
+# Raw data — large CSV files from sysmon.py
+*.csv
+
+# Run directories (raw samples, kept locally)
+run_*/
+
+# Temporary run output
+/tmp/sysmon_run_*
+
+# Python cache
+__pycache__/
+*.pyc
