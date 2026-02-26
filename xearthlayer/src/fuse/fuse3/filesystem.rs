@@ -4,7 +4,7 @@
 //! All operations are async and run concurrently on the Tokio runtime.
 
 use super::inode::InodeManager;
-use super::shared::{DdsRequestor, FileAttrBuilder, VirtualDdsConfig, TTL};
+use super::shared::{DdsRequestor, FileAttrBuilder, VirtualDdsConfig, FOPEN_DIRECT_IO, TTL};
 use super::types::{Fuse3Error, Fuse3Result, MountHandle};
 use crate::executor::{DdsClient, StorageConcurrencyLimiter};
 use crate::fuse::parse_dds_filename;
@@ -504,6 +504,21 @@ impl Filesystem for Fuse3PassthroughFS {
         })
     }
 
+    /// Open a file.
+    ///
+    /// Returns `FOPEN_DIRECT_IO` for virtual DDS inodes to bypass kernel page
+    /// cache. Passthrough files use normal caching.
+    async fn open(&self, _req: Request, ino: u64, _flags: u32) -> Fuse3InternalResult<ReplyOpen> {
+        if InodeManager::is_virtual_inode(ino) {
+            Ok(ReplyOpen {
+                fh: 0,
+                flags: FOPEN_DIRECT_IO,
+            })
+        } else {
+            Ok(ReplyOpen { fh: 0, flags: 0 })
+        }
+    }
+
     /// Open a directory for reading.
     async fn opendir(
         &self,
@@ -663,6 +678,56 @@ mod tests {
         assert_eq!(config.blksize(), 4096);
         // 11_174_016 / 4096 = 2728.125, ceiling = 2729 blocks
         assert_eq!(config.blocks(), 2729);
+    }
+
+    #[tokio::test]
+    async fn test_open_virtual_dds_returns_direct_io() {
+        use super::super::shared::FOPEN_DIRECT_IO;
+        use fuse3::raw::Filesystem;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = create_test_client();
+        let fs = Fuse3PassthroughFS::new(temp_dir.path().to_path_buf(), client, 1024);
+
+        // Create a virtual DDS inode
+        let coords = DdsFilename {
+            row: 160000,
+            col: 84000,
+            zoom: 20,
+            map_type: "BI".to_string(),
+        };
+        let ino = fs.inode_manager.create_virtual_inode(coords);
+        assert!(InodeManager::is_virtual_inode(ino));
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        let reply = fs.open(req, ino, 0).await.unwrap();
+        assert_eq!(reply.flags, FOPEN_DIRECT_IO);
+    }
+
+    #[tokio::test]
+    async fn test_open_regular_file_returns_default_caching() {
+        use fuse3::raw::Filesystem;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = create_test_client();
+        let fs = Fuse3PassthroughFS::new(temp_dir.path().to_path_buf(), client, 1024);
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        // Root inode (1) is not virtual — should get normal caching
+        let reply = fs.open(req, 1, 0).await.unwrap();
+        assert_eq!(reply.flags, 0);
     }
 
     #[tokio::test]

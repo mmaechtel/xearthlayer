@@ -37,7 +37,7 @@
 //! missing textures dynamically using its configured imagery provider.
 
 use super::inode::InodeManager;
-use super::shared::{DdsRequestor, FileAttrBuilder, VirtualDdsConfig, TTL};
+use super::shared::{DdsRequestor, FileAttrBuilder, VirtualDdsConfig, FOPEN_DIRECT_IO, TTL};
 use super::types::{Fuse3Error, Fuse3Result};
 use crate::executor::{DdsClient, StorageConcurrencyLimiter};
 use crate::fuse::coalesce::RequestCoalescer;
@@ -945,6 +945,20 @@ impl Filesystem for Fuse3OrthoUnionFS {
         })
     }
 
+    async fn open(&self, _req: Request, ino: u64, _flags: u32) -> Fuse3InternalResult<ReplyOpen> {
+        if InodeManager::is_virtual_inode(ino) {
+            // Virtual DDS: bypass page cache — tiles are transient, XEL's
+            // moka memory cache handles re-reads.
+            Ok(ReplyOpen {
+                fh: 0,
+                flags: FOPEN_DIRECT_IO,
+            })
+        } else {
+            // Passthrough files: normal kernel caching
+            Ok(ReplyOpen { fh: 0, flags: 0 })
+        }
+    }
+
     async fn opendir(
         &self,
         _req: Request,
@@ -1101,6 +1115,70 @@ mod tests {
             Package::new(region, PackageType::Ortho, Version::new(1, 0, 0)),
             &pkg_dir,
         )
+    }
+
+    #[tokio::test]
+    async fn test_open_virtual_dds_returns_direct_io() {
+        use super::super::shared::FOPEN_DIRECT_IO;
+        use fuse3::raw::Filesystem;
+
+        let temp = TempDir::new().unwrap();
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        let client = create_test_client();
+        let fs = Fuse3OrthoUnionFS::new(index, client, 1024);
+
+        // Create a virtual DDS inode
+        let coords = crate::fuse::DdsFilename {
+            row: 160000,
+            col: 84000,
+            zoom: 20,
+            map_type: "BI".to_string(),
+        };
+        let ino = fs.inode_manager.create_virtual_inode(coords);
+        assert!(InodeManager::is_virtual_inode(ino));
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        let reply = fs.open(req, ino, 0).await.unwrap();
+        assert_eq!(reply.flags, FOPEN_DIRECT_IO);
+    }
+
+    #[tokio::test]
+    async fn test_open_regular_file_returns_default_caching() {
+        use fuse3::raw::Filesystem;
+
+        let temp = TempDir::new().unwrap();
+        let na_pkg = create_test_package(&temp, "na");
+
+        let index = OrthoUnionIndexBuilder::new()
+            .add_package(na_pkg)
+            .build()
+            .unwrap();
+
+        let client = create_test_client();
+        let fs = Fuse3OrthoUnionFS::new(index, client, 1024);
+
+        let req = fuse3::raw::Request {
+            unique: 1,
+            uid: 1000,
+            gid: 1000,
+            pid: 1000,
+        };
+
+        // Root inode (1) is not virtual — should get normal caching
+        let reply = fs.open(req, 1, 0).await.unwrap();
+        assert_eq!(reply.flags, 0);
     }
 
     #[test]
