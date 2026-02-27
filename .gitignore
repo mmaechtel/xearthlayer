@@ -55,3 +55,9 @@ notes*
 
 .gemini/
 gha-creds-*.json
+
+# Monitoring data
+monitoring/run_*/
+monitoring/cgroups/
+monitoring/ANALYSE_*.md
+monitoring/*.csv
