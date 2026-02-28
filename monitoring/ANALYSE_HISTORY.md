@@ -614,7 +614,7 @@ Detailanalyse: [ANALYSE_RUN_P_20260226.md](ANALYSE_RUN_P_20260226.md)
 ††Run P: Wasser-Route LGIR→LGTS, leichter Workload. 0 CB-Trips, 0 PSI. EMFILE bei Descent (168 conc. requests).
 ‡GPU Time 1713ms = Measurement-Artefakt (Airport Object Loading), kein Render-Stall.
 
-**Zeitraum:** 2026-02-17 bis 2026-02-26
+**Zeitraum:** 2026-02-17 bis 2026-02-27
 
 ---
 
@@ -625,3 +625,141 @@ vm.swappiness                8 (war 5)       Graduellerer Swap statt Panik-Burst
 ```
 
 **Begründung:** Run P zeigte 65,6% aller allocstalls in einem 3s Swap-Out-Burst bei Min 74. swappiness=8 soll den Übergang glätten (früher, kleiner swappen statt alles auf einmal).
+
+---
+
+## Änderung 14 — FOPEN_DIRECT_IO + memory_size 24 GB (2026-02-27)
+
+```
+FOPEN_DIRECT_IO             NEU                      Bypass Kernel Page Cache für virtuelle DDS (Commit 5b0f505)
+XEL memory_size             4 GB → 24 GB             Moka-Cache massiv erhöht (manuell, nicht empfohlen)
+```
+
+---
+
+## Run Q — EDDH Takeoff → Freeze (2026-02-27, 7,4 Min)
+
+Route: EDDH (Hamburg) Takeoff → Ostkurs mit Turn → Freeze bei 53.648N 10.282E. Session nach 7,4 Min vorzeitig durch X-Plane-Freeze beendet.
+
+| Metrik | Run P (93 Min) | **Run Q (7 Min)** | Trend |
+|--------|----------------|---------------------|-------|
+| FPS Mean / Median | 30,1 / 29,9 | **25,8 / 29,7** | ↓ |
+| FPS < 25 | 0,81% | **26,3%** | **↑↑↑ KATASTROPHE** |
+| FPS = 0 (Freeze) | 0% | **9,4% (23,6s)** | **NEU** |
+| Takeoff-Stutter | 0s | 0s | = |
+| allocstall max/s | 6.064 | **12.340** | ↑↑ |
+| allocstall Dichte | 0,6/Min | **7,6/Min** | ↑↑↑ |
+| Direct Reclaim | 27.045 | **28.182 (in 7 Min!)** | ↑↑↑ |
+| XEL Reclaim-Anteil | — | **55%** | **NEU: XEL = #1** |
+| Main Thread Reclaim | 76% | **26%** | ↓ (XEL dominiert) |
+| XEL Threads max | ~300 | **547** | ↑ |
+| XEL RSS Peak | ~28 GB | **33 GB** | ↑ (memory_size) |
+| Swap Peak | 1.915 MB | **4.956 MB** | ↑↑ |
+| CB Trips | 0 | **0 (VERSAGT)** | — |
+| VRAM Peak | 13,9 GB (57%) | 13,4 GB (55%) | = |
+| Slow IO | 5.001 | **1** | ↓ |
+
+**Kernbefunde:**
+
+1. **memory_size=24GB = Hauptverursacher:** XEL-RSS 33 GB → nur 7 GB freier RAM → 55% aller Reclaim-Events auf XEL-Threads (Rollentausch: vorher X-Plane 76%, jetzt XEL 55%)
+2. **Prefetch-Catchup nach Turn-Pause:** 56s Prefetch-Pause (Turn) → 80 tiles/cycle Catchup → 547 Threads → CPU-Saturation (idle=0%) → X-Plane Main Thread verhungert → FPS=0 Freeze
+3. **Circuit Breaker versagt:** 0 Trips trotz 547 Threads und CPU-Saturation. Pool-basierte Erkennung stuft Zustand nicht als gesättigt ein
+4. **FOPEN_DIRECT_IO möglicherweise Contributing Factor:** Ohne Page-Cache-Fallback blockiert jeder X-Plane read() bei FUSE-Überlast
+5. **IO/GPU unkritisch:** 1 Slow-IO-Event, 0 GPU-Throttle, 55% VRAM, 0 DMA Fence Stalls
+
+**Sofortmaßnahmen:**
+- `memory_size = 4 GB` zurücksetzen
+- `max_tiles_per_cycle = 40` (halbe Prefetch-Aggressivität)
+- `max_concurrent_tasks = 16` (strenger)
+- FOPEN_DIRECT_IO separat validieren (Vergleichsflug ohne)
+
+Detailanalyse: [ANALYSE_RUN_Q_20260227.md](ANALYSE_RUN_Q_20260227.md)
+
+---
+
+## Änderung 15 — memory_size zurück + sysctl-Neufassung (2026-02-27)
+
+```
+XEL memory_size             24 GB → 8 GB             Zurück auf Default (Run Q: 33 GB RSS → Freeze)
+sysctl komplett umgeschrieben:
+  vm.swappiness              8 → 180                  zram-optimiert (Swap im RAM = billig)
+  vm.min_free_kbytes         2 GB → 1 GB              Reduziert (swappiness=180 soll gradueller swappen)
+  vm.watermark_boost_factor  15000 → 0                Deaktiviert (Liquorix Default)
+  vm.watermark_scale_factor  50 → 125                 Breitere Watermarks
+  vm.vfs_cache_pressure      150 → 60                 Page Cache länger halten
+  vm.dirty_background_ratio  1 → 3                    Weniger aggressives Writeback
+  vm.dirty_ratio             5 → 10                   Höhere Dirty-Toleranz
+zram                         32 GB → 16 GB            Halbiert
+NOAA Weather                 deaktiviert              Crash-Verdacht aus Run Q
+FlyWithLua Rain-Scripts      entfernt                 Crash-Verdacht aus Run Q
+```
+
+---
+
+## Run R — LOWW → LROP mit DIRECT_IO + neuem sysctl (2026-02-27, 82 Min)
+
+Route: LOWW (Wien) → LROP (Bukarest Otopeni), ~950 km, FL366, Heading SE über Ungarn/Rumänien. 8.984 XEL-Tiles generiert.
+
+| Metrik | Run Q (7 Min) | **Run R (82 Min)** | Trend |
+|--------|---------------|---------------------|-------|
+| FPS Mean / Median | 25,8 / 29,7 | **29,9 / 29,8** | **↑↑** |
+| FPS < 25 | 26,3% | **1,10%** | **↓↓↓** |
+| FPS = 0 (Freeze) | 9,4% | **0,00%** | **ELIMINIERT** |
+| allocstall max/s | 12.340 | **5.157** | ↓ |
+| allocstall Events | ~56 (7 Min) | **12 (82 Min)** | **↓↓↓** |
+| Direct Reclaim (bpf) | 28.182 (7 Min) | **16.373** | **↓↓** |
+| XEL Reclaim-Anteil | 55% | **0,7%** | **↓↓↓** |
+| Main Thread Reclaim | 26% | **92,3%** | ↑ (normal) |
+| Main Thread Max Latenz | — | **135,8 ms** | — |
+| XEL RSS Peak | 33 GB | **19,6 GB** | **↓↓** |
+| XEL Threads max | 547 | 547 | = |
+| Swap Peak | 4.956 MB | 13.078 MB (Vorbelast.) | — |
+| CB Trips | 0 | **0** | = |
+| EMFILE | 0 | **0** | = |
+| VRAM Peak | 13,4 GB (55%) | **16,6 GB (67%)** | ↑ |
+| Slow IO (>5ms) | 1 | **1.066** | ↑ |
+
+**Kernbefunde:**
+
+1. **memory_size=8GB = Stabilisierung:** XEL-RSS 19,6 GB (vs. 33 GB in Run Q), Reclaim-Anteil 0,7% (vs. 55%). Run-Q-Freeze war allein memory_size=24GB.
+2. **FOPEN_DIRECT_IO stabil:** Kein messbares Problem. Kombination memory_size=8GB + DIRECT_IO funktioniert.
+3. **12 allocstalls in 5 Clustern:** Alle bei DSF-Boundary-Crossings, alle bei free < 1.600 MB. Enden nach Min 47. Steady State ab Min 48 makellos.
+4. **watermark_boost_factor=0 = Rückschritt:** Ohne kswapd-Boost treten allocstalls auf die mit boost=15000 (Runs H-P) vermeidbar wären. 135,8ms Worst-Case-Reclaim auf Main Thread.
+5. **Nur 2 FPS-Drops** in 82 Min (7,4s + 8,1s), beide DSF-boundary-bedingt. Kein Takeoff-/Approach-Stutter.
+6. **Slow IO:** 1.066 Events, aber 95% in einem einzigen Cache-Write-Burst bei T+34 (11–12ms). Außerhalb: nur 52 Events.
+7. **X-Plane crasht beim Shutdown** (xswiftbus Race Condition) — kein Ingame-Problem.
+
+Detailanalyse: [ANALYSE_RUN_R_20260227.md](ANALYSE_RUN_R_20260227.md)
+
+---
+
+## Gesamtentwicklung — Schlüsselmetriken
+
+| Metrik | A (Baseline) | D (+IO) | E (90 Min) | F/2 (Steady) | G (Steady) | H (Steady) | I (Normalflug) | J (Gesamt)* | K (Steady)** | M (Gesamt)*** | N (Gesamt)**** | O (Gesamt)† | P (Gesamt)†† | Q (7 Min)‡ | **R (Gesamt)§** |
+|--------|-------------|---------|------------|---------------|------------|------------|-----------------|-------------|-------------|---------------|----------------|-------------|-------------|------------|----------------|
+| Direct Reclaim max/s | 75.183 | 0 | 2.122.555 | **0** | **0** | **0** | **0** | 1.293.750 | **0** | 451.643 | 1.522.360 | — | — | — | — |
+| Alloc Stalls max/s | 1.042 | 0 | 13.383 | **0** | **0** | **0** | **0** | 8.833 | **0** | 8.324 | 6.948 | **10.341** | **6.064** | **12.340** | **5.157** |
+| Write-Lat avg (ms) | 36–47 | 1,8 | 16,1 | — | — | 0,25 | 0,21–0,24 | 0,37–0,50 | <0,5 | 0,03–0,09 | — | — | 0,14–0,17 | — | 0,29 (nvme0) |
+| Write-Lat max (ms) | 260–312 | 283 | 699 | **44** | — | 53,8 | 120,3 | **6,1** | <4 | 18,3 | — | — | 46 | — | **48,5** |
+| Dirty Pages avg (MB) | 502 | 30 | 39 | **2,4** | ~2 | ~16 | 45 | 1,7 | ~2 | ~5 | — | — | 20,5 | — | ~32 |
+| Swap auf NVMe | ja | ja | 11,6 GB | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+| Slow IO (>5ms) | — | — | — | — | 12.383 | **339** | ~1.539 | **35** | **0** | 1.806 | 44 | **28.099** | **5.001** | 1 | **1.066** |
+| EMFILE | — | — | 3.474 | — | — | 1.126 | 16.079 | **0** | **0** | 0 | 0 | 0 | **1.635** | 0 | **0** |
+| FPS avg / median | — | — | — | — | — | — | — | — | — | 29,8 / — | 30,9 / 29,9 | **29,4 / 29,7** | **30,1 / 29,9** | 25,8 / 29,7 | **29,9 / 29,8** |
+| FPS < 25 | — | — | — | — | — | — | — | — | — | — | ~8% | **2,5%** | **0,81%** | **26,3%** | **1,10%** |
+| Takeoff-Stutter | — | — | — | — | — | — | — | — | — | — | **57s** | **0s** | **0s** | 0s | **0s** |
+| Approach-Stutter | — | — | — | — | — | — | — | — | — | — | **61s** | **6,2s** | **4,1s** | — | **0s** |
+| GPU Time max (ms) | — | — | — | — | — | — | — | — | — | 42,0 | 1713‡‡ | **132** | **252** | — | **27,0** |
+| VRAM Peak (GB) | — | — | — | — | — | — | — | — | — | — | 20,1 (82%) | **21,3 (87%)** | **13,9 (57%)** | 13,4 (55%) | **16,6 (67%)** |
+
+*Run J: Ortho4XP-Szenerie, Freeze bei Min 39.
+**Run K Steady: Ab Min 88, Cold Start 22k Tiles.
+***Run M: DSF-Burst-Phase, Stalls nur bei Boundary-Crossings.
+****Run N: Stalls nur beim Approach (61s Dreifach-Problem). Takeoff-Stutter rein CPU-bedingt.
+†Run O: Circuit-Breaker-Tuning (Pools 128→48).
+††Run P: Wasser-Route LGIR→LGTS, leichter Workload.
+‡Run Q: memory_size=24GB → Freeze nach 7 Min.
+§Run R: memory_size=8GB + DIRECT_IO + neuer sysctl (swappiness=180, boost=0). Stabilster XEL-Lastflug.
+‡‡GPU Time 1713ms = Measurement-Artefakt.
+
+**Zeitraum:** 2026-02-17 bis 2026-02-27
