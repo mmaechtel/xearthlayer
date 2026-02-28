@@ -904,6 +904,66 @@ impl ValueSpecification for PositiveNumberSpec {
     }
 }
 
+/// Specification for integer values within an inclusive range.
+struct IntegerRangeSpec {
+    min: u64,
+    max: u64,
+}
+
+impl IntegerRangeSpec {
+    fn new(min: u64, max: u64) -> Self {
+        Self { min, max }
+    }
+}
+
+impl ValueSpecification for IntegerRangeSpec {
+    fn is_satisfied_by(&self, value: &str) -> Result<(), String> {
+        value
+            .parse::<u64>()
+            .map_err(|_| format!("must be an integer between {} and {}", self.min, self.max))
+            .and_then(|n| {
+                if n >= self.min && n <= self.max {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "must be an integer between {} and {}",
+                        self.min, self.max
+                    ))
+                }
+            })
+    }
+}
+
+/// Specification for floating-point values within an inclusive range.
+struct FloatRangeSpec {
+    min: f64,
+    max: f64,
+}
+
+impl FloatRangeSpec {
+    fn new(min: f64, max: f64) -> Self {
+        Self { min, max }
+    }
+}
+
+impl ValueSpecification for FloatRangeSpec {
+    fn is_satisfied_by(&self, value: &str) -> Result<(), String> {
+        value
+            .parse::<f64>()
+            .map_err(|_| format!("must be a number between {} and {}", self.min, self.max))
+            .and_then(|n| {
+                if n >= self.min && n <= self.max {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "must be a number between {} and {}",
+                        self.min, self.max
+                    ))
+                }
+            })
+    }
+}
+
 /// Specification for boolean values.
 struct BooleanSpec;
 
@@ -1144,5 +1204,27 @@ mod tests {
         assert!(keys.len() > 10); // Sanity check
         assert!(keys.contains(&ConfigKey::ProviderType));
         assert!(keys.contains(&ConfigKey::PackagesLibraryUrl));
+    }
+
+    #[test]
+    fn test_integer_range_spec() {
+        let spec = IntegerRangeSpec::new(30, 300);
+        assert!(spec.is_satisfied_by("30").is_ok());
+        assert!(spec.is_satisfied_by("300").is_ok());
+        assert!(spec.is_satisfied_by("90").is_ok());
+        assert!(spec.is_satisfied_by("29").is_err());
+        assert!(spec.is_satisfied_by("301").is_err());
+        assert!(spec.is_satisfied_by("abc").is_err());
+    }
+
+    #[test]
+    fn test_float_range_spec() {
+        let spec = FloatRangeSpec::new(0.1, 0.5);
+        assert!(spec.is_satisfied_by("0.1").is_ok());
+        assert!(spec.is_satisfied_by("0.5").is_ok());
+        assert!(spec.is_satisfied_by("0.25").is_ok());
+        assert!(spec.is_satisfied_by("0.09").is_err());
+        assert!(spec.is_satisfied_by("0.51").is_err());
+        assert!(spec.is_satisfied_by("abc").is_err());
     }
 }
