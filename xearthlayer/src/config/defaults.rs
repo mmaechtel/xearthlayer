@@ -173,6 +173,25 @@ pub const DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD: f64 = 10.0;
 pub const DEFAULT_CALIBRATION_SAMPLE_DURATION: u64 = 60;
 
 // =============================================================================
+// Transition ramp defaults
+// =============================================================================
+
+/// Default altitude climb (feet) above takeoff MSL to release transition hold.
+pub const DEFAULT_TAKEOFF_CLIMB_FT: f32 = 1000.0;
+
+/// Default maximum seconds before timeout release if climb threshold not reached.
+pub const DEFAULT_TAKEOFF_TIMEOUT_SECS: u64 = 90;
+
+/// Default sustained seconds at GS < 40kt before Cruise→Ground transition.
+pub const DEFAULT_LANDING_HYSTERESIS_SECS: u64 = 15;
+
+/// Default duration (seconds) of linear ramp from start fraction to full rate.
+pub const DEFAULT_RAMP_DURATION_SECS: u64 = 30;
+
+/// Default starting prefetch fraction when ramp begins.
+pub const DEFAULT_RAMP_START_FRACTION: f64 = 0.25;
+
+// =============================================================================
 // Control plane defaults
 // =============================================================================
 
@@ -295,6 +314,11 @@ impl Default for ConfigFile {
                 calibration_aggressive_threshold: DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD,
                 calibration_opportunistic_threshold: DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD,
                 calibration_sample_duration: DEFAULT_CALIBRATION_SAMPLE_DURATION,
+                takeoff_climb_ft: DEFAULT_TAKEOFF_CLIMB_FT,
+                takeoff_timeout_secs: DEFAULT_TAKEOFF_TIMEOUT_SECS,
+                landing_hysteresis_secs: DEFAULT_LANDING_HYSTERESIS_SECS,
+                ramp_duration_secs: DEFAULT_RAMP_DURATION_SECS,
+                ramp_start_fraction: DEFAULT_RAMP_START_FRACTION,
             },
             control_plane: ControlPlaneSettings {
                 max_concurrent_jobs: default_max_concurrent_jobs(),

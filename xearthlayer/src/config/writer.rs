@@ -195,6 +195,18 @@ calibration_opportunistic_threshold = {}
 ; How long to measure throughput during initial calibration (seconds, default: 60)
 calibration_sample_duration = {}
 
+; Transition ramp settings (takeoff phase management)
+; Altitude climb (feet) above takeoff MSL to release transition hold (default: 1000, range: 200-5000)
+takeoff_climb_ft = {}
+; Maximum seconds before timeout release if climb not reached (default: 90, range: 30-300)
+takeoff_timeout_secs = {}
+; Sustained seconds at GS < 40kt before landing detection (default: 15, range: 5-60)
+landing_hysteresis_secs = {}
+; Duration (secs) of linear ramp from start fraction to full rate (default: 30, range: 10-120)
+ramp_duration_secs = {}
+; Starting prefetch fraction when ramp begins (default: 0.25, range: 0.1-0.5)
+ramp_start_fraction = {}
+
 [control_plane]
 ; Advanced settings for job management and health monitoring.
 ; Defaults are tuned for most systems. Only modify if you understand the implications.
@@ -292,6 +304,11 @@ max_stale_secs = {}
         config.prefetch.calibration_aggressive_threshold,
         config.prefetch.calibration_opportunistic_threshold,
         config.prefetch.calibration_sample_duration,
+        config.prefetch.takeoff_climb_ft,
+        config.prefetch.takeoff_timeout_secs,
+        config.prefetch.landing_hysteresis_secs,
+        config.prefetch.ramp_duration_secs,
+        config.prefetch.ramp_start_fraction,
         config.control_plane.max_concurrent_jobs,
         config.control_plane.stall_threshold_secs,
         config.control_plane.health_check_interval_secs,

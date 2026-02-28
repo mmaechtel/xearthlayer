@@ -200,6 +200,23 @@ pub struct PrefetchSettings {
     /// How long to measure throughput during initial calibration (seconds).
     /// Default: 60
     pub calibration_sample_duration: u64,
+
+    // Transition ramp settings
+    /// Altitude climb (feet) above takeoff MSL to release transition hold.
+    /// Default: 1000.0, Range: 200-5000
+    pub takeoff_climb_ft: f32,
+    /// Maximum seconds before timeout release if climb threshold not reached.
+    /// Default: 90, Range: 30-300
+    pub takeoff_timeout_secs: u64,
+    /// Sustained seconds at GS < 40kt before Cruise→Ground transition.
+    /// Default: 15, Range: 5-60
+    pub landing_hysteresis_secs: u64,
+    /// Duration (seconds) of linear ramp from start fraction to full rate.
+    /// Default: 30, Range: 10-120
+    pub ramp_duration_secs: u64,
+    /// Starting prefetch fraction when ramp begins.
+    /// Default: 0.25, Range: 0.1-0.5
+    pub ramp_start_fraction: f64,
 }
 
 /// Control plane configuration for job management and health monitoring.

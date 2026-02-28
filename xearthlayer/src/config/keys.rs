@@ -87,6 +87,13 @@ pub enum ConfigKey {
     PrefetchCalibrationOpportunisticThreshold,
     PrefetchCalibrationSampleDuration,
 
+    // Transition ramp settings
+    PrefetchTakeoffClimbFt,
+    PrefetchTakeoffTimeoutSecs,
+    PrefetchLandingHysteresisSecs,
+    PrefetchRampDurationSecs,
+    PrefetchRampStartFraction,
+
     // Control plane settings
     ControlPlaneMaxConcurrentJobs,
     ControlPlaneStallThresholdSecs,
@@ -178,6 +185,11 @@ impl FromStr for ConfigKey {
             "prefetch.calibration_sample_duration" => {
                 Ok(ConfigKey::PrefetchCalibrationSampleDuration)
             }
+            "prefetch.takeoff_climb_ft" => Ok(ConfigKey::PrefetchTakeoffClimbFt),
+            "prefetch.takeoff_timeout_secs" => Ok(ConfigKey::PrefetchTakeoffTimeoutSecs),
+            "prefetch.landing_hysteresis_secs" => Ok(ConfigKey::PrefetchLandingHysteresisSecs),
+            "prefetch.ramp_duration_secs" => Ok(ConfigKey::PrefetchRampDurationSecs),
+            "prefetch.ramp_start_fraction" => Ok(ConfigKey::PrefetchRampStartFraction),
 
             "control_plane.max_concurrent_jobs" => Ok(ConfigKey::ControlPlaneMaxConcurrentJobs),
             "control_plane.stall_threshold_secs" => Ok(ConfigKey::ControlPlaneStallThresholdSecs),
@@ -265,6 +277,11 @@ impl ConfigKey {
                 "prefetch.calibration_opportunistic_threshold"
             }
             ConfigKey::PrefetchCalibrationSampleDuration => "prefetch.calibration_sample_duration",
+            ConfigKey::PrefetchTakeoffClimbFt => "prefetch.takeoff_climb_ft",
+            ConfigKey::PrefetchTakeoffTimeoutSecs => "prefetch.takeoff_timeout_secs",
+            ConfigKey::PrefetchLandingHysteresisSecs => "prefetch.landing_hysteresis_secs",
+            ConfigKey::PrefetchRampDurationSecs => "prefetch.ramp_duration_secs",
+            ConfigKey::PrefetchRampStartFraction => "prefetch.ramp_start_fraction",
             ConfigKey::ControlPlaneMaxConcurrentJobs => "control_plane.max_concurrent_jobs",
             ConfigKey::ControlPlaneStallThresholdSecs => "control_plane.stall_threshold_secs",
             ConfigKey::ControlPlaneHealthCheckIntervalSecs => {
@@ -395,6 +412,17 @@ impl ConfigKey {
                 .to_string(),
             ConfigKey::PrefetchCalibrationSampleDuration => {
                 config.prefetch.calibration_sample_duration.to_string()
+            }
+            ConfigKey::PrefetchTakeoffClimbFt => config.prefetch.takeoff_climb_ft.to_string(),
+            ConfigKey::PrefetchTakeoffTimeoutSecs => {
+                config.prefetch.takeoff_timeout_secs.to_string()
+            }
+            ConfigKey::PrefetchLandingHysteresisSecs => {
+                config.prefetch.landing_hysteresis_secs.to_string()
+            }
+            ConfigKey::PrefetchRampDurationSecs => config.prefetch.ramp_duration_secs.to_string(),
+            ConfigKey::PrefetchRampStartFraction => {
+                config.prefetch.ramp_start_fraction.to_string()
             }
             ConfigKey::ControlPlaneMaxConcurrentJobs => {
                 config.control_plane.max_concurrent_jobs.to_string()
@@ -582,6 +610,21 @@ impl ConfigKey {
             ConfigKey::PrefetchCalibrationSampleDuration => {
                 config.prefetch.calibration_sample_duration = value.parse().unwrap();
             }
+            ConfigKey::PrefetchTakeoffClimbFt => {
+                config.prefetch.takeoff_climb_ft = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchTakeoffTimeoutSecs => {
+                config.prefetch.takeoff_timeout_secs = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchLandingHysteresisSecs => {
+                config.prefetch.landing_hysteresis_secs = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchRampDurationSecs => {
+                config.prefetch.ramp_duration_secs = value.parse().unwrap();
+            }
+            ConfigKey::PrefetchRampStartFraction => {
+                config.prefetch.ramp_start_fraction = value.parse().unwrap();
+            }
             ConfigKey::ControlPlaneMaxConcurrentJobs => {
                 config.control_plane.max_concurrent_jobs = value.parse().unwrap();
             }
@@ -719,6 +762,11 @@ impl ConfigKey {
             ConfigKey::PrefetchCalibrationAggressiveThreshold => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchCalibrationOpportunisticThreshold => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchCalibrationSampleDuration => Box::new(PositiveIntegerSpec),
+            ConfigKey::PrefetchTakeoffClimbFt => Box::new(FloatRangeSpec::new(200.0, 5000.0)),
+            ConfigKey::PrefetchTakeoffTimeoutSecs => Box::new(IntegerRangeSpec::new(30, 300)),
+            ConfigKey::PrefetchLandingHysteresisSecs => Box::new(IntegerRangeSpec::new(5, 60)),
+            ConfigKey::PrefetchRampDurationSecs => Box::new(IntegerRangeSpec::new(10, 120)),
+            ConfigKey::PrefetchRampStartFraction => Box::new(FloatRangeSpec::new(0.1, 0.5)),
             ConfigKey::ControlPlaneMaxConcurrentJobs => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneStallThresholdSecs => Box::new(PositiveIntegerSpec),
             ConfigKey::ControlPlaneHealthCheckIntervalSecs => Box::new(PositiveIntegerSpec),
@@ -791,6 +839,11 @@ impl ConfigKey {
             ConfigKey::PrefetchCalibrationAggressiveThreshold,
             ConfigKey::PrefetchCalibrationOpportunisticThreshold,
             ConfigKey::PrefetchCalibrationSampleDuration,
+            ConfigKey::PrefetchTakeoffClimbFt,
+            ConfigKey::PrefetchTakeoffTimeoutSecs,
+            ConfigKey::PrefetchLandingHysteresisSecs,
+            ConfigKey::PrefetchRampDurationSecs,
+            ConfigKey::PrefetchRampStartFraction,
             ConfigKey::ControlPlaneMaxConcurrentJobs,
             ConfigKey::ControlPlaneStallThresholdSecs,
             ConfigKey::ControlPlaneHealthCheckIntervalSecs,
@@ -1226,5 +1279,24 @@ mod tests {
         assert!(spec.is_satisfied_by("0.09").is_err());
         assert!(spec.is_satisfied_by("0.51").is_err());
         assert!(spec.is_satisfied_by("abc").is_err());
+    }
+
+    #[test]
+    fn test_config_key_takeoff_climb_ft_round_trip() {
+        let mut config = ConfigFile::default();
+        let key = ConfigKey::PrefetchTakeoffClimbFt;
+        assert_eq!(key.get(&config), "1000"); // default
+        key.set(&mut config, "2000").unwrap();
+        assert_eq!(key.get(&config), "2000");
+    }
+
+    #[test]
+    fn test_config_key_ramp_start_fraction_validation() {
+        let key = ConfigKey::PrefetchRampStartFraction;
+        assert!(key.validate("0.25").is_ok());
+        assert!(key.validate("0.1").is_ok());
+        assert!(key.validate("0.5").is_ok());
+        assert!(key.validate("0.05").is_err());
+        assert!(key.validate("0.6").is_err());
     }
 }

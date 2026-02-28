@@ -120,6 +120,21 @@ pub struct AdaptivePrefetchConfig {
 
     /// Duration track must be stable to consider it "stabilized".
     pub track_stability_duration: Duration,
+
+    /// Altitude climb (feet) above takeoff MSL to release transition hold.
+    pub takeoff_climb_ft: f32,
+
+    /// Maximum time before timeout release if climb threshold not reached.
+    pub takeoff_timeout: Duration,
+
+    /// Sustained duration at GS < 40kt before Cruise→Ground transition.
+    pub landing_hysteresis: Duration,
+
+    /// Duration of linear ramp from start fraction to full rate.
+    pub ramp_duration: Duration,
+
+    /// Starting prefetch fraction when ramp begins.
+    pub ramp_start_fraction: f64,
 }
 
 impl Default for AdaptivePrefetchConfig {
@@ -140,6 +155,11 @@ impl Default for AdaptivePrefetchConfig {
             track_stability_threshold: 5.0,
             turn_threshold: 15.0,
             track_stability_duration: Duration::from_secs(10),
+            takeoff_climb_ft: 1000.0,
+            takeoff_timeout: Duration::from_secs(90),
+            landing_hysteresis: Duration::from_secs(15),
+            ramp_duration: Duration::from_secs(30),
+            ramp_start_fraction: 0.25,
         }
     }
 }
@@ -163,6 +183,11 @@ impl AdaptivePrefetchConfig {
                 sample_duration: Duration::from_secs(settings.calibration_sample_duration),
                 ..Default::default()
             },
+            takeoff_climb_ft: settings.takeoff_climb_ft,
+            takeoff_timeout: Duration::from_secs(settings.takeoff_timeout_secs),
+            landing_hysteresis: Duration::from_secs(settings.landing_hysteresis_secs),
+            ramp_duration: Duration::from_secs(settings.ramp_duration_secs),
+            ramp_start_fraction: settings.ramp_start_fraction,
             ..Default::default()
         }
     }
@@ -183,6 +208,11 @@ impl AdaptivePrefetchConfig {
                 sample_duration: Duration::from_secs(config.calibration_sample_duration),
                 ..Default::default()
             },
+            takeoff_climb_ft: config.takeoff_climb_ft,
+            takeoff_timeout: Duration::from_secs(config.takeoff_timeout_secs),
+            landing_hysteresis: Duration::from_secs(config.landing_hysteresis_secs),
+            ramp_duration: Duration::from_secs(config.ramp_duration_secs),
+            ramp_start_fraction: config.ramp_start_fraction,
             ..Default::default()
         }
     }
@@ -445,5 +475,15 @@ mod tests {
         // Reasonable values
         assert_eq!(config.track_stability_threshold, 5.0);
         assert_eq!(config.turn_threshold, 15.0);
+    }
+
+    #[test]
+    fn test_default_config_transition_ramp() {
+        let config = AdaptivePrefetchConfig::default();
+        assert_eq!(config.takeoff_climb_ft, 1000.0);
+        assert_eq!(config.takeoff_timeout, Duration::from_secs(90));
+        assert_eq!(config.landing_hysteresis, Duration::from_secs(15));
+        assert_eq!(config.ramp_duration, Duration::from_secs(30));
+        assert_eq!(config.ramp_start_fraction, 0.25);
     }
 }

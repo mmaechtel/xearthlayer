@@ -376,6 +376,52 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                     reason: "must be a positive integer (seconds)".to_string(),
                 })?;
         }
+        // Transition ramp settings
+        if let Some(v) = section.get("takeoff_climb_ft") {
+            config.prefetch.takeoff_climb_ft =
+                v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "prefetch".to_string(),
+                    key: "takeoff_climb_ft".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a positive number (feet)".to_string(),
+                })?;
+        }
+        if let Some(v) = section.get("takeoff_timeout_secs") {
+            config.prefetch.takeoff_timeout_secs =
+                v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "prefetch".to_string(),
+                    key: "takeoff_timeout_secs".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a positive integer (seconds)".to_string(),
+                })?;
+        }
+        if let Some(v) = section.get("landing_hysteresis_secs") {
+            config.prefetch.landing_hysteresis_secs =
+                v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "prefetch".to_string(),
+                    key: "landing_hysteresis_secs".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a positive integer (seconds)".to_string(),
+                })?;
+        }
+        if let Some(v) = section.get("ramp_duration_secs") {
+            config.prefetch.ramp_duration_secs =
+                v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "prefetch".to_string(),
+                    key: "ramp_duration_secs".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a positive integer (seconds)".to_string(),
+                })?;
+        }
+        if let Some(v) = section.get("ramp_start_fraction") {
+            config.prefetch.ramp_start_fraction =
+                v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "prefetch".to_string(),
+                    key: "ramp_start_fraction".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a number between 0.1 and 0.5".to_string(),
+                })?;
+        }
     }
 
     // [control_plane] section

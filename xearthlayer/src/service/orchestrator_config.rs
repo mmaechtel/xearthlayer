@@ -99,6 +99,21 @@ pub struct PrefetchConfig {
 
     /// Calibration: sample duration (seconds).
     pub calibration_sample_duration: u64,
+
+    /// Altitude climb (feet) above takeoff MSL to release transition hold.
+    pub takeoff_climb_ft: f32,
+
+    /// Maximum seconds before timeout release if climb threshold not reached.
+    pub takeoff_timeout_secs: u64,
+
+    /// Sustained seconds at GS < 40kt before Cruise→Ground transition.
+    pub landing_hysteresis_secs: u64,
+
+    /// Duration (seconds) of linear ramp from start fraction to full rate.
+    pub ramp_duration_secs: u64,
+
+    /// Starting prefetch fraction when ramp begins.
+    pub ramp_start_fraction: f64,
 }
 
 /// Prewarm-specific configuration extracted from ConfigFile.
@@ -187,6 +202,11 @@ impl OrchestratorConfig {
                 .prefetch
                 .calibration_opportunistic_threshold,
             calibration_sample_duration: config.prefetch.calibration_sample_duration,
+            takeoff_climb_ft: config.prefetch.takeoff_climb_ft,
+            takeoff_timeout_secs: config.prefetch.takeoff_timeout_secs,
+            landing_hysteresis_secs: config.prefetch.landing_hysteresis_secs,
+            ramp_duration_secs: config.prefetch.ramp_duration_secs,
+            ramp_start_fraction: config.prefetch.ramp_start_fraction,
         };
 
         // Extract prewarm configuration
