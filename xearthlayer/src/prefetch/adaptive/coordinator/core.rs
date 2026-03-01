@@ -165,7 +165,10 @@ impl AdaptivePrefetchCoordinator {
     pub fn new(config: AdaptivePrefetchConfig) -> Self {
         let phase_detector = PhaseDetector::new(&config);
         let turn_detector = TurnDetector::new(&config);
-        let transition_throttle = TransitionThrottle::new();
+        let transition_throttle = TransitionThrottle::with_config(
+            config.ramp_duration,
+            config.ramp_start_fraction,
+        );
         let ground_strategy = GroundStrategy::new(&config);
         let cruise_strategy = CruiseStrategy::new(&config);
 
@@ -1544,7 +1547,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         coord.update((47.5, 10.5), 270.0, 100.0, 0.0);
 
-        // Throttle should now be active (grace period)
+        // Throttle should now be active (held during transition)
         assert!(coord.transition_throttle.is_active());
     }
 
