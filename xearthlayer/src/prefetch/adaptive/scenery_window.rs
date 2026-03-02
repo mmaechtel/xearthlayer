@@ -23,7 +23,7 @@ use tracing::debug;
 
 use super::boundary_monitor::{BoundaryAxis, BoundaryCrossing, BoundaryMonitor};
 use crate::geo_index::{DsfRegion, RetainedRegion};
-use crate::scene_tracker::SceneTracker;
+use crate::scene_tracker::{GeoBounds, SceneTracker};
 
 /// Configuration for the SceneryWindow.
 #[derive(Debug, Clone)]
@@ -315,8 +315,62 @@ impl SceneryWindow {
         }
     }
 
+    /// Check if a loading burst represents a world rebuild (teleport/settings change).
+    ///
+    /// A rebuild is detected when:
+    /// 1. The burst covers >50% of the current window area
+    /// 2. The burst is roughly centered on the aircraft (within 2° of center)
+    ///
+    /// On rebuild detection, resets the state machine to `Measuring` and clears
+    /// monitors and window dimensions.
+    ///
+    /// Returns `true` if a rebuild was detected.
+    pub fn check_for_rebuild(
+        &mut self,
+        burst_bounds: &GeoBounds,
+        aircraft_lat: f64,
+        aircraft_lon: f64,
+    ) -> bool {
+        let (rows, cols) = match self.window_size {
+            Some(size) => size,
+            None => return false, // Not ready, can't detect rebuild
+        };
+
+        let window_area = (rows * cols) as f64;
+        let burst_area = burst_bounds.height() * burst_bounds.width();
+
+        let coverage_ratio = burst_area / window_area;
+
+        // Check if burst is centered on aircraft (within 2° tolerance)
+        let burst_center = burst_bounds.center();
+        let lat_offset = (burst_center.0 - aircraft_lat).abs();
+        let lon_offset = (burst_center.1 - aircraft_lon).abs();
+        let is_centered = lat_offset < 2.0 && lon_offset < 2.0;
+
+        if coverage_ratio > 0.5 && is_centered {
+            debug!(
+                coverage_ratio = format!("{:.1}%", coverage_ratio * 100.0),
+                burst_height = burst_bounds.height(),
+                burst_width = burst_bounds.width(),
+                "scenery window: world rebuild detected, resetting to Measuring"
+            );
+            self.state = WindowState::Measuring {
+                last_rows: burst_bounds.height().round() as usize,
+                last_cols: burst_bounds.width().round() as usize,
+                stable_checks: 1,
+            };
+            self.window_size = None;
+            self.lat_monitor = None;
+            self.lon_monitor = None;
+            self.last_bounds = None;
+            return true;
+        }
+
+        false
+    }
+
     /// Initialize boundary monitors from real geographic bounds.
-    fn init_monitors_from_bounds(&mut self, bounds: &crate::scene_tracker::GeoBounds) {
+    fn init_monitors_from_bounds(&mut self, bounds: &GeoBounds) {
         self.lat_monitor = Some(
             BoundaryMonitor::new(
                 BoundaryAxis::Latitude,
@@ -674,6 +728,74 @@ mod tests {
 
         // Should not evict anything — window not ready
         assert!(geo_index.contains::<RetainedRegion>(&DsfRegion::new(50, 7)));
+    }
+
+    #[test]
+    fn test_world_rebuild_detected_when_burst_covers_most_of_window() {
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+        tracker.set_bounds(make_bounds(47.0, 53.0, 3.0, 11.0)); // 6×8 window
+
+        let mut window = SceneryWindow::new(SceneryWindowConfig::default());
+        window.update_from_tracker(tracker.as_ref()); // → Measuring
+        window.update_from_tracker(tracker.as_ref()); // → Ready
+
+        assert!(matches!(window.state(), WindowState::Ready));
+
+        // Simulate a burst covering most of the window (5×7 = 35 out of 6×8 = 48 = 73%)
+        let burst_bounds = make_bounds(47.5, 52.5, 3.5, 10.5);
+        let is_rebuild = window.check_for_rebuild(&burst_bounds, 50.0, 7.0);
+
+        assert!(is_rebuild);
+        assert!(matches!(window.state(), WindowState::Measuring { .. }));
+        assert!(window.window_size().is_none()); // Reset
+    }
+
+    #[test]
+    fn test_normal_extension_not_detected_as_rebuild() {
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+        tracker.set_bounds(make_bounds(47.0, 53.0, 3.0, 11.0));
+
+        let mut window = SceneryWindow::new(SceneryWindowConfig::default());
+        window.update_from_tracker(tracker.as_ref());
+        window.update_from_tracker(tracker.as_ref()); // → Ready
+
+        // Simulate a burst adding a single row at the north edge (1×8 = 8 out of 48 = 17%)
+        let burst_bounds = make_bounds(53.0, 54.0, 3.0, 11.0);
+        let is_rebuild = window.check_for_rebuild(&burst_bounds, 50.0, 7.0);
+
+        assert!(!is_rebuild);
+        assert!(matches!(window.state(), WindowState::Ready)); // Still ready
+    }
+
+    #[test]
+    fn test_rebuild_not_detected_when_not_ready() {
+        let window = SceneryWindow::new(SceneryWindowConfig::default());
+        let burst_bounds = make_bounds(47.0, 53.0, 3.0, 11.0);
+        let mut window = window;
+        let is_rebuild = window.check_for_rebuild(&burst_bounds, 50.0, 7.0);
+        assert!(!is_rebuild);
+    }
+
+    #[test]
+    fn test_rebuild_resets_monitors() {
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+        tracker.set_bounds(make_bounds(47.0, 53.0, 3.0, 11.0));
+
+        let mut window = SceneryWindow::new(SceneryWindowConfig::default());
+        window.update_from_tracker(tracker.as_ref());
+        window.update_from_tracker(tracker.as_ref()); // → Ready
+
+        // Verify monitors are initialized
+        let predictions = window.check_boundaries(52.0, 7.0);
+        assert!(!predictions.is_empty());
+
+        // Trigger rebuild
+        let burst_bounds = make_bounds(47.5, 52.5, 3.5, 10.5);
+        window.check_for_rebuild(&burst_bounds, 50.0, 7.0);
+
+        // After rebuild, monitors should be cleared
+        let predictions = window.check_boundaries(52.0, 7.0);
+        assert!(predictions.is_empty()); // Not ready anymore
     }
 
     #[test]
