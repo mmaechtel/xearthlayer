@@ -162,7 +162,6 @@ impl Default for BoundaryStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coord::TileCoord;
 
     fn make_crossing(
         axis: BoundaryAxis,

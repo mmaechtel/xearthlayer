@@ -196,6 +196,21 @@ impl SceneryWindow {
         &self.config
     }
 
+    /// Returns the current window bounds as `(lat_min, lat_max, lon_min, lon_max)`.
+    ///
+    /// Returns `None` if monitors haven't been initialized yet.
+    pub fn window_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        match (&self.lat_monitor, &self.lon_monitor) {
+            (Some(lat_mon), Some(lon_mon)) => Some((
+                lat_mon.window_min(),
+                lat_mon.window_max(),
+                lon_mon.window_min(),
+                lon_mon.window_max(),
+            )),
+            _ => None,
+        }
+    }
+
     /// Check aircraft position against window boundaries.
     ///
     /// Returns boundary crossing predictions sorted by urgency (most urgent first).
