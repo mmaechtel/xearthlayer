@@ -181,6 +181,9 @@ impl ServiceOrchestrator {
             tracing::info!("GeoIndex wired to prefetch (patched region filtering enabled)");
         }
 
+        // Wire SceneTracker for boundary-driven prefetch (#58)
+        coordinator = coordinator.with_scene_tracker(self.mount_manager.scene_tracker());
+
         // Wire shared status for TUI display
         coordinator = coordinator.with_shared_status(Arc::clone(&self.prefetch_status));
 
