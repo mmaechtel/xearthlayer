@@ -76,6 +76,7 @@
 //! - Research basis: `docs/dev/xplane-scenery-loading-whitepaper.md`
 
 mod band_calculator;
+mod boundary_monitor;
 mod boundary_prioritizer;
 mod calibration;
 mod config;
@@ -89,6 +90,7 @@ mod turn_detector;
 
 // Re-export public types
 pub use band_calculator::{BandCalculator, DsfTileCoord};
+pub use boundary_monitor::{BoundaryAxis, BoundaryCrossing, BoundaryMonitor};
 pub use boundary_prioritizer::prioritize as prioritize_by_boundary;
 pub use calibration::{
     create_throughput_observer, create_throughput_observer_with_config, PerformanceCalibration,
