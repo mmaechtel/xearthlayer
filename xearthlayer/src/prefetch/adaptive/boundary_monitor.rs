@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_urgency_increases_closer_to_edge() {
         let monitor = BoundaryMonitor::new(BoundaryAxis::Latitude, 47.0, 53.0, 1.5);
-        let far = monitor.check(51.8);   // 1.2° from edge
+        let far = monitor.check(51.8); // 1.2° from edge
         let close = monitor.check(52.7); // 0.3° from edge
         assert!(close[0].urgency > far[0].urgency);
     }
@@ -190,7 +190,7 @@ mod tests {
     fn test_update_edges() {
         let mut monitor = BoundaryMonitor::new(BoundaryAxis::Latitude, 47.0, 53.0, 1.5);
         monitor.update_edges(48.0, 54.0); // window slid north
-        // Now 52.8 is 1.2° from north edge (54.0) — should trigger
+                                          // Now 52.8 is 1.2° from north edge (54.0) — should trigger
         let predictions = monitor.check(52.8);
         assert_eq!(predictions.len(), 1);
         assert_eq!(predictions[0].dsf_coord, 54);
@@ -201,7 +201,7 @@ mod tests {
         // Window only 3° wide — position near both edges
         let monitor = BoundaryMonitor::new(BoundaryAxis::Latitude, 49.0, 52.0, 1.5);
         let predictions = monitor.check(50.5); // 1.5° from both edges
-        // Should trigger both directions
+                                               // Should trigger both directions
         assert_eq!(predictions.len(), 2);
     }
 }

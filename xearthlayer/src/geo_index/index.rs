@@ -640,7 +640,10 @@ mod tests {
         let entries = index.iter::<PatchCoverage>();
         assert_eq!(entries.len(), 2);
 
-        let mut names: Vec<String> = entries.iter().map(|(_, pc)| pc.patch_name.clone()).collect();
+        let mut names: Vec<String> = entries
+            .iter()
+            .map(|(_, pc)| pc.patch_name.clone())
+            .collect();
         names.sort();
         assert_eq!(names, vec!["A", "B"]);
     }

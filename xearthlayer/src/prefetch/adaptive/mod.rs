@@ -94,6 +94,6 @@ pub use config::{AdaptivePrefetchConfig, CalibrationConfig, KillswitchMode, Pref
 pub use coordinator::{AdaptivePrefetchCoordinator, CoordinatorStatus};
 pub use ground_strategy::{GroundStrategy, LoadedAreaBounds};
 pub use phase_detector::{FlightPhase, PhaseDetector};
-pub use strategy::{AdaptivePrefetchStrategy, PrefetchPlan, PrefetchPlanMetadata, TrackQuadrant};
 pub use scenery_window::{SceneryWindow, SceneryWindowConfig, WindowState};
+pub use strategy::{AdaptivePrefetchStrategy, PrefetchPlan, PrefetchPlanMetadata, TrackQuadrant};
 pub use transition_throttle::TransitionThrottle;

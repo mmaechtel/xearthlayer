@@ -34,11 +34,11 @@ use std::sync::Arc;
 use crate::coord::TileCoord;
 use crate::prefetch::SceneryIndex;
 
-use crate::prefetch::tile_based::DsfTileCoord;
 use super::calibration::PerformanceCalibration;
 use super::config::AdaptivePrefetchConfig;
 use super::phase_detector::FlightPhase;
 use super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan, PrefetchPlanMetadata};
+use crate::prefetch::tile_based::DsfTileCoord;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants

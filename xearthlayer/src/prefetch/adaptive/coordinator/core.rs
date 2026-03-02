@@ -176,13 +176,18 @@ impl AdaptivePrefetchCoordinator {
         let transition_throttle =
             TransitionThrottle::with_config(config.ramp_duration, config.ramp_start_fraction);
         let ground_strategy = GroundStrategy::new(&config);
-        let scenery_window = SceneryWindow::new(SceneryWindowConfig {
+        let mut scenery_window = SceneryWindow::new(SceneryWindowConfig {
             default_rows: config.default_window_rows,
             default_cols: config.default_window_cols,
             buffer: config.window_buffer,
             trigger_distance: config.trigger_distance,
             load_depth: config.load_depth,
         });
+        // Start in Assumed state so boundary checks work immediately
+        // with default dimensions. Real dimensions from SceneTracker will
+        // upgrade the window to Ready when available.
+        scenery_window
+            .set_assumed_dimensions(config.default_window_rows, config.default_window_cols);
         let boundary_strategy = BoundaryStrategy::new();
 
         Self {
@@ -402,6 +407,12 @@ impl AdaptivePrefetchCoordinator {
                 let crossings = self.scenery_window.check_boundaries(lat, lon);
 
                 if crossings.is_empty() {
+                    tracing::trace!(
+                        lat = format!("{:.2}", lat),
+                        lon = format!("{:.2}", lon),
+                        window_state = ?self.scenery_window.state(),
+                        "Cruise: no boundary crossings"
+                    );
                     return None;
                 }
 
@@ -419,14 +430,14 @@ impl AdaptivePrefetchCoordinator {
                                 (lat_min.floor() as i32, (lat_max - 1.0).floor() as i32)
                             }
                         };
-                        let targets =
-                            self.boundary_strategy.generate_regions(crossing, cross_range);
+                        let targets = self
+                            .boundary_strategy
+                            .generate_regions(crossing, cross_range);
                         if let Some(ref geo_index) = self.geo_index {
                             let filtered = self
                                 .boundary_strategy
                                 .filter_already_handled(&targets, geo_index);
-                            let filtered_owned: Vec<_> =
-                                filtered.into_iter().cloned().collect();
+                            let filtered_owned: Vec<_> = filtered.into_iter().cloned().collect();
                             let tiles = self.boundary_strategy.expand_targets_to_tiles(
                                 &filtered_owned,
                                 geo_index,
@@ -437,8 +448,7 @@ impl AdaptivePrefetchCoordinator {
                             // No GeoIndex -- expand all targets without filtering
                             for target in &targets {
                                 all_tiles.extend(
-                                    self.boundary_strategy
-                                        .expand_to_tiles(&target.region, 14),
+                                    self.boundary_strategy.expand_to_tiles(&target.region, 14),
                                 );
                             }
                         }
@@ -623,9 +633,7 @@ impl AdaptivePrefetchCoordinator {
         let mode = self.effective_mode();
         format!(
             "adaptive, mode={:?}, ground_threshold={}kt, boundary_trigger={:.1}°",
-            mode,
-            self.config.ground_speed_threshold_kt,
-            self.config.trigger_distance,
+            mode, self.config.ground_speed_threshold_kt, self.config.trigger_distance,
         )
     }
 
@@ -922,6 +930,7 @@ impl AdaptivePrefetchCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prefetch::adaptive::scenery_window::WindowState;
     use std::time::Instant;
 
     fn test_calibration() -> PerformanceCalibration {
@@ -1598,9 +1607,11 @@ mod tests {
     #[test]
     fn test_coordinator_creation_has_scenery_window() {
         let coord = AdaptivePrefetchCoordinator::with_defaults();
-        // Coordinator should have a scenery window in Uninitialized state
+        // Coordinator should have a scenery window in Assumed state
+        // (initialized with default dimensions so boundary checks work immediately)
         let window = coord.scenery_window();
-        assert!(!window.is_ready());
+        assert!(window.is_ready());
+        assert_eq!(window.state(), &WindowState::Assumed);
     }
 
     #[test]
@@ -1637,8 +1648,7 @@ mod tests {
         }
 
         let tracker: Arc<dyn SceneTracker> = Arc::new(DummyTracker);
-        let coord =
-            AdaptivePrefetchCoordinator::with_defaults().with_scene_tracker(tracker);
+        let coord = AdaptivePrefetchCoordinator::with_defaults().with_scene_tracker(tracker);
         assert!(coord.scene_tracker.is_some());
     }
 
@@ -1715,7 +1725,10 @@ mod tests {
         // trigger_distance=1.5° → should trigger a boundary crossing.
         // If plan is Some, it should have tiles and strategy "boundary".
         if coord.status.phase == FlightPhase::Cruise {
-            assert!(plan.is_some(), "Should generate a boundary plan near the edge");
+            assert!(
+                plan.is_some(),
+                "Should generate a boundary plan near the edge"
+            );
             let plan = plan.unwrap();
             assert!(!plan.tiles.is_empty(), "Plan should have tiles");
             assert_eq!(

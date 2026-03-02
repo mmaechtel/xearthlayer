@@ -123,13 +123,21 @@ impl BoundaryStrategy {
     /// Mark a region as having no scenery coverage.
     pub fn mark_no_coverage(&self, region: &DsfRegion, geo_index: &GeoIndex) {
         geo_index.insert::<PrefetchedRegion>(*region, PrefetchedRegion::no_coverage());
-        tracing::debug!(lat = region.lat, lon = region.lon, "boundary: marked NoCoverage");
+        tracing::debug!(
+            lat = region.lat,
+            lon = region.lon,
+            "boundary: marked NoCoverage"
+        );
     }
 
     /// Mark a region as having prefetch in progress.
     pub fn mark_in_progress(&self, region: &DsfRegion, geo_index: &GeoIndex) {
         geo_index.insert::<PrefetchedRegion>(*region, PrefetchedRegion::in_progress());
-        tracing::debug!(lat = region.lat, lon = region.lon, "boundary: marked InProgress");
+        tracing::debug!(
+            lat = region.lat,
+            lon = region.lon,
+            "boundary: marked InProgress"
+        );
     }
 
     /// Sweep the GeoIndex for stale `InProgress` regions and remove them.
@@ -592,7 +600,13 @@ mod tests {
         // Should have tiles from both regions
         assert!(!tiles.is_empty());
         // Both regions should be marked InProgress
-        assert!(geo_index.get::<PrefetchedRegion>(&DsfRegion::new(53, 5)).unwrap().is_in_progress());
-        assert!(geo_index.get::<PrefetchedRegion>(&DsfRegion::new(54, 5)).unwrap().is_in_progress());
+        assert!(geo_index
+            .get::<PrefetchedRegion>(&DsfRegion::new(53, 5))
+            .unwrap()
+            .is_in_progress());
+        assert!(geo_index
+            .get::<PrefetchedRegion>(&DsfRegion::new(54, 5))
+            .unwrap()
+            .is_in_progress());
     }
 }

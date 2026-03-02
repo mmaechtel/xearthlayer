@@ -53,7 +53,7 @@ impl Default for SceneryWindowConfig {
 }
 
 /// State machine for the scenery window derivation.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum WindowState {
     /// No data yet -- waiting for first SceneTracker bounds.
     Uninitialized,
@@ -129,7 +129,10 @@ impl SceneryWindow {
 
         match &self.state {
             WindowState::Uninitialized | WindowState::Assumed => {
-                debug!(rows, cols, "scenery window: first bounds observed, measuring");
+                debug!(
+                    rows,
+                    cols, "scenery window: first bounds observed, measuring"
+                );
                 self.state = WindowState::Measuring {
                     last_rows: rows,
                     last_cols: cols,
@@ -254,10 +257,7 @@ impl SceneryWindow {
                 ));
                 debug!(
                     lat,
-                    lon,
-                    rows,
-                    cols,
-                    "scenery window: lazy-initialized monitors for assumed state"
+                    lon, rows, cols, "scenery window: lazy-initialized monitors for assumed state"
                 );
             }
         }
@@ -459,8 +459,7 @@ mod tests {
             false
         }
         fn is_burst_active(&self) -> bool {
-            self.burst_active
-                .load(std::sync::atomic::Ordering::Relaxed)
+            self.burst_active.load(std::sync::atomic::Ordering::Relaxed)
         }
         fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
             vec![]

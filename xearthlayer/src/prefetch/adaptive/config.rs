@@ -90,7 +90,6 @@ pub struct AdaptivePrefetchConfig {
     pub ramp_start_fraction: f64,
 
     // Boundary-driven prefetch settings
-
     /// Boundary trigger distance in degrees.
     ///
     /// How close to a DSF boundary the aircraft must be to trigger prefetch.
@@ -216,7 +215,6 @@ impl AdaptivePrefetchConfig {
             ..Default::default()
         }
     }
-
 }
 
 /// Strategy mode for prefetch triggering.

@@ -448,12 +448,8 @@ impl ConfigKey {
             ConfigKey::PrefetchStaleRegionTimeout => {
                 config.prefetch.stale_region_timeout.to_string()
             }
-            ConfigKey::PrefetchDefaultWindowRows => {
-                config.prefetch.default_window_rows.to_string()
-            }
-            ConfigKey::PrefetchDefaultWindowCols => {
-                config.prefetch.default_window_cols.to_string()
-            }
+            ConfigKey::PrefetchDefaultWindowRows => config.prefetch.default_window_rows.to_string(),
+            ConfigKey::PrefetchDefaultWindowCols => config.prefetch.default_window_cols.to_string(),
             ConfigKey::ControlPlaneMaxConcurrentJobs => {
                 config.control_plane.max_concurrent_jobs.to_string()
             }
@@ -1435,9 +1431,7 @@ mod tests {
             .unwrap();
         assert_eq!(ConfigKey::PrefetchTriggerDistance.get(&config), "2");
 
-        ConfigKey::PrefetchLoadDepth
-            .set(&mut config, "4")
-            .unwrap();
+        ConfigKey::PrefetchLoadDepth.set(&mut config, "4").unwrap();
         assert_eq!(ConfigKey::PrefetchLoadDepth.get(&config), "4");
 
         ConfigKey::PrefetchWindowBuffer

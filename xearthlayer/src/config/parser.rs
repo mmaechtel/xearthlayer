@@ -433,13 +433,12 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                 })?;
         }
         if let Some(v) = section.get("load_depth") {
-            config.prefetch.load_depth =
-                v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                    section: "prefetch".to_string(),
-                    key: "load_depth".to_string(),
-                    value: v.to_string(),
-                    reason: "must be an integer between 1 and 5".to_string(),
-                })?;
+            config.prefetch.load_depth = v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                section: "prefetch".to_string(),
+                key: "load_depth".to_string(),
+                value: v.to_string(),
+                reason: "must be an integer between 1 and 5".to_string(),
+            })?;
         }
         if let Some(v) = section.get("window_buffer") {
             config.prefetch.window_buffer =
