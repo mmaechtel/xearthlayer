@@ -798,6 +798,12 @@ impl AdaptivePrefetchCoordinator {
             "Adaptive prefetch cycle complete"
         );
 
+        // Periodic region maintenance: sweep stale InProgress and promote completed
+        if let Some(ref geo_index) = self.geo_index {
+            BoundaryStrategy::sweep_stale_regions(geo_index, self.config.stale_region_timeout);
+            BoundaryStrategy::promote_completed_regions(geo_index, &self.cached_tiles, 14);
+        }
+
         Some(submitted)
     }
 

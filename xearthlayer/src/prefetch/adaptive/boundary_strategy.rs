@@ -3,6 +3,12 @@
 //! Converts [`BoundaryCrossing`] predictions into concrete DSF region lists
 //! (rows for latitude crossings, columns for longitude crossings) and applies
 //! the set difference with the XEL Window to produce only unprefetched regions.
+//!
+//! Also provides region lifecycle management:
+//! - [`BoundaryStrategy::sweep_stale_regions`] — removes `InProgress` regions
+//!   that have exceeded the staleness timeout (eligible for re-prefetch).
+//! - [`BoundaryStrategy::promote_completed_regions`] — promotes `InProgress`
+//!   regions to `Prefetched` once all their tiles are confirmed in cache.
 
 use super::boundary_monitor::{BoundaryAxis, BoundaryCrossing};
 use crate::coord::{to_tile_coords, TileCoord};
@@ -124,6 +130,63 @@ impl BoundaryStrategy {
     pub fn mark_in_progress(&self, region: &DsfRegion, geo_index: &GeoIndex) {
         geo_index.insert::<PrefetchedRegion>(*region, PrefetchedRegion::in_progress());
         tracing::debug!(lat = region.lat, lon = region.lon, "boundary: marked InProgress");
+    }
+
+    /// Sweep the GeoIndex for stale `InProgress` regions and remove them.
+    ///
+    /// Stale regions have been `InProgress` for longer than the specified timeout,
+    /// indicating the prefetch job either failed or was never completed. Removing
+    /// them makes them eligible for re-prefetch.
+    pub fn sweep_stale_regions(geo_index: &GeoIndex, timeout: std::time::Duration) -> usize {
+        let stale: Vec<DsfRegion> = geo_index
+            .iter::<PrefetchedRegion>()
+            .into_iter()
+            .filter(|(_, region)| region.is_stale(timeout))
+            .map(|(dsf, _)| dsf)
+            .collect();
+
+        let removed = stale.len();
+        for region in &stale {
+            geo_index.remove::<PrefetchedRegion>(region);
+        }
+
+        if removed > 0 {
+            tracing::debug!(removed, "Swept stale InProgress regions");
+        }
+        removed
+    }
+
+    /// Check InProgress regions and promote to Prefetched if all tiles are cached.
+    ///
+    /// For each InProgress region, expands it to DDS tiles at the given zoom level
+    /// and checks whether all tiles are present in the `cached_tiles` set. If so,
+    /// the region is promoted to `Prefetched` state.
+    pub fn promote_completed_regions(
+        geo_index: &GeoIndex,
+        cached_tiles: &std::collections::HashSet<TileCoord>,
+        zoom: u8,
+    ) -> usize {
+        let strategy = BoundaryStrategy::new();
+        let in_progress: Vec<DsfRegion> = geo_index
+            .iter::<PrefetchedRegion>()
+            .into_iter()
+            .filter(|(_, r)| r.is_in_progress())
+            .map(|(dsf, _)| dsf)
+            .collect();
+
+        let mut promoted = 0;
+        for region in &in_progress {
+            let tiles = strategy.expand_to_tiles(region, zoom);
+            if !tiles.is_empty() && tiles.iter().all(|t| cached_tiles.contains(t)) {
+                geo_index.insert::<PrefetchedRegion>(*region, PrefetchedRegion::prefetched());
+                promoted += 1;
+            }
+        }
+
+        if promoted > 0 {
+            tracing::debug!(promoted, "Promoted InProgress regions to Prefetched");
+        }
+        promoted
     }
 
     /// Expand target regions into DDS tiles, marking each region as InProgress.
@@ -400,6 +463,105 @@ mod tests {
         let region = DsfRegion::new(50, 9);
 
         strategy.mark_in_progress(&region, &geo_index);
+
+        let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
+        assert!(state.is_in_progress());
+    }
+
+    // =========================================================================
+    // Staleness sweep
+    // =========================================================================
+
+    #[test]
+    fn test_sweep_stale_regions() {
+        use std::time::Duration;
+
+        let geo_index = GeoIndex::new();
+        let region = DsfRegion::new(50, 9);
+
+        // Insert InProgress with a timestamp that will be stale immediately
+        geo_index.insert::<PrefetchedRegion>(region, PrefetchedRegion::in_progress());
+
+        // Use a zero timeout so that any InProgress region is immediately stale
+        let removed = BoundaryStrategy::sweep_stale_regions(&geo_index, Duration::ZERO);
+        assert_eq!(removed, 1);
+        assert!(!geo_index.contains::<PrefetchedRegion>(&region));
+    }
+
+    #[test]
+    fn test_sweep_keeps_fresh_regions() {
+        use std::time::Duration;
+
+        let geo_index = GeoIndex::new();
+        let region = DsfRegion::new(50, 9);
+
+        geo_index.insert::<PrefetchedRegion>(region, PrefetchedRegion::in_progress());
+
+        // Use a very long timeout — region should not be stale
+        let removed = BoundaryStrategy::sweep_stale_regions(&geo_index, Duration::from_secs(3600));
+        assert_eq!(removed, 0);
+        assert!(geo_index.contains::<PrefetchedRegion>(&region));
+    }
+
+    #[test]
+    fn test_sweep_keeps_prefetched_regions() {
+        use std::time::Duration;
+
+        let geo_index = GeoIndex::new();
+        let region = DsfRegion::new(50, 9);
+
+        geo_index.insert::<PrefetchedRegion>(region, PrefetchedRegion::prefetched());
+
+        // Even with zero timeout, Prefetched regions are never stale
+        let removed = BoundaryStrategy::sweep_stale_regions(&geo_index, Duration::ZERO);
+        assert_eq!(removed, 0);
+        assert!(geo_index.contains::<PrefetchedRegion>(&region));
+    }
+
+    // =========================================================================
+    // Region promotion
+    // =========================================================================
+
+    #[test]
+    fn test_promote_completed_regions() {
+        let geo_index = GeoIndex::new();
+        let region = DsfRegion::new(50, 9);
+
+        geo_index.insert::<PrefetchedRegion>(region, PrefetchedRegion::in_progress());
+
+        // Get the tiles for this region at zoom 14
+        let strategy = BoundaryStrategy::new();
+        let tiles = strategy.expand_to_tiles(&region, 14);
+        assert!(!tiles.is_empty());
+
+        // Put all tiles into the cached set
+        let cached_tiles: std::collections::HashSet<TileCoord> = tiles.into_iter().collect();
+
+        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, 14);
+        assert_eq!(promoted, 1);
+
+        let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
+        assert!(state.is_prefetched());
+    }
+
+    #[test]
+    fn test_promote_skips_incomplete_regions() {
+        let geo_index = GeoIndex::new();
+        let region = DsfRegion::new(50, 9);
+
+        geo_index.insert::<PrefetchedRegion>(region, PrefetchedRegion::in_progress());
+
+        // Get the tiles for this region at zoom 14
+        let strategy = BoundaryStrategy::new();
+        let tiles = strategy.expand_to_tiles(&region, 14);
+        assert!(tiles.len() > 1);
+
+        // Only put one tile into the cached set
+        let mut cached_tiles = std::collections::HashSet::new();
+        cached_tiles.insert(tiles[0]);
+
+        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, 14);
+        assert_eq!(promoted, 0);
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
         assert!(state.is_in_progress());
