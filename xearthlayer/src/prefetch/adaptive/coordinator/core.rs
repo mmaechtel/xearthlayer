@@ -20,17 +20,14 @@ use crate::prefetch::CircuitState;
 use crate::prefetch::SceneryIndex;
 
 use super::super::boundary_monitor::BoundaryAxis;
-use super::super::boundary_prioritizer;
 use super::super::boundary_strategy::BoundaryStrategy;
 use super::super::calibration::{PerformanceCalibration, StrategyMode};
 use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
-use super::super::cruise_strategy::CruiseStrategy;
 use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
 use super::super::scenery_window::{SceneryWindow, SceneryWindowConfig};
 use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
 use super::super::transition_throttle::TransitionThrottle;
-use super::super::turn_detector::TurnDetector;
 use crate::scene_tracker::SceneTracker;
 
 use super::status::CoordinatorStatus;
@@ -103,17 +100,11 @@ pub struct AdaptivePrefetchCoordinator {
     /// Flight phase detector.
     phase_detector: PhaseDetector,
 
-    /// Turn detector.
-    turn_detector: TurnDetector,
-
     /// Transition throttle for takeoff ramp-up.
     transition_throttle: TransitionThrottle,
 
     /// Ground strategy.
     ground_strategy: GroundStrategy,
-
-    /// Cruise strategy.
-    cruise_strategy: CruiseStrategy,
 
     /// Circuit breaker for throttling.
     pub(super) throttler: Option<Arc<dyn PrefetchThrottler>>,
@@ -182,11 +173,9 @@ impl AdaptivePrefetchCoordinator {
     /// Create a new coordinator with the given configuration.
     pub fn new(config: AdaptivePrefetchConfig) -> Self {
         let phase_detector = PhaseDetector::new(&config);
-        let turn_detector = TurnDetector::new(&config);
         let transition_throttle =
             TransitionThrottle::with_config(config.ramp_duration, config.ramp_start_fraction);
         let ground_strategy = GroundStrategy::new(&config);
-        let cruise_strategy = CruiseStrategy::new(&config);
         let scenery_window = SceneryWindow::new(SceneryWindowConfig {
             default_rows: config.default_window_rows,
             default_cols: config.default_window_cols,
@@ -200,10 +189,8 @@ impl AdaptivePrefetchCoordinator {
             config,
             calibration: None,
             phase_detector,
-            turn_detector,
             transition_throttle,
             ground_strategy,
-            cruise_strategy,
             throttler: None,
             dds_client: None,
             memory_cache: None,
@@ -257,8 +244,7 @@ impl AdaptivePrefetchCoordinator {
 
     /// Set the scenery index for tile lookup.
     pub fn with_scenery_index(mut self, index: Arc<SceneryIndex>) -> Self {
-        self.ground_strategy = self.ground_strategy.with_scenery_index(Arc::clone(&index));
-        self.cruise_strategy = self.cruise_strategy.with_scenery_index(index);
+        self.ground_strategy = self.ground_strategy.with_scenery_index(index);
         self
     }
 
@@ -372,11 +358,6 @@ impl AdaptivePrefetchCoordinator {
             self.transition_throttle
                 .on_phase_change(previous_phase, phase);
         }
-
-        // Update turn detector
-        self.turn_detector.update(track);
-        self.status.turn_state = self.turn_detector.state();
-        self.status.stable_track = self.turn_detector.stable_track();
 
         // Check throttling (for opportunistic mode)
         if let Some(ref throttler) = self.throttler {
@@ -603,16 +584,10 @@ impl AdaptivePrefetchCoordinator {
         &self.phase_detector
     }
 
-    /// Get the turn detector for external monitoring.
-    pub fn turn_detector(&self) -> &TurnDetector {
-        &self.turn_detector
-    }
-
     /// Reset the coordinator state.
     ///
     /// Call this when teleporting or starting a new flight.
     pub fn reset(&mut self) {
-        self.turn_detector.reset();
         self.cached_tiles.clear();
         self.status = CoordinatorStatus::default();
     }
@@ -795,13 +770,6 @@ impl AdaptivePrefetchCoordinator {
 
         let disk_filtered = patch_skipped + disk_skipped;
 
-        // Re-sort tiles by DSF boundary urgency (Issue #58)
-        // Tiles in DSF columns/rows the aircraft is about to cross
-        // are prioritized over tiles that are merely close by distance.
-        if !plan.tiles.is_empty() {
-            boundary_prioritizer::prioritize(position, track, &mut plan.tiles);
-        }
-
         let submitted = if plan.is_empty() {
             0
         } else {
@@ -947,7 +915,6 @@ impl AdaptivePrefetchCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::turn_detector::TurnState;
     use super::*;
     use std::time::Instant;
 
@@ -1081,20 +1048,6 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Turn detector integration tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_update_tracks_turn_state() {
-        let mut coord =
-            AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
-
-        coord.update((53.5, 9.5), 45.0, 200.0, 0.0);
-        // Initially not stable
-        assert_ne!(coord.status.turn_state, TurnState::Stable);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // Cache tracking tests
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1154,7 +1107,6 @@ mod tests {
         // Reset
         coord.reset();
         assert!(coord.cached_tiles.is_empty());
-        assert_eq!(coord.turn_detector.state(), TurnState::Initializing);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

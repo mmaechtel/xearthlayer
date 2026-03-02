@@ -1,20 +1,17 @@
 //! Adaptive tile-based prefetch system.
 //!
 //! This module implements an adaptive prefetch system that self-calibrates
-//! based on measured tile generation throughput, adapts strategies by flight
-//! phase (ground/cruise), and uses track-based turn detection for accurate
-//! band calculation.
+//! based on measured tile generation throughput and adapts strategies by
+//! flight phase (ground/cruise).
 //!
 //! # Key Features
 //!
 //! - **Performance Calibration**: Measures throughput during X-Plane's initial
 //!   12° load to determine prefetch capability
 //! - **Flight Phase Strategies**: Different algorithms for ground (ring) and
-//!   cruise (band) operations
-//! - **Track-Based Turn Detection**: Uses ground track (not heading) to detect
-//!   turns and pause prefetch until stable
-//! - **DSF Boundary-Aware Ordering**: Tiles sorted by DSF column/row urgency
-//!   to match X-Plane's scenery loading pattern (#58)
+//!   cruise (boundary-driven) operations
+//! - **Boundary-Driven Prefetch**: SceneryWindow tracks X-Plane's loading
+//!   boundaries and BoundaryStrategy generates target DSF regions (#58)
 //! - **Takeoff Transition Throttle**: Grace period + ramp-up after Ground→Cruise
 //!   to avoid resource contention during takeoff (#62)
 //! - **Rolling Recalibration**: Adjusts mode if throughput degrades during flight
@@ -40,15 +37,13 @@
 //! │   ├── calibrator.rs       # Initial calibration
 //! │   └── rolling.rs          # Rolling recalibration
 //! ├── strategy.rs             # AdaptivePrefetchStrategy trait
-//! ├── band_calculator.rs      # DSF-aligned band geometry
-//! ├── boundary_prioritizer.rs # DSF boundary-aware tile ordering (#58)
+//! ├── boundary_monitor.rs     # DSF boundary distance tracking
 //! ├── boundary_strategy.rs    # Boundary crossing → DSF region generation (#58)
-//! ├── cruise_strategy.rs      # Cruise flight prefetch
 //! ├── ground_strategy.rs      # Ground operations prefetch
 //! ├── phase_detector.rs       # Ground/cruise detection
-//! ├── turn_detector.rs        # Track stability monitoring
+//! ├── scenery_window.rs       # X-Plane scenery window model
 //! ├── transition_throttle.rs  # Takeoff ramp-up throttle (#62)
-//! └── coordinator.rs          # Central orchestration
+//! └── coordinator/            # Central orchestration
 //! ```
 //!
 //! # Example Usage
@@ -76,25 +71,19 @@
 //! - Design document: `docs/dev/adaptive-prefetch-design.md`
 //! - Research basis: `docs/dev/xplane-scenery-loading-whitepaper.md`
 
-mod band_calculator;
 mod boundary_monitor;
-mod boundary_prioritizer;
 mod boundary_strategy;
 mod calibration;
 mod config;
 mod coordinator;
-mod cruise_strategy;
 mod ground_strategy;
 mod phase_detector;
 mod scenery_window;
 mod strategy;
 mod transition_throttle;
-mod turn_detector;
 
 // Re-export public types
-pub use band_calculator::{BandCalculator, DsfTileCoord};
 pub use boundary_monitor::{BoundaryAxis, BoundaryCrossing, BoundaryMonitor};
-pub use boundary_prioritizer::prioritize as prioritize_by_boundary;
 pub use boundary_strategy::{BoundaryStrategy, TargetRegion};
 pub use calibration::{
     create_throughput_observer, create_throughput_observer_with_config, PerformanceCalibration,
@@ -103,10 +92,8 @@ pub use calibration::{
 };
 pub use config::{AdaptivePrefetchConfig, CalibrationConfig, KillswitchMode, PrefetchMode};
 pub use coordinator::{AdaptivePrefetchCoordinator, CoordinatorStatus};
-pub use cruise_strategy::CruiseStrategy;
 pub use ground_strategy::{GroundStrategy, LoadedAreaBounds};
 pub use phase_detector::{FlightPhase, PhaseDetector};
 pub use strategy::{AdaptivePrefetchStrategy, PrefetchPlan, PrefetchPlanMetadata, TrackQuadrant};
 pub use scenery_window::{SceneryWindow, SceneryWindowConfig, WindowState};
 pub use transition_throttle::TransitionThrottle;
-pub use turn_detector::{TurnDetector, TurnState};

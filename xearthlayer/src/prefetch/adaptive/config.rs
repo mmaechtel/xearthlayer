@@ -54,26 +54,6 @@ pub struct AdaptivePrefetchConfig {
     /// `calibration.opportunistic_threshold` during calibration.
     pub low_performance_killswitch: KillswitchMode,
 
-    /// Position trigger threshold (degrees into DSF tile).
-    ///
-    /// When mode is Aggressive, prefetch triggers at this position.
-    /// Must be less than X-Plane's 0.6° trigger point.
-    /// Range: 0.1 - 0.5
-    pub trigger_position: f64,
-
-    /// Lead distance (degrees ahead to prefetch).
-    ///
-    /// How far ahead of the aircraft to prefetch tiles.
-    /// Range: 1 - 4
-    pub lead_distance: u8,
-
-    /// Band width (DSF tiles perpendicular to travel).
-    ///
-    /// Width of prefetch band on each side of flight path.
-    /// A value of 2 means ±2 DSF tiles = 5 tiles wide total.
-    /// Range: 1 - 4
-    pub band_width: u8,
-
     /// Maximum tiles per prefetch cycle.
     ///
     /// Caps tiles submitted in a single prefetch operation.
@@ -86,12 +66,6 @@ pub struct AdaptivePrefetchConfig {
     /// Range: 0.5 - 2.0
     pub ground_ring_radius: f64,
 
-    /// Time budget safety margin (percentage as decimal).
-    ///
-    /// Only prefetch if estimated time < available time × margin.
-    /// Range: 0.5 - 0.9
-    pub time_budget_margin: f64,
-
     /// Calibration thresholds and parameters.
     pub calibration: CalibrationConfig,
 
@@ -99,20 +73,6 @@ pub struct AdaptivePrefetchConfig {
     ///
     /// Aircraft with ground speed below this are considered on the ground.
     pub ground_speed_threshold_kt: f32,
-
-    /// Track stability threshold (degrees).
-    ///
-    /// Track deviation must be less than this for the track to be
-    /// considered stable after a turn.
-    pub track_stability_threshold: f64,
-
-    /// Turn detection threshold (degrees).
-    ///
-    /// Track change greater than this triggers turn detection.
-    pub turn_threshold: f64,
-
-    /// Duration track must be stable to consider it "stabilized".
-    pub track_stability_duration: Duration,
 
     /// Altitude climb (feet) above takeoff MSL to release transition hold.
     pub takeoff_climb_ft: f32,
@@ -173,17 +133,10 @@ impl Default for AdaptivePrefetchConfig {
             enabled: true,
             mode: PrefetchMode::Auto,
             low_performance_killswitch: KillswitchMode::Auto,
-            trigger_position: 0.35,
-            lead_distance: 3,
-            band_width: 2,
             max_tiles_per_cycle: 3000,
             ground_ring_radius: 1.0,
-            time_budget_margin: 0.7,
             calibration: CalibrationConfig::default(),
             ground_speed_threshold_kt: 40.0,
-            track_stability_threshold: 5.0,
-            turn_threshold: 15.0,
-            track_stability_duration: Duration::from_secs(10),
             takeoff_climb_ft: 1000.0,
             takeoff_timeout: Duration::from_secs(90),
             landing_hysteresis: Duration::from_secs(15),
@@ -264,10 +217,6 @@ impl AdaptivePrefetchConfig {
         }
     }
 
-    /// Get the turn detection threshold in degrees.
-    pub fn turn_threshold_deg(&self) -> f64 {
-        self.turn_threshold
-    }
 }
 
 /// Strategy mode for prefetch triggering.
@@ -444,9 +393,6 @@ mod tests {
         let config = AdaptivePrefetchConfig::default();
         assert!(config.enabled);
         assert_eq!(config.mode, PrefetchMode::Auto);
-        assert_eq!(config.trigger_position, 0.35);
-        assert_eq!(config.lead_distance, 3);
-        assert_eq!(config.band_width, 2);
         assert_eq!(config.max_tiles_per_cycle, 3000);
     }
 
@@ -510,16 +456,6 @@ mod tests {
         let config = AdaptivePrefetchConfig::default();
         // Ground speed threshold (40kt is reasonable for taxi)
         assert_eq!(config.ground_speed_threshold_kt, 40.0);
-    }
-
-    #[test]
-    fn test_turn_detection_thresholds() {
-        let config = AdaptivePrefetchConfig::default();
-        // Stability threshold should be smaller than turn threshold
-        assert!(config.track_stability_threshold < config.turn_threshold);
-        // Reasonable values
-        assert_eq!(config.track_stability_threshold, 5.0);
-        assert_eq!(config.turn_threshold, 15.0);
     }
 
     #[test]
