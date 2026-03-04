@@ -63,7 +63,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::{debug, trace};
+use tracing::{debug, trace, Instrument};
 
 /// Consolidated ortho union FUSE filesystem.
 ///
@@ -696,8 +696,11 @@ impl Filesystem for Fuse3OrthoUnionFS {
             // Build filename for request_dds (use Display impl which includes correct zoom)
             let filename = format!("{}.dds", coords);
 
+            let fuse_read_span =
+                tracing::debug_span!("fuse_read", ino = ino, offset = offset, size = size,);
             let data = self
                 .request_dds(&filename)
+                .instrument(fuse_read_span)
                 .await
                 .unwrap_or_else(get_default_placeholder);
 

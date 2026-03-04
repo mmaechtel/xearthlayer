@@ -33,6 +33,7 @@ pub struct RunArgs {
     pub parallel: Option<usize>,
     pub no_cache: bool,
     pub debug: bool,
+    pub profile: bool,
     pub no_prefetch: bool,
     pub airport: Option<String>,
 }
@@ -57,7 +58,7 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         }
     }
 
-    let runner = CliRunner::with_debug(args.debug)?;
+    let runner = CliRunner::with_options(args.debug, args.profile)?;
     runner.log_startup("run");
     let config = runner.config();
 

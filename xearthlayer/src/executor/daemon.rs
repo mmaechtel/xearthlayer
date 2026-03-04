@@ -68,7 +68,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 // =============================================================================
 // Configuration
@@ -530,7 +530,11 @@ where
         }
 
         // Fast path: check memory cache first
-        if let Some(data) = memory_cache.get(tile.row, tile.col, tile.zoom).await {
+        let cache_result = memory_cache
+            .get(tile.row, tile.col, tile.zoom)
+            .instrument(tracing::trace_span!("cache_check"))
+            .await;
+        if let Some(data) = cache_result {
             let duration = start.elapsed();
             debug!(
                 tile_row = tile.row,
@@ -611,7 +615,10 @@ where
         let job_id = job.id();
         debug!(job_id = %job_id, tile = ?tile, "Created DDS generation job");
 
-        let handle = submitter.try_submit_boxed(job);
+        let handle = {
+            let _span = tracing::trace_span!("job_submit").entered();
+            submitter.try_submit_boxed(job)
+        };
 
         match handle {
             Some(mut handle) => {

@@ -27,6 +27,8 @@ use tracing_subscriber::fmt::time::OffsetTime;
 /// Dropping this guard will flush and close the log file writer.
 pub struct LoggingGuard {
     _file_guard: WorkerGuard,
+    #[cfg(feature = "profiling")]
+    _chrome_guard: Option<tracing_chrome::FlushGuard>,
 }
 
 /// Initialize logging system.
@@ -73,10 +75,10 @@ pub fn init_logging_with_options(
     log_file: &str,
     stdout_enabled: bool,
 ) -> Result<LoggingGuard, io::Error> {
-    init_logging_full(log_dir, log_file, stdout_enabled, false)
+    init_logging_full(log_dir, log_file, stdout_enabled, false, false)
 }
 
-/// Initialize logging system with full options including debug mode.
+/// Initialize logging system with full options including debug and profile modes.
 ///
 /// Creates logs directory if needed, clears previous log file,
 /// and sets up output to file and optionally stdout.
@@ -87,6 +89,7 @@ pub fn init_logging_with_options(
 /// * `log_file` - Log filename (e.g., "xearthlayer.log")
 /// * `stdout_enabled` - Whether to also output to stdout (disable for TUI mode)
 /// * `debug_mode` - Whether to enable debug-level logging (overrides RUST_LOG)
+/// * `profile_mode` - Whether to enable Chrome Trace profiling (requires `profiling` feature)
 ///
 /// # Returns
 ///
@@ -100,6 +103,7 @@ pub fn init_logging_full(
     log_file: &str,
     stdout_enabled: bool,
     debug_mode: bool,
+    profile_mode: bool,
 ) -> Result<LoggingGuard, io::Error> {
     // Create logs directory if it doesn't exist
     fs::create_dir_all(log_dir)?;
@@ -125,6 +129,28 @@ pub fn init_logging_full(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
+    // Chrome tracing layer for --profile mode (requires `profiling` feature)
+    #[cfg(feature = "profiling")]
+    let (chrome_layer, chrome_guard) = if profile_mode {
+        let trace_path = Path::new(log_dir).join(format!(
+            "xearthlayer-trace-{}.json",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        eprintln!("Profile trace: {}", trace_path.display());
+        let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+            .file(trace_path)
+            .include_args(true)
+            .build();
+        (Some(layer), Some(guard))
+    } else {
+        (None, None)
+    };
+
+    #[cfg(not(feature = "profiling"))]
+    if profile_mode {
+        eprintln!("Warning: --profile requires the 'profiling' feature. Rebuild with: cargo build --features profiling");
+    }
+
     // Use different formats for debug vs release builds
     #[cfg(debug_assertions)]
     {
@@ -144,6 +170,15 @@ pub fn init_logging_full(
                 .pretty()
         });
 
+        #[cfg(feature = "profiling")]
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stdout_layer)
+            .with(chrome_layer)
+            .init();
+
+        #[cfg(not(feature = "profiling"))]
         tracing_subscriber::registry()
             .with(env_filter)
             .with(file_layer)
@@ -179,6 +214,15 @@ pub fn init_logging_full(
                 .with_timer(timer)
         });
 
+        #[cfg(feature = "profiling")]
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stdout_layer)
+            .with(chrome_layer)
+            .init();
+
+        #[cfg(not(feature = "profiling"))]
         tracing_subscriber::registry()
             .with(env_filter)
             .with(file_layer)
@@ -188,6 +232,8 @@ pub fn init_logging_full(
 
     Ok(LoggingGuard {
         _file_guard: file_guard,
+        #[cfg(feature = "profiling")]
+        _chrome_guard: chrome_guard,
     })
 }
 
@@ -326,7 +372,11 @@ mod tests {
         let (non_blocking, guard) = NonBlocking::new(std::io::sink());
         drop(non_blocking); // Simulate using the writer
 
-        let _logging_guard = LoggingGuard { _file_guard: guard };
+        let _logging_guard = LoggingGuard {
+            _file_guard: guard,
+            #[cfg(feature = "profiling")]
+            _chrome_guard: None,
+        };
 
         // Guard is alive and will be dropped at end of scope
     }

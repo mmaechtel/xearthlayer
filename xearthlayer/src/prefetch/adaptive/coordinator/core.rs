@@ -490,6 +490,13 @@ impl AdaptivePrefetchCoordinator {
     ///
     /// Number of tiles submitted. Returns 0 if deferred due to backpressure.
     pub fn execute(&mut self, plan: &PrefetchPlan, cancellation: CancellationToken) -> usize {
+        let _span = tracing::debug_span!(
+            "prefetch_execute",
+            tile_count = plan.tiles.len(),
+            strategy = plan.strategy,
+        )
+        .entered();
+
         let Some(ref client) = self.dds_client else {
             tracing::warn!("No DDS client configured - cannot execute prefetch");
             return 0;
