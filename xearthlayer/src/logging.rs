@@ -124,21 +124,21 @@ pub fn init_logging_full(
     let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
 
     // Create env filter
-    // Priority: profile_mode > debug_mode flag > RUST_LOG env var > default (info)
+    // Flags are combinable: --debug + --profile enables both debug logs and profiling spans.
     //
     // When debug_mode is enabled, we only enable DEBUG for xearthlayer crate.
     // Third-party crates (especially fuse3) produce extremely verbose DEBUG output
     // that can flood the log and cause performance issues.
     //
-    // When profile_mode is enabled, we enable DEBUG only for the "profiling"
-    // target — our spans use `target: "profiling"` to isolate them from the
-    // thousands of ambient debug/info events in xearthlayer and fuse3.
-    let env_filter = if profile_mode {
-        EnvFilter::new("info,profiling=debug")
-    } else if debug_mode {
-        EnvFilter::new("info,xearthlayer=debug")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    // When profile_mode is enabled, we enable DEBUG for the "profiling" target —
+    // our spans use `target: "profiling"` to isolate them from ambient events.
+    let env_filter = match (profile_mode, debug_mode) {
+        (true, true) => EnvFilter::new("info,profiling=debug,xearthlayer=debug"),
+        (true, false) => EnvFilter::new("info,profiling=debug"),
+        (false, true) => EnvFilter::new("info,xearthlayer=debug"),
+        (false, false) => {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        }
     };
 
     // Chrome tracing layer for --profile mode (requires `profiling` feature)
