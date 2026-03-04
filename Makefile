@@ -68,6 +68,21 @@ release: verify ## Build optimized release version
 	$(CARGO) build --release $(CARGO_FLAGS)
 	@echo "$(GREEN)Release build complete!$(NC)"
 
+.PHONY: release-profiling
+release-profiling: verify ## Build release version with profiling support
+	@echo "$(BLUE)Building release version with profiling...$(NC)"
+	$(CARGO) build --release --features profiling $(CARGO_FLAGS)
+	@echo "$(GREEN)Release build with profiling complete!$(NC)"
+
+.PHONY: install-profiling
+install-profiling: release-profiling ## Install binary with profiling support to $(BINDIR)
+	@echo "$(BLUE)Installing xearthlayer (profiling) to $(BINDIR)...$(NC)"
+	@mkdir -p "$(BINDIR)"
+	@cp target/release/xearthlayer "$(BINDIR)/"
+	@chmod 755 "$(BINDIR)/xearthlayer"
+	@echo "$(GREEN)Installed: $(BINDIR)/xearthlayer (with profiling)$(NC)"
+	@echo "$(BLUE)Usage: xearthlayer run --profile$(NC)"
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	@echo "$(BLUE)Cleaning build artifacts...$(NC)"
