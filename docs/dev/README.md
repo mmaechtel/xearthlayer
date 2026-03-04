@@ -102,7 +102,7 @@ xearthlayer-cli
 # Clone and build
 git clone https://github.com/samsoir/xearthlayer.git
 cd xearthlayer
-make init
+make init      # Installs toolchain components + git hooks
 make verify
 
 # Run tests
@@ -119,4 +119,4 @@ make doc-open
 - **Coverage**: Maintain 80%+ test coverage
 - **Formatting**: Run `cargo fmt` before committing
 - **Linting**: Run `cargo clippy` with no warnings
-- **Pre-commit**: Run `make pre-commit` before pushing
+- **Pre-commit hook**: Installed by `make init` (or `make setup-hooks`), runs `make pre-commit` automatically before each commit. Skips doc-only changes. Bypass with `git commit --no-verify`.

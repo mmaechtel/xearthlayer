@@ -29,13 +29,18 @@ help: ## Show this help message
 ##@ Development
 
 .PHONY: init
-init: ## Initialize development environment
+init: setup-hooks ## Initialize development environment
 	@echo "$(BLUE)Initializing development environment...$(NC)"
 	@command -v cargo >/dev/null 2>&1 || { echo "$(RED)Error: cargo not found. Install Rust from https://rustup.rs/$(NC)"; exit 1; }
 	@command -v rustup >/dev/null 2>&1 || { echo "$(RED)Error: rustup not found. Install Rust via rustup from https://rustup.rs/$(NC)"; exit 1; }
 	@command -v rustfmt >/dev/null 2>&1 || rustup component add rustfmt
 	@command -v cargo-clippy >/dev/null 2>&1 || rustup component add clippy
 	@echo "$(GREEN)Development environment ready!$(NC)"
+
+.PHONY: setup-hooks
+setup-hooks: ## Install git pre-commit hook (symlinks scripts/hooks/pre-commit)
+	@ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+	@echo "$(GREEN)Git hooks installed.$(NC)"
 
 .PHONY: dev
 dev: ## Run in development mode
