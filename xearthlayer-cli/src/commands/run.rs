@@ -353,23 +353,22 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
 /// for X-Plane's open textures. This raises the soft limit to the hard
 /// limit (no root required), matching what the system administrator allows.
 fn raise_fd_limit() {
+    // Note: this runs before logging is initialized, so use eprintln
+    // for diagnostics. tracing calls would be silently dropped.
     match rlimit::Resource::NOFILE.get() {
         Ok((soft, hard)) if soft < hard => {
             if let Err(e) = rlimit::Resource::NOFILE.set(hard, hard) {
-                tracing::warn!(soft, hard, error = %e, "Failed to raise FD limit");
-            } else {
-                tracing::info!(
-                    old_soft = soft,
-                    new_soft = hard,
-                    "Raised file descriptor limit"
+                eprintln!(
+                    "Warning: failed to raise FD limit from {} to {}: {}",
+                    soft, hard, e
                 );
+            } else {
+                eprintln!("FD limit: {} → {}", soft, hard);
             }
         }
-        Ok((soft, _)) => {
-            tracing::debug!(soft, "FD limit already at maximum");
-        }
+        Ok(_) => {} // Already at maximum, nothing to do
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to query FD limit");
+            eprintln!("Warning: failed to query FD limit: {}", e);
         }
     }
 }
