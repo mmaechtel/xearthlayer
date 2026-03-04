@@ -75,9 +75,9 @@ pub const MIN_NETWORK_CAPACITY: usize = 8;
 /// Maximum network pool capacity.
 ///
 /// Caps concurrent download tasks to prevent bandwidth starvation. With an
-/// HTTP semaphore of 1024 shared across all downloads, 48 concurrent tiles
-/// each get ~21 HTTP connections — enough for sub-second per-tile latency.
-pub const MAX_NETWORK_CAPACITY: usize = 48;
+/// HTTP semaphore of 1024 shared across all downloads, 64 concurrent tiles
+/// each get ~16 HTTP connections — enough for sub-second per-tile latency.
+pub const MAX_NETWORK_CAPACITY: usize = 64;
 
 /// Default disk I/O pool capacity (SSD profile).
 pub const DEFAULT_DISK_IO_CAPACITY: usize = 64;
@@ -692,7 +692,7 @@ mod tests {
     fn test_network_pool_balanced_with_cpu() {
         let config = ResourcePoolConfig::default();
 
-        // Network pool should be approximately 1.5x CPU pool, clamped to [8, 48]
+        // Network pool should be approximately 1.5x CPU pool, clamped to [8, 64]
         let expected = ((config.cpu as f64 * DEFAULT_NETWORK_CAPACITY_MULTIPLIER).ceil() as usize)
             .clamp(MIN_NETWORK_CAPACITY, MAX_NETWORK_CAPACITY);
         assert_eq!(

@@ -203,7 +203,7 @@ All job executor operations are protected by resource pools with semaphore-based
 limiting to prevent resource exhaustion under heavy load. Each resource type has
 tuned concurrency limits:
 
-- **Network pool (download tasks)**: `clamp(ceil(cpu_capacity * 1.5), 8, 48)` — pipeline-balanced with CPU pool
+- **Network pool (download tasks)**: `clamp(ceil(cpu_capacity * 1.5), 8, 64)` — pipeline-balanced with CPU pool
 - **HTTP semaphore (chunk connections)**: 1024 shared across all download tasks
 - **CPU-bound work** (assemble + encode): `max(num_cpus * 1.25, num_cpus + 2)` shared limiter
 - **Disk I/O concurrency**: Profile-based, auto-detected from storage type:
