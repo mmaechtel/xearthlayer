@@ -25,10 +25,16 @@ use tracing_subscriber::fmt::time::OffsetTime;
 /// Guard that must be kept alive for the duration of logging.
 ///
 /// Dropping this guard will flush and close the log file writer.
+/// Field order matters: Rust drops struct fields in declaration order.
+/// Chrome flush guard must drop before the writer guard to ensure
+/// buffered trace events are flushed to the non-blocking writer
+/// before it shuts down.
 pub struct LoggingGuard {
-    _file_guard: WorkerGuard,
     #[cfg(feature = "profiling")]
-    _chrome_guard: Option<tracing_chrome::FlushGuard>,
+    _chrome_flush_guard: Option<tracing_chrome::FlushGuard>,
+    #[cfg(feature = "profiling")]
+    _chrome_writer_guard: Option<WorkerGuard>,
+    _file_guard: WorkerGuard,
 }
 
 /// Initialize logging system.
@@ -130,20 +136,27 @@ pub fn init_logging_full(
     };
 
     // Chrome tracing layer for --profile mode (requires `profiling` feature)
+    //
+    // Uses a non-blocking writer to avoid mutex contention: tracing-chrome
+    // holds an internal Mutex for every span/event write. With dozens of
+    // concurrent tokio tasks, synchronous file I/O under that lock causes
+    // severe contention. The non-blocking wrapper sends writes to a
+    // background thread via a channel, keeping the critical section fast.
     #[cfg(feature = "profiling")]
-    let (chrome_layer, chrome_guard) = if profile_mode {
+    let (chrome_layer, chrome_flush_guard, chrome_writer_guard) = if profile_mode {
         let trace_path = Path::new(log_dir).join(format!(
             "xearthlayer-trace-{}.json",
             chrono::Utc::now().format("%Y%m%d-%H%M%S")
         ));
         eprintln!("Profile trace: {}", trace_path.display());
-        let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
-            .file(trace_path)
-            .include_args(true)
+        let trace_file = fs::File::create(&trace_path)?;
+        let (non_blocking_trace, writer_guard) = tracing_appender::non_blocking(trace_file);
+        let (layer, flush_guard) = tracing_chrome::ChromeLayerBuilder::new()
+            .writer(non_blocking_trace)
             .build();
-        (Some(layer), Some(guard))
+        (Some(layer), Some(flush_guard), Some(writer_guard))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     #[cfg(not(feature = "profiling"))]
@@ -231,9 +244,11 @@ pub fn init_logging_full(
     }
 
     Ok(LoggingGuard {
-        _file_guard: file_guard,
         #[cfg(feature = "profiling")]
-        _chrome_guard: chrome_guard,
+        _chrome_flush_guard: chrome_flush_guard,
+        #[cfg(feature = "profiling")]
+        _chrome_writer_guard: chrome_writer_guard,
+        _file_guard: file_guard,
     })
 }
 
@@ -373,9 +388,11 @@ mod tests {
         drop(non_blocking); // Simulate using the writer
 
         let _logging_guard = LoggingGuard {
-            _file_guard: guard,
             #[cfg(feature = "profiling")]
-            _chrome_guard: None,
+            _chrome_flush_guard: None,
+            #[cfg(feature = "profiling")]
+            _chrome_writer_guard: None,
+            _file_guard: guard,
         };
 
         // Guard is alive and will be dropped at end of scope
