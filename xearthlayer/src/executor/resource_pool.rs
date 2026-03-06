@@ -53,7 +53,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// ON_DEMAND tasks always have access to the full pool. Prefetch and
 /// housekeeping tasks are capped at this fraction, reserving the remainder
 /// exclusively for on-demand work.
-pub const DEFAULT_MAX_PREFETCH_FRACTION: f64 = 0.75;
+pub const DEFAULT_MAX_PREFETCH_FRACTION: f64 = 0.50;
 
 // =============================================================================
 // Resource Pool Configuration Constants
@@ -398,7 +398,7 @@ pub struct ResourcePoolConfig {
     /// tasks are capped at `capacity * max_prefetch_fraction`, reserving
     /// the rest exclusively for on-demand work.
     ///
-    /// Default: 0.75 (prefetch uses at most 75% of each pool).
+    /// Default: 0.50 (prefetch uses at most 50% of each pool).
     pub max_prefetch_fraction: f64,
 }
 
@@ -975,5 +975,29 @@ mod tests {
         // Network and DiskIO are at 0% — CPU is the max
         assert!((pools.network().utilization() - 0.0).abs() < f64::EPSILON);
         assert!((pools.disk_io().utilization() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_default_prefetch_fraction_caps_at_half() {
+        // Default pool with capacity 4 should cap prefetch at 50% → max 2 permits
+        let pool = ResourcePool::new(ResourceType::CPU, 4);
+
+        let p1 = pool.try_acquire_for_priority(Priority::PREFETCH);
+        assert!(p1.is_some(), "1st prefetch permit should succeed");
+        let p2 = pool.try_acquire_for_priority(Priority::PREFETCH);
+        assert!(p2.is_some(), "2nd prefetch permit should succeed");
+
+        // 3rd prefetch should be denied (2 >= ceil(4 * 0.50) = 2)
+        let p3 = pool.try_acquire_for_priority(Priority::PREFETCH);
+        assert!(p3.is_none(), "Prefetch should be capped at 50% of pool");
+
+        // On-demand still works
+        let p4 = pool.try_acquire_for_priority(Priority::ON_DEMAND);
+        assert!(p4.is_some(), "On-demand should bypass prefetch quota");
+
+        drop(p1);
+        drop(p2);
+        drop(p4);
+        drop(p3);
     }
 }
