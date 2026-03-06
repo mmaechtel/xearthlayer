@@ -14,3 +14,6 @@ repository = "https://github.com/samsoir/xearthlayer"
 
 [workspace.dependencies]
 # Shared dependencies will be added here as needed
+
+[patch.crates-io]
+fuse3 = { path = "vendor/fuse3" }
