@@ -570,8 +570,7 @@ mod tests {
         let cached_tiles: std::collections::HashSet<TileCoord> = tiles.into_iter().collect();
 
         // No scenery index — uses geometric fallback
-        let promoted =
-            BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, None);
+        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, None);
         assert_eq!(promoted, 1);
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
@@ -594,8 +593,7 @@ mod tests {
         let mut cached_tiles = std::collections::HashSet::new();
         cached_tiles.insert(tiles[0]);
 
-        let promoted =
-            BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, None);
+        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, None);
         assert_eq!(promoted, 0);
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
@@ -695,7 +693,10 @@ mod tests {
 
         assert!(!tiles.is_empty());
         for tile in &tiles {
-            assert_eq!(tile.zoom, 12, "Should use zoom 12 from scenery index (chunk_zoom 16)");
+            assert_eq!(
+                tile.zoom, 12,
+                "Should use zoom 12 from scenery index (chunk_zoom 16)"
+            );
         }
     }
 
@@ -710,7 +711,10 @@ mod tests {
 
         assert!(!tiles.is_empty());
         for tile in &tiles {
-            assert_eq!(tile.zoom, 14, "Should fall back to zoom 14 when no index tiles nearby");
+            assert_eq!(
+                tile.zoom, 14,
+                "Should fall back to zoom 14 when no index tiles nearby"
+            );
         }
     }
 
@@ -736,7 +740,10 @@ mod tests {
         // Promote should work with SceneryIndex (not hardcoded zoom 14)
         let promoted =
             BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, Some(&index));
-        assert_eq!(promoted, 1, "Should promote when all scenery index tiles are cached");
+        assert_eq!(
+            promoted, 1,
+            "Should promote when all scenery index tiles are cached"
+        );
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
         assert!(state.is_prefetched());
@@ -755,8 +762,7 @@ mod tests {
         // Cache zoom 14 tiles (the OLD wrong behavior) instead of zoom 12
         let strategy = BoundaryStrategy::new();
         let wrong_tiles = strategy.expand_to_tiles(&region, 14);
-        let cached_tiles: std::collections::HashSet<TileCoord> =
-            wrong_tiles.into_iter().collect();
+        let cached_tiles: std::collections::HashSet<TileCoord> = wrong_tiles.into_iter().collect();
 
         // Promote should NOT succeed — cached zoom 14, but index expects zoom 12
         let promoted =

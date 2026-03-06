@@ -491,8 +491,7 @@ impl AdaptivePrefetchCoordinator {
                         } else {
                             // No GeoIndex -- expand all targets without filtering
                             for target in &targets {
-                                all_tiles
-                                    .extend(self.get_tiles_for_region(&target.region));
+                                all_tiles.extend(self.get_tiles_for_region(&target.region));
                             }
                         }
                     }

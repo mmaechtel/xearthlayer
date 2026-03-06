@@ -174,7 +174,17 @@ impl SceneryWindow {
                 }
             }
             WindowState::Ready => {
-                // Already ready -- no-op for now (rebuild detection in Task 8)
+                // Slide the monitors to track X-Plane's evolving loaded area.
+                // The SceneTracker's bounds reflect what X-Plane has actually
+                // requested, so we keep the window aligned as the aircraft moves.
+                if let Some(ref mut lat_mon) = self.lat_monitor {
+                    lat_mon.update_edges(bounds.min_lat, bounds.max_lat);
+                }
+                if let Some(ref mut lon_mon) = self.lon_monitor {
+                    lon_mon.update_edges(bounds.min_lon, bounds.max_lon);
+                }
+                self.last_bounds =
+                    Some((bounds.min_lat, bounds.max_lat, bounds.min_lon, bounds.max_lon));
             }
         }
     }
@@ -823,5 +833,116 @@ mod tests {
         // For now, check_boundaries on assumed state without prior position → empty
         // This test verifies that assumed state doesn't panic
         let _predictions = window.check_boundaries(50.0, 7.0);
+    }
+
+    // =========================================================================
+    // Window sliding tests — monitors must update as loaded area evolves
+    // =========================================================================
+
+    #[test]
+    fn test_ready_state_slides_monitors_on_tracker_update() {
+        // Scenario: Window in Ready state at lat 51-54.
+        // SceneTracker reports new bounds shifted south (50-53).
+        // After update, the south boundary should have moved from 51 to 50.
+        let config = SceneryWindowConfig {
+            trigger_distance: 0.3,
+            load_depth: 3,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+
+        // Transition to Ready: set bounds twice for stability
+        tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
+        window.update_from_tracker(tracker.as_ref());
+        window.update_from_tracker(tracker.as_ref());
+        assert!(matches!(window.state(), WindowState::Ready));
+
+        // Aircraft at center of window — no crossings
+        let crossings = window.check_boundaries(52.5, 10.0);
+        assert!(crossings.is_empty(), "No crossing expected at center");
+
+        // Now SceneTracker reports shifted bounds (aircraft moving south)
+        tracker.set_bounds(make_bounds(50.0, 53.0, 8.0, 12.0));
+        window.update_from_tracker(tracker.as_ref());
+
+        // Aircraft near new south edge (50.0 + 0.2 = 50.2, within 0.3 trigger)
+        let crossings = window.check_boundaries(50.2, 10.0);
+        assert!(
+            !crossings.is_empty(),
+            "Should detect crossing near new south edge after window slide"
+        );
+        assert!(crossings.iter().any(|c| c.axis == BoundaryAxis::Latitude));
+    }
+
+    #[test]
+    fn test_window_slides_continuously_through_multiple_updates() {
+        // Simulates an aircraft flying south through multiple DSF boundaries.
+        // Each tracker update should slide the window, enabling new crossings.
+        let config = SceneryWindowConfig {
+            trigger_distance: 0.3,
+            load_depth: 3,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+
+        // Initialize to Ready at lat 51-54, lon 8-12
+        tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
+        window.update_from_tracker(tracker.as_ref());
+        window.update_from_tracker(tracker.as_ref());
+        assert!(matches!(window.state(), WindowState::Ready));
+
+        let mut crossing_count = 0;
+
+        // Simulate flying south: each step the loaded area shifts by ~1°
+        for step in 0..5 {
+            let south_shift = step as f64;
+            let new_min = 51.0 - south_shift;
+            let new_max = 54.0 - south_shift;
+            tracker.set_bounds(make_bounds(new_min, new_max, 8.0, 12.0));
+            window.update_from_tracker(tracker.as_ref());
+
+            // Check near the south edge
+            let near_south = new_min + 0.2;
+            let crossings = window.check_boundaries(near_south, 10.0);
+            if !crossings.is_empty() {
+                crossing_count += 1;
+            }
+        }
+
+        // Should get crossings at multiple steps, not just the first
+        assert!(
+            crossing_count >= 3,
+            "Expected crossings at multiple sliding positions, got {}",
+            crossing_count
+        );
+    }
+
+    #[test]
+    fn test_window_bounds_reflect_latest_tracker_update() {
+        // After sliding, window_bounds() should return the latest edges.
+        let config = SceneryWindowConfig::default();
+        let mut window = SceneryWindow::new(config);
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+
+        // Initialize to Ready
+        tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
+        window.update_from_tracker(tracker.as_ref());
+        window.update_from_tracker(tracker.as_ref());
+
+        let bounds = window.window_bounds();
+        assert_eq!(bounds, Some((51.0, 54.0, 8.0, 12.0)));
+
+        // Slide south
+        tracker.set_bounds(make_bounds(49.0, 52.0, 7.0, 11.0));
+        window.update_from_tracker(tracker.as_ref());
+
+        let bounds = window.window_bounds();
+        assert_eq!(
+            bounds,
+            Some((49.0, 52.0, 7.0, 11.0)),
+            "window_bounds should reflect latest tracker update"
+        );
     }
 }
