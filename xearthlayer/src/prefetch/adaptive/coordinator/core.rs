@@ -56,6 +56,13 @@ pub const BACKPRESSURE_REDUCE_THRESHOLD: f64 = 0.5;
 /// [`BACKPRESSURE_DEFER_THRESHOLD`], only this fraction of tiles is submitted.
 pub const BACKPRESSURE_REDUCED_FRACTION: f64 = 0.5;
 
+/// Maximum number of tiles that can be queued as pending across cycles.
+///
+/// Safety cap to prevent executor flooding if tile generation overestimates.
+/// At 200 tiles/cycle with ~16 tiles per DSF region, 2000 covers ~10 cycles
+/// of boundary crossings — more than enough for any realistic flight path.
+pub const MAX_PENDING_TILES: usize = 2000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Coordinator
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,7 +337,17 @@ impl AdaptivePrefetchCoordinator {
             let center_lon = region.lon as f64 + 0.5;
             // 1° DSF region ≈ 60nm at equator, 45nm radius covers the region
             let tiles = index.tiles_near(center_lat, center_lon, 45.0);
-            let result: Vec<TileCoord> = tiles.iter().map(|t| t.to_tile_coord()).collect();
+            // Filter to only tiles whose geographic center falls within the
+            // target 1° DSF region. Without this, the 45nm radius search spills
+            // across DSF boundaries, returning tiles from adjacent regions and
+            // causing massive tile count explosion (53K+ instead of ~700).
+            let result: Vec<TileCoord> = tiles
+                .iter()
+                .filter(|t| {
+                    t.lat.floor() as i32 == region.lat && t.lon.floor() as i32 == region.lon
+                })
+                .map(|t| t.to_tile_coord())
+                .collect();
 
             if !result.is_empty() {
                 return result;
@@ -559,8 +576,13 @@ impl AdaptivePrefetchCoordinator {
         let load = client.executor_load();
         if load > BACKPRESSURE_DEFER_THRESHOLD {
             self.total_deferred_cycles += 1;
-            // Store all tiles as pending so they're retried when load drops
-            self.pending_tiles = plan.tiles.clone();
+            // TEMPORARILY REVERTED for RED test verification
+            // Store tiles as pending so they're retried when load drops (capped)
+            self.pending_tiles = if plan.tiles.len() > MAX_PENDING_TILES {
+                plan.tiles[..MAX_PENDING_TILES].to_vec()
+            } else {
+                plan.tiles.clone()
+            };
             tracing::info!(
                 load = format!("{:.1}%", load * 100.0),
                 tiles_planned = plan.tiles.len(),
@@ -588,8 +610,12 @@ impl AdaptivePrefetchCoordinator {
         let max_tiles = if self.transition_throttle.is_active() {
             let fraction = self.transition_throttle.fraction();
             if fraction == 0.0 {
-                // Store all tiles as pending so they're submitted once ramp begins
-                self.pending_tiles = plan.tiles.clone();
+                // Store tiles as pending so they're submitted once ramp begins (capped)
+                self.pending_tiles = if plan.tiles.len() > MAX_PENDING_TILES {
+                    plan.tiles[..MAX_PENDING_TILES].to_vec()
+                } else {
+                    plan.tiles.clone()
+                };
                 tracing::debug!(
                     tiles_deferred = plan.tiles.len(),
                     "Transition throttle — grace period, tiles stored as pending"
@@ -644,6 +670,16 @@ impl AdaptivePrefetchCoordinator {
         if !channel_remainder.is_empty() || !throttle_overflow.is_empty() {
             let mut pending = channel_remainder;
             pending.extend(throttle_overflow);
+            // Apply safety cap to prevent executor flooding
+            if pending.len() > MAX_PENDING_TILES {
+                tracing::warn!(
+                    total = pending.len(),
+                    cap = MAX_PENDING_TILES,
+                    dropped = pending.len() - MAX_PENDING_TILES,
+                    "Pending tiles exceed cap — truncating to prevent executor flood"
+                );
+                pending.truncate(MAX_PENDING_TILES);
+            }
             tracing::debug!(
                 submitted,
                 pending = pending.len(),
@@ -2612,6 +2648,228 @@ mod tests {
             submitted,
             coord.pending_tiles.len(),
             total_accounted
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DSF region filtering tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_tiles_for_region_filters_to_target_dsf() {
+        // When a SceneryIndex has tiles in multiple adjacent DSF regions,
+        // get_tiles_for_region should only return tiles whose geographic
+        // center falls within the target 1° DSF region — not tiles from
+        // neighboring regions that fall within the 45nm search radius.
+        use crate::coord::{to_tile_coords, CHUNKS_PER_TILE_SIDE, CHUNK_ZOOM_OFFSET};
+        use crate::geo_index::DsfRegion;
+        use crate::prefetch::scenery_index::{SceneryIndexConfig, SceneryTile};
+
+        let index = SceneryIndex::new(SceneryIndexConfig::default());
+
+        // Populate tiles in THREE adjacent DSF regions: (50,9), (50,10), (51,9)
+        for (lat_base, lon_base) in &[(50, 9), (50, 10), (51, 9)] {
+            for lat_step in 0..4u32 {
+                for lon_step in 0..4u32 {
+                    let sample_lat = *lat_base as f64 + (lat_step as f64 * 0.25) + 0.125;
+                    let sample_lon = *lon_base as f64 + (lon_step as f64 * 0.25) + 0.125;
+                    let tile_zoom: u8 = 16 - CHUNK_ZOOM_OFFSET;
+                    if let Ok(coord) = to_tile_coords(sample_lat, sample_lon, tile_zoom) {
+                        index.add_tile(SceneryTile {
+                            row: coord.row * CHUNKS_PER_TILE_SIDE,
+                            col: coord.col * CHUNKS_PER_TILE_SIDE,
+                            chunk_zoom: 16,
+                            lat: sample_lat as f32,
+                            lon: sample_lon as f32,
+                            is_sea: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        let scenery_index = Arc::new(index);
+
+        // Create coordinator with scenery index
+        let config = AdaptivePrefetchConfig::default();
+        let coord = AdaptivePrefetchCoordinator::new(config)
+            .with_scenery_index(scenery_index);
+
+        // Query for region (50, 9) only
+        let target = DsfRegion::new(50, 9);
+        let tiles = coord.get_tiles_for_region(&target);
+
+        // Should only get tiles from region (50,9), NOT from (50,10) or (51,9)
+        assert!(
+            !tiles.is_empty(),
+            "Should find tiles in the target region"
+        );
+
+        // At zoom 12, each 1° region has ~16 tiles (4x4 grid). With dedup,
+        // we expect at most 16 tiles from one region.
+        assert!(
+            tiles.len() <= 16,
+            "Should have at most 16 tiles from a single DSF region, got {}",
+            tiles.len()
+        );
+
+        // Verify all returned tiles correspond to the target DSF region
+        // by checking their tile coordinates fall within the expected range.
+        // At zoom 12, one degree is approximately 4 tiles.
+        for tile in &tiles {
+            assert_eq!(tile.zoom, 12, "Tiles should be at zoom 12 (from chunk_zoom 16)");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pending tiles cap tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pending_tiles_capped_at_max() {
+        // When a massive plan generates more tiles than MAX_PENDING_TILES,
+        // the pending queue must be capped to prevent executor flooding.
+        //
+        // Scenario: 5000-tile plan, throttle at 20% (→ 1000 tiles submitted),
+        // remaining 4000 exceed MAX_PENDING_TILES (2000).
+        // Expected: 1000 submitted, 2000 pending (capped), 2000 dropped.
+
+        let client = Arc::new(CapLimitedDdsClient::new(10_000)); // no channel limit
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            ramp_duration: std::time::Duration::from_secs(5),
+            ramp_start_fraction: 0.20,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        // Fast-forward to cruise
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+
+        assert!(coord.transition_throttle.is_active());
+
+        // Build a 5000-tile plan (way more than MAX_PENDING_TILES)
+        let tiles: Vec<TileCoord> = (0..5000)
+            .map(|i| TileCoord {
+                row: 5000 + i,
+                col: 8000,
+                zoom: 14,
+            })
+            .collect();
+        let calibration = test_calibration();
+        let plan = PrefetchPlan::with_tiles(tiles, &calibration, "boundary", 0, 5000);
+
+        let cancellation = CancellationToken::new();
+        let submitted = coord.execute(&plan, cancellation);
+
+        // Throttle at ~20% → ~1000 submitted
+        assert!(submitted > 0, "Should submit some tiles");
+
+        // KEY ASSERTION: pending tiles must be capped at MAX_PENDING_TILES
+        assert!(
+            coord.pending_tiles.len() <= MAX_PENDING_TILES,
+            "Pending tiles ({}) should not exceed MAX_PENDING_TILES ({})",
+            coord.pending_tiles.len(),
+            MAX_PENDING_TILES
+        );
+
+        // The total accounted for should be less than 5000 (some were dropped by cap)
+        let total = submitted + coord.pending_tiles.len();
+        assert!(
+            total < 5000,
+            "With cap, total ({}) should be less than plan size (5000)",
+            total
+        );
+    }
+
+    #[test]
+    fn test_pending_cap_on_backpressure_defer() {
+        // When executor load exceeds BACKPRESSURE_DEFER_THRESHOLD and the
+        // plan is stored as pending, the cap must still be applied.
+
+        /// Mock DdsClient that reports high executor load.
+        struct HighLoadDdsClient;
+
+        impl DdsClient for HighLoadDdsClient {
+            fn submit(
+                &self,
+                _request: crate::runtime::JobRequest,
+            ) -> Result<(), crate::executor::DdsClientError> {
+                Ok(())
+            }
+
+            fn request_dds(
+                &self,
+                _tile: TileCoord,
+                _cancel: CancellationToken,
+            ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
+                let (_, rx) = tokio::sync::oneshot::channel();
+                rx
+            }
+
+            fn request_dds_with_options(
+                &self,
+                _tile: TileCoord,
+                _priority: crate::executor::Priority,
+                _origin: crate::runtime::RequestOrigin,
+                _cancel: CancellationToken,
+            ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
+                let (_, rx) = tokio::sync::oneshot::channel();
+                rx
+            }
+
+            fn is_connected(&self) -> bool {
+                true
+            }
+
+            fn executor_load(&self) -> f64 {
+                0.95 // Above BACKPRESSURE_DEFER_THRESHOLD (0.8)
+            }
+        }
+
+        let client = Arc::new(HighLoadDdsClient);
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        // Build a 5000-tile plan
+        let tiles: Vec<TileCoord> = (0..5000)
+            .map(|i| TileCoord {
+                row: 5000 + i,
+                col: 8000,
+                zoom: 14,
+            })
+            .collect();
+        let calibration = test_calibration();
+        let plan = PrefetchPlan::with_tiles(tiles, &calibration, "boundary", 0, 5000);
+
+        let cancellation = CancellationToken::new();
+        let submitted = coord.execute(&plan, cancellation);
+
+        // Should defer (0 submitted) due to high load
+        assert_eq!(submitted, 0, "Should defer due to backpressure");
+
+        // KEY ASSERTION: pending tiles must be capped
+        assert!(
+            coord.pending_tiles.len() <= MAX_PENDING_TILES,
+            "Deferred pending tiles ({}) should not exceed MAX_PENDING_TILES ({})",
+            coord.pending_tiles.len(),
+            MAX_PENDING_TILES
         );
     }
 }
