@@ -217,9 +217,9 @@ load_depth = {}
 window_buffer = {}
 ; InProgress staleness timeout in seconds (default: 120, range: 30-600)
 stale_region_timeout = {}
-; Assumed window height in DSF tiles (default: 6, range: 3-12)
+; Assumed window height in DSF tiles (default: 9, range: 3-12)
 default_window_rows = {}
-; Assumed window width in DSF tiles (default: 8, range: 4-16)
+; Assumed window width in DSF tiles (default: 9, range: 4-16)
 default_window_cols = {}
 
 [control_plane]

@@ -2692,18 +2692,14 @@ mod tests {
 
         // Create coordinator with scenery index
         let config = AdaptivePrefetchConfig::default();
-        let coord = AdaptivePrefetchCoordinator::new(config)
-            .with_scenery_index(scenery_index);
+        let coord = AdaptivePrefetchCoordinator::new(config).with_scenery_index(scenery_index);
 
         // Query for region (50, 9) only
         let target = DsfRegion::new(50, 9);
         let tiles = coord.get_tiles_for_region(&target);
 
         // Should only get tiles from region (50,9), NOT from (50,10) or (51,9)
-        assert!(
-            !tiles.is_empty(),
-            "Should find tiles in the target region"
-        );
+        assert!(!tiles.is_empty(), "Should find tiles in the target region");
 
         // At zoom 12, each 1° region has ~16 tiles (4x4 grid). With dedup,
         // we expect at most 16 tiles from one region.
@@ -2717,7 +2713,10 @@ mod tests {
         // by checking their tile coordinates fall within the expected range.
         // At zoom 12, one degree is approximately 4 tiles.
         for tile in &tiles {
-            assert_eq!(tile.zoom, 12, "Tiles should be at zoom 12 (from chunk_zoom 16)");
+            assert_eq!(
+                tile.zoom, 12,
+                "Tiles should be at zoom 12 (from chunk_zoom 16)"
+            );
         }
     }
 

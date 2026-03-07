@@ -715,9 +715,9 @@ stale_region_timeout = 120
 # Fallback window dimensions when no FUSE data available
 # Used when starting in uncovered area (ocean, polar regions).
 # Once X-Plane loads scenery, these are replaced by observed dimensions.
-# Default: 6 rows, 8 columns (based on whitepaper observations)
-default_window_rows = 6
-default_window_cols = 8
+# Default: 9 rows, 9 columns (based on observed X-Plane 12 loading patterns)
+default_window_rows = 9
+default_window_cols = 9
 ```
 
 ### Deprecated Settings

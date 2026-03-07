@@ -146,8 +146,8 @@ impl Default for AdaptivePrefetchConfig {
             load_depth: 3,
             window_buffer: 1,
             stale_region_timeout: Duration::from_secs(120),
-            default_window_rows: 6,
-            default_window_cols: 8,
+            default_window_rows: 9,
+            default_window_cols: 9,
         }
     }
 }
@@ -464,8 +464,8 @@ mod tests {
         assert_eq!(config.load_depth, 3);
         assert_eq!(config.window_buffer, 1);
         assert_eq!(config.stale_region_timeout, Duration::from_secs(120));
-        assert_eq!(config.default_window_rows, 6);
-        assert_eq!(config.default_window_cols, 8);
+        assert_eq!(config.default_window_rows, 9);
+        assert_eq!(config.default_window_cols, 9);
     }
 
     #[test]

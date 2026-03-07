@@ -182,7 +182,18 @@ impl ServiceOrchestrator {
         }
 
         // Wire SceneTracker for boundary-driven prefetch (#58)
-        coordinator = coordinator.with_scene_tracker(self.mount_manager.scene_tracker());
+        // Start the event processing loop so FUSE access events populate
+        // requested_tiles and loaded_bounds() returns real X-Plane window data.
+        let scene_tracker = self.mount_manager.scene_tracker();
+        if let Some(rx) = self.mount_manager.take_scene_tracker_receiver() {
+            scene_tracker.clone().start(rx);
+            tracing::info!("Scene tracker started for boundary-driven prefetch");
+        } else {
+            tracing::warn!(
+                "Scene tracker receiver not available — window will use assumed dimensions"
+            );
+        }
+        coordinator = coordinator.with_scene_tracker(scene_tracker);
 
         // Wire shared status for TUI display
         coordinator = coordinator.with_shared_status(Arc::clone(&self.prefetch_status));

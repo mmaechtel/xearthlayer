@@ -346,8 +346,8 @@ The system uses flight phase detection and performance calibration:
 | `load_depth` | integer | `3` | Number of DSF rows/columns to prefetch ahead (1-5) |
 | `window_buffer` | integer | `1` | Extra DSF tiles around window edges to retain (0-3) |
 | `stale_region_timeout` | integer | `120` | Seconds before an InProgress region is considered stale (30-600) |
-| `default_window_rows` | integer | `6` | Default scenery window height in DSF rows (3-12) |
-| `default_window_cols` | integer | `8` | Default scenery window width in DSF columns (4-16) |
+| `default_window_rows` | integer | `9` | Default scenery window height in DSF rows (3-12) |
+| `default_window_cols` | integer | `9` | Default scenery window width in DSF columns (4-16) |
 
 **Mode Options:**
 
@@ -400,8 +400,8 @@ ramp_start_fraction = 0.25                   ; Starting prefetch fraction (25%)
 ; load_depth = 3                             ; DSF rows/columns to prefetch ahead
 ; window_buffer = 1                          ; Extra DSF tiles around window edges
 ; stale_region_timeout = 120                 ; Seconds before InProgress region is stale
-; default_window_rows = 6                    ; Scenery window height (DSF rows)
-; default_window_cols = 8                    ; Scenery window width (DSF columns)
+; default_window_rows = 9                    ; Scenery window height (DSF rows)
+; default_window_cols = 9                    ; Scenery window width (DSF columns)
 ```
 
 **Transition Ramp:**
