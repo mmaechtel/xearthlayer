@@ -109,7 +109,7 @@ pub struct PhaseDetector {
     takeoff_climb_ft: f32,
 
     /// Maximum time before timeout release if climb threshold not reached.
-    takeoff_timeout: Duration,
+    pub(crate) takeoff_timeout: Duration,
 
     /// Sustained duration at ground conditions before Cruise→Ground transition.
     landing_hysteresis: Duration,

@@ -160,6 +160,15 @@ pub struct AdaptivePrefetchCoordinator {
     /// are actually installed in each DSF region, rather than hardcoding
     /// a single zoom level. Also forwarded to [`GroundStrategy`].
     scenery_index: Option<Arc<SceneryIndex>>,
+
+    /// Tiles that could not be submitted due to channel backpressure.
+    ///
+    /// When [`execute()`] encounters `ChannelFull`, remaining tiles are stored
+    /// here and drained on subsequent [`process_telemetry()`] cycles before
+    /// generating any new boundary plan. This prevents the "fire-and-forget"
+    /// bug where large boundary plans are partially submitted and the remainder
+    /// is permanently lost.
+    pub(super) pending_tiles: Vec<TileCoord>,
 }
 
 impl std::fmt::Debug for AdaptivePrefetchCoordinator {
@@ -219,6 +228,7 @@ impl AdaptivePrefetchCoordinator {
             boundary_strategy,
             scene_tracker: None,
             scenery_index: None,
+            pending_tiles: Vec::new(),
         }
     }
 
@@ -592,17 +602,22 @@ impl AdaptivePrefetchCoordinator {
         };
 
         let mut submitted = 0;
-        for tile in plan.tiles.iter().take(max_tiles) {
+        let tiles_to_submit: Vec<TileCoord> = plan.tiles.iter().take(max_tiles).copied().collect();
+        for (idx, tile) in tiles_to_submit.iter().enumerate() {
             let request =
                 crate::runtime::JobRequest::prefetch_with_cancellation(*tile, cancellation.clone());
             match client.submit(request) {
                 Ok(()) => submitted += 1,
                 Err(crate::executor::DdsClientError::ChannelFull) => {
+                    // Store remaining tiles for the next cycle
+                    let remaining: Vec<TileCoord> = tiles_to_submit[idx..].to_vec();
                     tracing::debug!(
                         submitted,
-                        dropped = max_tiles - submitted,
-                        "Channel full — stopping prefetch submission"
+                        remaining = remaining.len(),
+                        "Channel full — storing {} tiles for next cycle",
+                        remaining.len()
                     );
+                    self.pending_tiles = remaining;
                     break;
                 }
                 Err(crate::executor::DdsClientError::ChannelClosed) => {
@@ -737,6 +752,48 @@ impl AdaptivePrefetchCoordinator {
         // Always update shared status with current position to show TUI we're receiving telemetry
         // This fixes the bug where prefetch status stayed "Idle" when no plan was generated
         self.update_shared_status_position(position);
+
+        // Drain pending tiles from a previous partial submission before generating
+        // a new plan. This prevents the "fire-and-forget" bug where large boundary
+        // plans lose tiles when the channel is full.
+        if !self.pending_tiles.is_empty() {
+            let pending = std::mem::take(&mut self.pending_tiles);
+            let pending_count = pending.len();
+
+            // Still need to update phase detector for correct state tracking
+            self.phase_detector.update(state.ground_speed, msl_ft);
+
+            let calibration = self
+                .calibration
+                .clone()
+                .unwrap_or_else(PerformanceCalibration::default_opportunistic);
+            let plan = PrefetchPlan::with_tiles(
+                pending,
+                &calibration,
+                "boundary_pending",
+                0,
+                pending_count,
+            );
+
+            let cancellation = CancellationToken::new();
+            let submitted = self.execute(&plan, cancellation);
+
+            if submitted > 0 {
+                self.mark_cached(plan.tiles.iter().take(submitted).cloned());
+            }
+
+            self.total_cycles += 1;
+            self.total_tiles_submitted += submitted as u64;
+
+            tracing::debug!(
+                submitted,
+                remaining = self.pending_tiles.len(),
+                "Drained pending tiles from previous cycle"
+            );
+
+            self.run_region_maintenance();
+            return Some(submitted);
+        }
 
         let mut plan = match self.update(position, track, state.ground_speed, msl_ft) {
             Some(p) => p,
@@ -2184,6 +2241,216 @@ mod tests {
         assert!(
             state.unwrap().is_prefetched(),
             "Region should be promoted to Prefetched when all tiles are cached"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pending tiles carry-over tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Mock DdsClient that accepts N submissions, then returns ChannelFull.
+    struct CapLimitedDdsClient {
+        limit: usize,
+        submitted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CapLimitedDdsClient {
+        fn new(limit: usize) -> Self {
+            Self {
+                limit,
+                submitted: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        /// Reset the counter to allow another batch of submissions.
+        fn reset(&self) {
+            self.submitted.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl DdsClient for CapLimitedDdsClient {
+        fn submit(
+            &self,
+            _request: crate::runtime::JobRequest,
+        ) -> Result<(), crate::executor::DdsClientError> {
+            let prev = self
+                .submitted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if prev >= self.limit {
+                // Undo the increment since we're rejecting
+                self.submitted
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Err(crate::executor::DdsClientError::ChannelFull)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn request_dds(
+            &self,
+            _tile: TileCoord,
+            _cancel: CancellationToken,
+        ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
+            let (_, rx) = tokio::sync::oneshot::channel();
+            rx
+        }
+
+        fn request_dds_with_options(
+            &self,
+            _tile: TileCoord,
+            _priority: crate::executor::Priority,
+            _origin: crate::runtime::RequestOrigin,
+            _cancel: CancellationToken,
+        ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
+            let (_, rx) = tokio::sync::oneshot::channel();
+            rx
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pending_tiles_retained_on_channel_full() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        // Cap at 5 submissions per cycle — way less than a boundary plan generates
+        let client = Arc::new(CapLimitedDdsClient::new(5));
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            trigger_distance: 1.0,
+            load_depth: 1,
+            default_window_rows: 6,
+            default_window_cols: 6,
+            // Zero ramp so transition throttle doesn't reduce tile count
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index))
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        // Fast-forward phase detector into cruise using a CENTER position
+        // far from all boundaries. Window rows=6, so half_rows=3.
+        // Monitor at (50.0, 10.0): lat(47,53), lon(7,13). trigger=1.0.
+        // At center (50.0, 10.0), distance to nearest edge = 3.0 > trigger=1.0.
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+
+        assert_eq!(
+            coord.phase_detector.current_phase(),
+            FlightPhase::Cruise,
+            "Phase detector should be in Cruise after fast-forward"
+        );
+
+        // Now move aircraft near northern boundary.
+        // Monitor: lat(47, 53). trigger_distance=1.0.
+        // Aircraft at lat=52.5 → distance to north edge = 53.0 - 52.5 = 0.5 < 1.0 → triggers!
+        let state = AircraftState::new(52.5, 10.0, 0.0, 200.0, 35000.0);
+
+        // First cycle: boundary plan generated, only 5 submitted (ChannelFull)
+        let result = coord.process_telemetry(&state).await;
+        let first_submitted = result.unwrap_or(0);
+        assert!(
+            first_submitted > 0,
+            "First cycle should submit tiles from boundary plan"
+        );
+        assert!(
+            first_submitted <= 5,
+            "First cycle should be capped at 5 by ChannelFull"
+        );
+
+        // KEY ASSERTION: pending tiles should be non-empty (if plan had more than 5)
+        // If the plan was small enough to fit in 5, skip the pending assertion
+        if first_submitted == 5 {
+            assert!(
+                !coord.pending_tiles.is_empty(),
+                "Unsubmitted tiles should be stored in pending_tiles for the next cycle"
+            );
+            let pending_after_first = coord.pending_tiles.len();
+
+            // Reset the mock client for the next cycle
+            client.reset();
+
+            // Second cycle: should drain from pending_tiles, NOT generate a new boundary plan
+            let result2 = coord.process_telemetry(&state).await;
+            let second_submitted = result2.unwrap_or(0);
+            assert!(
+                second_submitted > 0,
+                "Second cycle should submit tiles from pending queue"
+            );
+            assert!(
+                coord.pending_tiles.len() < pending_after_first,
+                "Pending tiles should decrease after second cycle (was {}, now {})",
+                pending_after_first,
+                coord.pending_tiles.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pending_tiles_fully_drained_before_new_plan() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        // Allow 1000 submissions — enough to drain everything
+        let client = Arc::new(CapLimitedDdsClient::new(1000));
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            trigger_distance: 3.0,
+            load_depth: 1,
+            // Zero ramp so transition throttle doesn't reduce tile count
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index))
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        // Fast-forward to cruise
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+        coord.update((53.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((53.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((53.0, 10.0), 0.0, 200.0, 35000.0);
+
+        // Manually inject pending tiles (simulating a previous partial submission)
+        let fake_pending: Vec<TileCoord> = (0..20)
+            .map(|i| TileCoord {
+                row: 1000 + i,
+                col: 2000,
+                zoom: 14,
+            })
+            .collect();
+        coord.pending_tiles = fake_pending;
+
+        let state = AircraftState::new(55.5, 10.0, 0.0, 200.0, 35000.0);
+
+        // Cycle with pending tiles: should drain pending first, NOT generate new plan
+        let result = coord.process_telemetry(&state).await;
+        let submitted = result.unwrap_or(0);
+        assert_eq!(
+            submitted, 20,
+            "Should submit all 20 pending tiles when channel has capacity"
+        );
+        assert!(
+            coord.pending_tiles.is_empty(),
+            "Pending tiles should be empty after full drain"
         );
     }
 }
