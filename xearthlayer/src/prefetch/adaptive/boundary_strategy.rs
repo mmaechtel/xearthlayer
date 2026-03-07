@@ -10,11 +10,13 @@
 //! - [`BoundaryStrategy::promote_completed_regions`] — promotes `InProgress`
 //!   regions to `Prefetched` once all their tiles are confirmed in cache.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::boundary_monitor::{BoundaryAxis, BoundaryCrossing};
 use crate::coord::{to_tile_coords, TileCoord};
-use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion};
+use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion, RetainedRegion};
+use crate::prefetch::tile_based::DsfTileCoord;
 use crate::prefetch::SceneryIndex;
 
 /// A DSF region targeted for prefetch, with ordering metadata.
@@ -219,6 +221,74 @@ impl BoundaryStrategy {
             }
         }
         strategy.expand_to_tiles(region, 14)
+    }
+
+    /// Evict `PrefetchedRegion` entries for regions no longer in the retained window.
+    ///
+    /// Removes `Prefetched` and `NoCoverage` entries whose DSF region is not
+    /// present in the `RetainedRegion` layer. `InProgress` entries are preserved
+    /// because they represent actively running prefetch jobs.
+    ///
+    /// Returns 0 (no-op) when the `RetainedRegion` layer is empty, indicating
+    /// retention tracking is not yet active.
+    pub fn evict_non_retained(geo_index: &GeoIndex) -> usize {
+        let retained = geo_index.regions::<RetainedRegion>();
+        if retained.is_empty() {
+            return 0; // Retention not active yet
+        }
+
+        let retained_set: std::collections::HashSet<DsfRegion> = retained.into_iter().collect();
+
+        let to_evict: Vec<DsfRegion> = geo_index
+            .iter::<PrefetchedRegion>()
+            .into_iter()
+            .filter(|(dsf, region)| !region.is_in_progress() && !retained_set.contains(dsf))
+            .map(|(dsf, _)| dsf)
+            .collect();
+
+        let evicted = to_evict.len();
+        for region in &to_evict {
+            geo_index.remove::<PrefetchedRegion>(region);
+        }
+
+        if evicted > 0 {
+            tracing::debug!(evicted, "Evicted non-retained PrefetchedRegion entries");
+        }
+        evicted
+    }
+
+    /// Remove entries from `cached_tiles` whose DSF region is not in the retained window.
+    ///
+    /// Returns 0 (no-op) when the `RetainedRegion` layer is empty, indicating
+    /// retention tracking is not yet active. This prevents stale `cached_tiles`
+    /// entries from blocking re-prefetch of regions the aircraft has moved past.
+    pub fn evict_cached_tiles_outside_retained(
+        cached_tiles: &mut HashSet<TileCoord>,
+        geo_index: &GeoIndex,
+    ) -> usize {
+        let retained = geo_index.regions::<RetainedRegion>();
+        if retained.is_empty() {
+            return 0;
+        }
+
+        let retained_set: std::collections::HashSet<DsfRegion> = retained.into_iter().collect();
+
+        let before = cached_tiles.len();
+        cached_tiles.retain(|tile| {
+            let (lat, lon) = tile.to_lat_lon();
+            let dsf = DsfTileCoord::from_lat_lon(lat, lon);
+            retained_set.contains(&DsfRegion::new(dsf.lat, dsf.lon))
+        });
+        let evicted = before - cached_tiles.len();
+
+        if evicted > 0 {
+            tracing::debug!(
+                evicted,
+                remaining = cached_tiles.len(),
+                "Evicted cached_tiles outside retained window"
+            );
+        }
+        evicted
     }
 
     /// Expand target regions into DDS tiles, marking each region as InProgress.
@@ -774,5 +844,112 @@ mod tests {
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
         assert!(state.is_in_progress());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // evict_non_retained tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_evict_non_retained_removes_prefetched_outside_retained() {
+        let geo_index = GeoIndex::new();
+
+        // Retained window covers (50,7) and (51,7)
+        geo_index.insert::<RetainedRegion>(DsfRegion::new(50, 7), RetainedRegion);
+        geo_index.insert::<RetainedRegion>(DsfRegion::new(51, 7), RetainedRegion);
+
+        // Prefetched entries: two inside, two outside
+        geo_index.insert::<PrefetchedRegion>(DsfRegion::new(50, 7), PrefetchedRegion::prefetched());
+        geo_index.insert::<PrefetchedRegion>(DsfRegion::new(51, 7), PrefetchedRegion::prefetched());
+        geo_index.insert::<PrefetchedRegion>(DsfRegion::new(48, 7), PrefetchedRegion::prefetched());
+        geo_index
+            .insert::<PrefetchedRegion>(DsfRegion::new(52, 5), PrefetchedRegion::no_coverage());
+
+        let evicted = BoundaryStrategy::evict_non_retained(&geo_index);
+
+        assert_eq!(evicted, 2);
+        assert!(geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(50, 7)));
+        assert!(geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(51, 7)));
+        assert!(!geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(48, 7)));
+        assert!(!geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(52, 5)));
+    }
+
+    #[test]
+    fn test_evict_non_retained_preserves_in_progress() {
+        let geo_index = GeoIndex::new();
+
+        // Retained window only covers (52, 7) — both (50,7) and (51,7) are outside
+        geo_index.insert::<RetainedRegion>(DsfRegion::new(52, 7), RetainedRegion);
+
+        // InProgress at (50,7) is outside retained, but should be preserved
+        geo_index
+            .insert::<PrefetchedRegion>(DsfRegion::new(50, 7), PrefetchedRegion::in_progress());
+        // Prefetched at (51,7) is outside retained, should be evicted
+        geo_index.insert::<PrefetchedRegion>(DsfRegion::new(51, 7), PrefetchedRegion::prefetched());
+
+        let evicted = BoundaryStrategy::evict_non_retained(&geo_index);
+
+        assert_eq!(evicted, 1); // Only Prefetched, not InProgress
+        assert!(geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(50, 7)));
+        assert!(!geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(51, 7)));
+    }
+
+    #[test]
+    fn test_evict_cached_tiles_removes_tiles_outside_retained() {
+        use crate::coord::to_tile_coords;
+
+        let geo_index = GeoIndex::new();
+        geo_index.insert::<RetainedRegion>(DsfRegion::new(50, 7), RetainedRegion);
+
+        let mut cached_tiles = std::collections::HashSet::new();
+
+        // Tile inside retained region (50, 7)
+        let tile_inside = to_tile_coords(50.5, 7.5, 14).unwrap();
+        cached_tiles.insert(tile_inside);
+
+        // Tile outside retained region (48, 5)
+        let tile_outside = to_tile_coords(48.5, 5.5, 14).unwrap();
+        cached_tiles.insert(tile_outside);
+
+        let evicted =
+            BoundaryStrategy::evict_cached_tiles_outside_retained(&mut cached_tiles, &geo_index);
+
+        assert_eq!(evicted, 1);
+        assert!(cached_tiles.contains(&tile_inside));
+        assert!(!cached_tiles.contains(&tile_outside));
+    }
+
+    #[test]
+    fn test_evict_cached_tiles_noop_when_no_retained_regions() {
+        use crate::coord::to_tile_coords;
+
+        let geo_index = GeoIndex::new();
+        let mut cached_tiles = std::collections::HashSet::new();
+
+        let tile = to_tile_coords(50.5, 7.5, 14).unwrap();
+        cached_tiles.insert(tile);
+
+        let evicted =
+            BoundaryStrategy::evict_cached_tiles_outside_retained(&mut cached_tiles, &geo_index);
+
+        assert_eq!(evicted, 0);
+        assert!(cached_tiles.contains(&tile));
+    }
+
+    #[test]
+    fn test_evict_non_retained_noop_when_no_retained_regions() {
+        let geo_index = GeoIndex::new();
+
+        // RetainedRegion layer is empty — retention not yet active
+        geo_index.insert::<PrefetchedRegion>(DsfRegion::new(50, 7), PrefetchedRegion::prefetched());
+        geo_index.insert::<PrefetchedRegion>(DsfRegion::new(51, 7), PrefetchedRegion::prefetched());
+
+        let evicted = BoundaryStrategy::evict_non_retained(&geo_index);
+
+        // Should not evict anything — retention not active means we can't determine
+        // what's outside the window
+        assert_eq!(evicted, 0);
+        assert!(geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(50, 7)));
+        assert!(geo_index.contains::<PrefetchedRegion>(&DsfRegion::new(51, 7)));
     }
 }

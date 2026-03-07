@@ -469,8 +469,13 @@ impl AdaptivePrefetchCoordinator {
                     self.scenery_window.update_from_tracker(tracker.as_ref());
                 }
 
-                // Check boundary crossings
+                // Update retained region tracking (drives eviction of stale state)
                 let (lat, lon) = position;
+                if let Some(ref geo_index) = self.geo_index {
+                    self.scenery_window.update_retention(lat, lon, geo_index);
+                }
+
+                // Check boundary crossings
                 let crossings = self.scenery_window.check_boundaries(lat, lon);
 
                 if crossings.is_empty() {
@@ -983,17 +988,27 @@ impl AdaptivePrefetchCoordinator {
         Some(submitted)
     }
 
-    /// Sweep stale InProgress regions and promote completed ones to Prefetched.
+    /// Sweep stale InProgress regions, promote completed ones, and evict
+    /// state for regions that have left the retained window.
     ///
     /// This must run every cycle regardless of whether a prefetch plan was generated,
     /// otherwise InProgress regions block future boundary cycles indefinitely.
-    pub fn run_region_maintenance(&self) {
+    pub fn run_region_maintenance(&mut self) {
         if let Some(ref geo_index) = self.geo_index {
             BoundaryStrategy::sweep_stale_regions(geo_index, self.config.stale_region_timeout);
             BoundaryStrategy::promote_completed_regions(
                 geo_index,
                 &self.cached_tiles,
                 self.scenery_index.as_ref(),
+            );
+            // Evict PrefetchedRegion entries for regions outside the retained window,
+            // making them eligible for re-prefetch when the aircraft returns.
+            BoundaryStrategy::evict_non_retained(geo_index);
+            // Evict cached_tiles entries for tiles outside the retained window,
+            // allowing re-query of the memory cache for those tiles.
+            BoundaryStrategy::evict_cached_tiles_outside_retained(
+                &mut self.cached_tiles,
+                geo_index,
             );
         }
     }
