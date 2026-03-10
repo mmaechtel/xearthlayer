@@ -495,6 +495,27 @@ impl AdaptivePrefetchCoordinator {
                 let mut all_tiles = Vec::new();
 
                 if let Some((lat_min, lat_max, lon_min, lon_max)) = bounds {
+                    // Log each detected crossing with full context
+                    for crossing in &crossings {
+                        let dir_label = match (crossing.axis, crossing.direction) {
+                            (BoundaryAxis::Latitude, 1) => "N",
+                            (BoundaryAxis::Latitude, _) => "S",
+                            (BoundaryAxis::Longitude, 1) => "E",
+                            (BoundaryAxis::Longitude, _) => "W",
+                        };
+                        tracing::debug!(
+                            axis = ?crossing.axis,
+                            direction = dir_label,
+                            dsf_coord = crossing.dsf_coord,
+                            depth = crossing.depth,
+                            urgency = format!("{:.2}", crossing.urgency),
+                            aircraft = format!("{:.4}°, {:.4}°", lat, lon),
+                            window = format!("[{:.1}:{:.1}N, {:.1}:{:.1}E]",
+                                lat_min, lat_max, lon_min, lon_max),
+                            "Boundary crossing detected"
+                        );
+                    }
+
                     for crossing in &crossings {
                         let cross_range = match crossing.axis {
                             BoundaryAxis::Latitude => {
@@ -516,9 +537,23 @@ impl AdaptivePrefetchCoordinator {
                                 if tiles.is_empty() {
                                     self.boundary_strategy
                                         .mark_no_coverage(&target.region, geo_index);
+                                    tracing::debug!(
+                                        region_lat = target.region.lat,
+                                        region_lon = target.region.lon,
+                                        depth_index = target.depth_index,
+                                        "Prefetch target: no coverage"
+                                    );
                                 } else {
                                     self.boundary_strategy
                                         .mark_in_progress(&target.region, geo_index);
+                                    tracing::debug!(
+                                        region_lat = target.region.lat,
+                                        region_lon = target.region.lon,
+                                        depth_index = target.depth_index,
+                                        tiles = tiles.len(),
+                                        axis = ?target.axis,
+                                        "Prefetch target: region queued"
+                                    );
                                     all_tiles.extend(tiles);
                                 }
                             }
