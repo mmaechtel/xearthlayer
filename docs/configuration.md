@@ -624,7 +624,8 @@ disk_size = 50GB
 
 [texture]
 format = bc1
-mipmaps = 5
+; compressor = ispc       ; software, ispc (default), or gpu (requires --features gpu-encode)
+; gpu_device = integrated  ; integrated, discrete, or adapter name substring
 
 [download]
 timeout = 30
@@ -812,6 +813,8 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `cache.disk_size` | size (e.g., `20GB`) | Disk cache size |
 | `cache.disk_io_profile` | `auto`, `hdd`, `ssd`, `nvme` | Disk I/O concurrency profile |
 | `texture.format` | `bc1`, `bc3` | DDS compression format |
+| `texture.compressor` | `software`, `ispc`, `gpu` | Compression backend (`gpu` requires `gpu-encode` feature) |
+| `texture.gpu_device` | `integrated`, `discrete`, or name | GPU adapter selection (used when compressor = gpu) |
 | `download.timeout` | positive integer | Chunk download timeout (seconds) |
 | `generation.threads` | positive integer | Worker threads |
 | `generation.timeout` | positive integer | Tile generation timeout (seconds) |
