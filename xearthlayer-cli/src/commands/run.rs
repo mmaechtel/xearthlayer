@@ -145,7 +145,10 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     let parallel_downloads = args.parallel.unwrap_or(32);
 
     // Build configurations
-    let texture_config = TextureConfig::new(format).with_mipmap_count(5);
+    let texture_config = TextureConfig::new(format)
+        .with_mipmap_count(5)
+        .with_compressor(config.texture.compressor.clone())
+        .with_gpu_device(config.texture.gpu_device.clone());
     let dds_format = texture_config.format();
 
     let download_config = DownloadConfig::new()

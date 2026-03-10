@@ -15,6 +15,7 @@
 
 use super::types::{DdsError, DdsFormat};
 use image::RgbaImage;
+use std::sync::Arc;
 
 // =============================================================================
 // Trait
@@ -170,8 +171,8 @@ fn extract_block(image: &RgbaImage, block_x: u32, block_y: u32) -> [[u8; 4]; 16]
 /// Returns the ISPC compressor, which uses SIMD-optimized encoding.
 /// In the future, this may auto-detect GPU availability and return
 /// a wgpu-based compressor when a suitable GPU is present.
-pub fn default_compressor() -> Box<dyn BlockCompressor> {
-    Box::new(IspcCompressor)
+pub fn default_compressor() -> Arc<dyn BlockCompressor> {
+    Arc::new(IspcCompressor)
 }
 
 // =============================================================================

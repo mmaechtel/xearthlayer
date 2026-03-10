@@ -9,13 +9,14 @@ use crate::dds::compressor::{default_compressor, BlockCompressor};
 use crate::dds::mipmap::MipmapGenerator;
 use crate::dds::types::{DdsError, DdsFormat, DdsHeader};
 use image::RgbaImage;
+use std::sync::Arc;
 
 /// DDS encoder configuration.
 pub struct DdsEncoder {
     format: DdsFormat,
     generate_mipmaps: bool,
     mipmap_count: Option<usize>,
-    compressor: Box<dyn BlockCompressor>,
+    compressor: Arc<dyn BlockCompressor>,
 }
 
 impl DdsEncoder {
@@ -38,11 +39,12 @@ impl DdsEncoder {
     ///
     /// ```ignore
     /// use xearthlayer::dds::{DdsEncoder, DdsFormat, SoftwareCompressor};
+    /// use std::sync::Arc;
     ///
     /// let encoder = DdsEncoder::new(DdsFormat::BC1)
-    ///     .with_compressor(Box::new(SoftwareCompressor));
+    ///     .with_compressor(Arc::new(SoftwareCompressor));
     /// ```
-    pub fn with_compressor(mut self, compressor: Box<dyn BlockCompressor>) -> Self {
+    pub fn with_compressor(mut self, compressor: Arc<dyn BlockCompressor>) -> Self {
         self.compressor = compressor;
         self
     }
@@ -249,11 +251,12 @@ mod tests {
     #[test]
     fn test_compress_with_software_compressor() {
         use crate::dds::SoftwareCompressor;
+        use std::sync::Arc;
 
         let image = RgbaImage::new(256, 256);
         let encoder = DdsEncoder::new(DdsFormat::BC1)
             .without_mipmaps()
-            .with_compressor(Box::new(SoftwareCompressor));
+            .with_compressor(Arc::new(SoftwareCompressor));
 
         let result = encoder.encode(&image);
         assert!(result.is_ok());
@@ -266,11 +269,12 @@ mod tests {
     #[test]
     fn test_compress_with_ispc_compressor() {
         use crate::dds::IspcCompressor;
+        use std::sync::Arc;
 
         let image = RgbaImage::new(256, 256);
         let encoder = DdsEncoder::new(DdsFormat::BC1)
             .without_mipmaps()
-            .with_compressor(Box::new(IspcCompressor));
+            .with_compressor(Arc::new(IspcCompressor));
 
         let result = encoder.encode(&image);
         assert!(result.is_ok());
