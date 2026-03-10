@@ -146,6 +146,7 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
 
     // Build configurations
     let texture_config = TextureConfig::new(format).with_mipmap_count(5);
+    let dds_format = texture_config.format();
 
     let download_config = DownloadConfig::new()
         .with_timeout_secs(timeout_secs)
@@ -175,7 +176,7 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         println!();
         println!("Packages:       {}", install_location.display());
         println!("Custom Scenery: {}", custom_scenery_path.display());
-        println!("DDS Format:     {:?}", texture_config.format());
+        println!("DDS Format:     {:?}", dds_format);
         println!("Provider:       {}", provider_config.name());
         println!("FUSE Backend:   fuse3 (async multi-threaded)");
         println!();

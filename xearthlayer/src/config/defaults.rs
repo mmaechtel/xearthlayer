@@ -265,6 +265,12 @@ pub const DEFAULT_CONTROL_PLANE_JOB_SCALING_FACTOR: usize = 2;
 /// Default mipmap count (5 levels: 4096 → 2048 → 1024 → 512 → 256).
 pub const DEFAULT_MIPMAP_COUNT: usize = 5;
 
+/// Default texture compressor backend: ISPC SIMD.
+pub const DEFAULT_COMPRESSOR: &str = "ispc";
+
+/// Default GPU device selector: prefer integrated GPU.
+pub const DEFAULT_GPU_DEVICE: &str = "integrated";
+
 // =============================================================================
 // Executor defaults
 // =============================================================================
@@ -325,6 +331,8 @@ impl Default for ConfigFile {
             },
             texture: TextureSettings {
                 format: DdsFormat::BC1,
+                compressor: DEFAULT_COMPRESSOR.to_string(),
+                gpu_device: DEFAULT_GPU_DEVICE.to_string(),
             },
             download: DownloadSettings {
                 timeout: DEFAULT_DOWNLOAD_TIMEOUT_SECS,

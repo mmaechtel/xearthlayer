@@ -73,6 +73,10 @@ pub struct CacheSettings {
 pub struct TextureSettings {
     /// DDS format: BC1 or BC3
     pub format: DdsFormat,
+    /// Compressor backend: "software", "ispc", or "gpu"
+    pub compressor: String,
+    /// GPU device selector: "integrated", "discrete", or adapter name substring
+    pub gpu_device: String,
 }
 
 /// Download configuration.

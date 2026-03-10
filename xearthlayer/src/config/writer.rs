@@ -83,6 +83,11 @@ disk_io_profile = {}
 ; DDS compression format: bc1 (smaller, opaque) or bc3 (larger, with alpha)
 ; bc1 recommended for satellite imagery
 format = {}
+; Texture compressor backend: software, ispc (SIMD), or gpu (wgpu)
+; ispc is recommended for best CPU performance
+compressor = {}
+; GPU device selector for gpu compressor: integrated, discrete, or adapter name substring
+gpu_device = {}
 
 [download]
 ; Timeout in seconds for HTTP requests (default: 30)
@@ -303,6 +308,8 @@ congestion_threshold = {}
         format_size(config.cache.disk_size),
         config.cache.disk_io_profile.as_str(),
         config.texture.format.to_string().to_lowercase(),
+        config.texture.compressor,
+        config.texture.gpu_device,
         config.download.timeout,
         config.generation.threads,
         config.generation.timeout,

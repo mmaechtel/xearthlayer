@@ -42,6 +42,8 @@ pub enum ConfigKey {
 
     // Texture settings
     TextureFormat,
+    TextureCompressor,
+    TextureGpuDevice,
 
     // Download settings
     DownloadTimeout,
@@ -156,6 +158,8 @@ impl FromStr for ConfigKey {
             "cache.disk_io_profile" => Ok(ConfigKey::CacheDiskIoProfile),
 
             "texture.format" => Ok(ConfigKey::TextureFormat),
+            "texture.compressor" => Ok(ConfigKey::TextureCompressor),
+            "texture.gpu_device" => Ok(ConfigKey::TextureGpuDevice),
 
             "download.timeout" => Ok(ConfigKey::DownloadTimeout),
 
@@ -269,6 +273,8 @@ impl ConfigKey {
             ConfigKey::CacheDiskSize => "cache.disk_size",
             ConfigKey::CacheDiskIoProfile => "cache.disk_io_profile",
             ConfigKey::TextureFormat => "texture.format",
+            ConfigKey::TextureCompressor => "texture.compressor",
+            ConfigKey::TextureGpuDevice => "texture.gpu_device",
             ConfigKey::DownloadTimeout => "download.timeout",
             ConfigKey::GenerationThreads => "generation.threads",
             ConfigKey::GenerationTimeout => "generation.timeout",
@@ -382,6 +388,8 @@ impl ConfigKey {
             ConfigKey::CacheDiskSize => format_size(config.cache.disk_size),
             ConfigKey::CacheDiskIoProfile => config.cache.disk_io_profile.as_str().to_string(),
             ConfigKey::TextureFormat => config.texture.format.to_string().to_lowercase(),
+            ConfigKey::TextureCompressor => config.texture.compressor.clone(),
+            ConfigKey::TextureGpuDevice => config.texture.gpu_device.clone(),
             ConfigKey::DownloadTimeout => config.download.timeout.to_string(),
             ConfigKey::GenerationThreads => config.generation.threads.to_string(),
             ConfigKey::GenerationTimeout => config.generation.timeout.to_string(),
@@ -572,6 +580,12 @@ impl ConfigKey {
                     "bc3" => DdsFormat::BC3,
                     _ => DdsFormat::BC1, // Validation prevents this
                 };
+            }
+            ConfigKey::TextureCompressor => {
+                config.texture.compressor = value.to_lowercase();
+            }
+            ConfigKey::TextureGpuDevice => {
+                config.texture.gpu_device = value.to_string();
             }
             ConfigKey::DownloadTimeout => {
                 config.download.timeout = value.parse().unwrap();
@@ -811,6 +825,10 @@ impl ConfigKey {
                 Box::new(OneOfSpec::new(&["auto", "hdd", "ssd", "nvme"]))
             }
             ConfigKey::TextureFormat => Box::new(OneOfSpec::new(&["bc1", "bc3"])),
+            ConfigKey::TextureCompressor => {
+                Box::new(OneOfSpec::new(&["software", "ispc", "gpu"]))
+            }
+            ConfigKey::TextureGpuDevice => Box::new(NonEmptyStringSpec),
             ConfigKey::DownloadTimeout => Box::new(PositiveIntegerSpec),
             ConfigKey::GenerationThreads => Box::new(PositiveIntegerSpec),
             ConfigKey::GenerationTimeout => Box::new(PositiveIntegerSpec),
@@ -911,6 +929,8 @@ impl ConfigKey {
             ConfigKey::CacheDiskSize,
             ConfigKey::CacheDiskIoProfile,
             ConfigKey::TextureFormat,
+            ConfigKey::TextureCompressor,
+            ConfigKey::TextureGpuDevice,
             ConfigKey::DownloadTimeout,
             ConfigKey::GenerationThreads,
             ConfigKey::GenerationTimeout,
@@ -996,6 +1016,19 @@ struct AnyStringSpec;
 impl ValueSpecification for AnyStringSpec {
     fn is_satisfied_by(&self, _value: &str) -> Result<(), String> {
         Ok(())
+    }
+}
+
+/// Specification that requires a non-empty string value.
+struct NonEmptyStringSpec;
+
+impl ValueSpecification for NonEmptyStringSpec {
+    fn is_satisfied_by(&self, value: &str) -> Result<(), String> {
+        if value.trim().is_empty() {
+            Err("must be a non-empty string".to_string())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1531,5 +1564,37 @@ mod tests {
         assert!(key.validate("0.5").is_ok());
         assert!(key.validate("0.05").is_err());
         assert!(key.validate("0.6").is_err());
+    }
+
+    #[test]
+    fn test_texture_compressor_key_parse() {
+        let key: ConfigKey = "texture.compressor".parse().unwrap();
+        assert_eq!(key, ConfigKey::TextureCompressor);
+        assert_eq!(key.name(), "texture.compressor");
+    }
+
+    #[test]
+    fn test_texture_gpu_device_key_parse() {
+        let key: ConfigKey = "texture.gpu_device".parse().unwrap();
+        assert_eq!(key, ConfigKey::TextureGpuDevice);
+        assert_eq!(key.name(), "texture.gpu_device");
+    }
+
+    #[test]
+    fn test_texture_compressor_validation() {
+        let key = ConfigKey::TextureCompressor;
+        assert!(key.validate("software").is_ok());
+        assert!(key.validate("ispc").is_ok());
+        assert!(key.validate("gpu").is_ok());
+        assert!(key.validate("invalid").is_err());
+    }
+
+    #[test]
+    fn test_texture_gpu_device_validation() {
+        let key = ConfigKey::TextureGpuDevice;
+        assert!(key.validate("integrated").is_ok());
+        assert!(key.validate("discrete").is_ok());
+        assert!(key.validate("Radeon").is_ok());
+        assert!(key.validate("RTX 5090").is_ok());
     }
 }
