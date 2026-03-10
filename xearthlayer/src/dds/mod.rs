@@ -73,6 +73,8 @@ mod types;
 
 // Public API
 pub use compressor::{default_compressor, BlockCompressor, IspcCompressor, SoftwareCompressor};
+#[cfg(feature = "gpu-encode")]
+pub use compressor::{create_wgpu_compressor, WgpuCompressor};
 pub use encoder::DdsEncoder;
 pub use types::{DdsError, DdsFormat, DdsHeader};
 
