@@ -52,7 +52,7 @@
 //! A [`BlockCompressor`] trait allows swapping backends:
 //! - [`IspcCompressor`] — SIMD-optimized (default, recommended)
 //! - [`SoftwareCompressor`] — Pure-Rust fallback
-//! - GPU compressor via `wgpu` (planned)
+//! - [`GpuEncoderChannel`] — GPU compute via `wgpu` (`gpu-encode` feature)
 //!
 //! # Compatibility
 //!

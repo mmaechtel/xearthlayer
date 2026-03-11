@@ -48,8 +48,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - `BlockCompressor` trait for swappable backends:
      - `SoftwareCompressor` — Pure-Rust fallback
      - `IspcCompressor` — SIMD-optimized via Intel ISPC (default)
-     - `WgpuCompressor` — GPU compute shaders (optional `gpu-encode` feature)
-   - `block_compression` crate for GPU encoding (ISPC kernels ported to WGSL)
+     - `GpuEncoderChannel` — Channel-based GPU encoding (optional `gpu-encode` feature)
+   - GPU encoding architecture: `mpsc` channel → dedicated worker task → `WgpuCompressor`
+   - `WgpuCompressor` wraps `block_compression` crate (ISPC kernels ported to WGSL compute shaders)
+   - Channel eliminates Mutex contention; worker can be evolved to batch multiple tiles per GPU pass
 
 5. **Cache System** (`xearthlayer/src/cache/`, `xearthlayer/src/service/cache_layer.rs`)
    - `CacheLayer` - Service-owned cache lifecycle (encapsulates memory + disk)
