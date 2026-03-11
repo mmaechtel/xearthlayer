@@ -365,4 +365,60 @@ mod tests {
             .expect("worker should stop within timeout")
             .expect("worker should not panic");
     }
+
+    // =========================================================================
+    // Task 6: Integration tests with full GPU pipeline
+    // =========================================================================
+
+    /// End-to-end: submit a 4096×4096 image through the full GPU channel pipeline.
+    #[tokio::test]
+    #[ignore] // Requires GPU hardware
+    async fn test_full_pipeline_4096x4096() {
+        use crate::dds::create_wgpu_compressor;
+
+        let gpu_compressor =
+            create_wgpu_compressor("integrated").expect("GPU required for this test");
+        let compressor: Arc<dyn BlockCompressor> = Arc::new(gpu_compressor);
+        let (channel, _handle) = create_gpu_encoder_channel(compressor);
+
+        let result = tokio::task::spawn_blocking(move || {
+            let image = RgbaImage::new(4096, 4096);
+            channel.compress(&image, DdsFormat::BC1)
+        })
+        .await
+        .unwrap();
+
+        let data = result.expect("GPU compression should succeed");
+        // BC1: 1024×1024 blocks × 8 bytes = 8388608 bytes
+        assert_eq!(data.len(), 8_388_608);
+    }
+
+    /// Test concurrent submissions through the GPU channel.
+    #[tokio::test]
+    #[ignore] // Requires GPU hardware
+    async fn test_concurrent_gpu_submissions() {
+        use crate::dds::create_wgpu_compressor;
+
+        let gpu_compressor =
+            create_wgpu_compressor("integrated").expect("GPU required for this test");
+        let compressor: Arc<dyn BlockCompressor> = Arc::new(gpu_compressor);
+        let (channel, _handle) = create_gpu_encoder_channel(compressor);
+        let channel = Arc::new(channel);
+
+        let mut handles = vec![];
+        for _ in 0..4 {
+            let ch = Arc::clone(&channel);
+            handles.push(tokio::task::spawn_blocking(move || {
+                let image = RgbaImage::new(256, 256);
+                ch.compress(&image, DdsFormat::BC1)
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            let data = result.expect("concurrent GPU compress should succeed");
+            // 256×256 BC1: 64×64 blocks × 8 = 32768 bytes
+            assert_eq!(data.len(), 32_768);
+        }
+    }
 }
