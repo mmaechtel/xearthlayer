@@ -77,6 +77,8 @@ mod types;
 pub use compressor::{create_wgpu_compressor, WgpuCompressor};
 pub use compressor::{default_compressor, BlockCompressor, IspcCompressor, SoftwareCompressor};
 pub use encoder::DdsEncoder;
+#[cfg(feature = "gpu-encode")]
+pub use gpu_channel::create_gpu_encoder_channel;
 pub use types::{DdsError, DdsFormat, DdsHeader};
 
 // Re-export for advanced usage

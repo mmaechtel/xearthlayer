@@ -127,9 +127,16 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<Arc<DdsTextureEncoder>, 
         #[cfg(feature = "gpu-encode")]
         "gpu" => {
             use crate::dds::create_wgpu_compressor;
+            use crate::dds::gpu_channel::create_gpu_encoder_channel;
+
             let gpu_compressor = create_wgpu_compressor(config.texture().gpu_device())
                 .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {}", e)))?;
-            Arc::new(gpu_compressor)
+
+            let (channel, _worker_handle) =
+                create_gpu_encoder_channel(Arc::new(gpu_compressor) as Arc<dyn BlockCompressor>);
+
+            tracing::info!("GPU encoder channel created with dedicated worker task");
+            Arc::new(channel) as Arc<dyn BlockCompressor>
         }
         #[cfg(not(feature = "gpu-encode"))]
         "gpu" => {
@@ -226,13 +233,33 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "gpu-encode"))]
     fn test_create_encoder_gpu_without_feature_fails() {
         let config = ServiceConfig::builder()
             .texture(TextureConfig::default().with_compressor("gpu".to_string()))
             .build();
-        // Without gpu-encode feature, this should fail
-        #[cfg(not(feature = "gpu-encode"))]
         assert!(create_encoder(&config).is_err());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "gpu-encode")]
+    async fn test_create_encoder_gpu_compiles() {
+        use crate::texture::TextureEncoder;
+
+        // Verify the GPU code path compiles and handles missing GPU gracefully.
+        // On CI without GPU, this returns an error — that's fine.
+        // Needs a Tokio runtime because GpuEncoderChannel spawns a worker task.
+        let config = ServiceConfig::builder()
+            .texture(TextureConfig::default().with_compressor("gpu".to_string()))
+            .build();
+        let result = create_encoder(&config);
+        match result {
+            Ok(encoder) => assert_eq!(encoder.extension(), "dds"),
+            Err(e) => assert!(
+                e.to_string().contains("GPU"),
+                "error should mention GPU, got: {e}"
+            ),
+        }
     }
 
     #[test]
