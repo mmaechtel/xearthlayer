@@ -343,13 +343,31 @@ impl AdaptivePrefetchCoordinator {
             // target 1° DSF region. Without this, the 45nm radius search spills
             // across DSF boundaries, returning tiles from adjacent regions and
             // causing massive tile count explosion (53K+ instead of ~700).
-            let result: Vec<TileCoord> = tiles
+            // Deduplicate: many .ter files share the same base DDS texture,
+            // so multiple SceneryTiles map to the same TileCoord after /16 division.
+            let unique: HashSet<TileCoord> = tiles
                 .iter()
                 .filter(|t| {
                     t.lat.floor() as i32 == region.lat && t.lon.floor() as i32 == region.lon
                 })
                 .map(|t| t.to_tile_coord())
                 .collect();
+
+            tracing::debug!(
+                region_lat = region.lat,
+                region_lon = region.lon,
+                scenery_tiles = tiles.len(),
+                region_filtered = tiles
+                    .iter()
+                    .filter(|t| {
+                        t.lat.floor() as i32 == region.lat && t.lon.floor() as i32 == region.lon
+                    })
+                    .count(),
+                unique_tile_coords = unique.len(),
+                "get_tiles_for_region: deduplication results"
+            );
+
+            let result: Vec<TileCoord> = unique.into_iter().collect();
 
             if !result.is_empty() {
                 return result;
@@ -991,6 +1009,17 @@ impl AdaptivePrefetchCoordinator {
         };
 
         let disk_filtered = patch_skipped + disk_skipped;
+
+        tracing::debug!(
+            raw_plan_tiles =
+                plan.skipped_cached + cache_filtered + disk_filtered + plan.tiles.len(),
+            cache_skipped = plan.skipped_cached + cache_filtered,
+            patch_skipped,
+            disk_skipped,
+            remaining = plan.tiles.len(),
+            strategy = plan.strategy,
+            "Prefetch plan filter pipeline summary"
+        );
 
         let submitted = if plan.is_empty() {
             0
