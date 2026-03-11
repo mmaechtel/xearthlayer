@@ -67,6 +67,7 @@ mod bc3;
 mod compressor;
 mod conversion;
 mod encoder;
+pub mod gpu_channel;
 mod header;
 mod mipmap;
 mod types;
