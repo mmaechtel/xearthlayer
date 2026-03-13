@@ -11,12 +11,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coord::TileCoord;
 use crate::executor::{DaemonMemoryCache, DdsClient};
-use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
+use crate::geo_index::{DsfRegion, GeoIndex};
 use crate::ortho_union::OrthoUnionIndex;
-use crate::prefetch::state::{AircraftState, DetailedPrefetchStats, SharedPrefetchStatus};
-use crate::prefetch::throttler::{PrefetchThrottler, ThrottleState};
-use crate::prefetch::tile_based::DsfTileCoord;
-use crate::prefetch::CircuitState;
+use crate::prefetch::state::{AircraftState, SharedPrefetchStatus};
+use crate::prefetch::throttler::PrefetchThrottler;
 use crate::prefetch::SceneryIndex;
 
 use super::super::boundary_monitor::BoundaryAxis;
@@ -625,146 +623,26 @@ impl AdaptivePrefetchCoordinator {
     ///
     /// Number of tiles submitted. Returns 0 if deferred due to backpressure.
     pub fn execute(&mut self, plan: &PrefetchPlan, cancellation: CancellationToken) -> usize {
-        let _span = tracing::debug_span!(
-            target: "profiling",
-            "prefetch_execute",
-            tile_count = plan.tiles.len(),
-            strategy = plan.strategy,
-        )
-        .entered();
-
         let Some(ref client) = self.dds_client else {
             tracing::warn!("No DDS client configured - cannot execute prefetch");
             return 0;
         };
 
-        // Check executor resource utilization before submitting
-        let load = client.executor_load();
-        if load > BACKPRESSURE_DEFER_THRESHOLD {
+        let result = super::plan_executor::execute_plan(
+            plan,
+            client.as_ref(),
+            &mut self.transition_throttle,
+            cancellation,
+        );
+
+        if result.deferred {
             self.total_deferred_cycles += 1;
-            // TEMPORARILY REVERTED for RED test verification
-            // Store tiles as pending so they're retried when load drops (capped)
-            self.pending_tiles = if plan.tiles.len() > MAX_PENDING_TILES {
-                plan.tiles[..MAX_PENDING_TILES].to_vec()
-            } else {
-                plan.tiles.clone()
-            };
-            tracing::info!(
-                load = format!("{:.1}%", load * 100.0),
-                tiles_planned = plan.tiles.len(),
-                "Executor backpressure — deferring prefetch cycle, tiles stored as pending"
-            );
-            return 0;
+        }
+        if !result.pending.is_empty() {
+            self.pending_tiles = result.pending;
         }
 
-        // Determine how many tiles to submit based on executor load
-        let max_tiles = if load > BACKPRESSURE_REDUCE_THRESHOLD {
-            let reduced =
-                ((plan.tiles.len() as f64) * BACKPRESSURE_REDUCED_FRACTION).ceil() as usize;
-            tracing::debug!(
-                load = format!("{:.1}%", load * 100.0),
-                full_plan = plan.tiles.len(),
-                reduced_to = reduced,
-                "Moderate backpressure — reducing prefetch submission"
-            );
-            reduced
-        } else {
-            plan.tiles.len()
-        };
-
-        // Apply transition throttle (takeoff ramp-up)
-        let max_tiles = if self.transition_throttle.is_active() {
-            let fraction = self.transition_throttle.fraction();
-            if fraction == 0.0 {
-                // Store tiles as pending so they're submitted once ramp begins (capped)
-                self.pending_tiles = if plan.tiles.len() > MAX_PENDING_TILES {
-                    plan.tiles[..MAX_PENDING_TILES].to_vec()
-                } else {
-                    plan.tiles.clone()
-                };
-                tracing::debug!(
-                    tiles_deferred = plan.tiles.len(),
-                    "Transition throttle — grace period, tiles stored as pending"
-                );
-                return 0;
-            }
-            let throttled = ((max_tiles as f64) * fraction).ceil() as usize;
-            tracing::debug!(
-                fraction = format!("{:.0}%", fraction * 100.0),
-                full = max_tiles,
-                throttled_to = throttled,
-                "Transition throttle — ramping up"
-            );
-            throttled
-        } else {
-            max_tiles
-        };
-
-        // Store tiles beyond the throttle/backpressure cutoff as pending
-        // so they're drained in subsequent cycles rather than lost.
-        let throttle_overflow: Vec<TileCoord> = if max_tiles < plan.tiles.len() {
-            plan.tiles[max_tiles..].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let mut submitted = 0;
-        let tiles_to_submit: Vec<TileCoord> = plan.tiles.iter().take(max_tiles).copied().collect();
-        let mut channel_remainder = Vec::new();
-        for (idx, tile) in tiles_to_submit.iter().enumerate() {
-            let request =
-                crate::runtime::JobRequest::prefetch_with_cancellation(*tile, cancellation.clone());
-            match client.submit(request) {
-                Ok(()) => submitted += 1,
-                Err(crate::executor::DdsClientError::ChannelFull) => {
-                    channel_remainder = tiles_to_submit[idx..].to_vec();
-                    tracing::debug!(
-                        submitted,
-                        channel_remaining = channel_remainder.len(),
-                        "Channel full — storing remainder for next cycle"
-                    );
-                    break;
-                }
-                Err(crate::executor::DdsClientError::ChannelClosed) => {
-                    tracing::warn!("Executor channel closed — stopping prefetch");
-                    break;
-                }
-            }
-        }
-
-        // Merge channel remainder + throttle overflow into pending_tiles
-        if !channel_remainder.is_empty() || !throttle_overflow.is_empty() {
-            let mut pending = channel_remainder;
-            pending.extend(throttle_overflow);
-            // Apply safety cap to prevent executor flooding
-            if pending.len() > MAX_PENDING_TILES {
-                tracing::warn!(
-                    total = pending.len(),
-                    cap = MAX_PENDING_TILES,
-                    dropped = pending.len() - MAX_PENDING_TILES,
-                    "Pending tiles exceed cap — truncating to prevent executor flood"
-                );
-                pending.truncate(MAX_PENDING_TILES);
-            }
-            tracing::debug!(
-                submitted,
-                pending = pending.len(),
-                "Storing {} tiles for subsequent cycles",
-                pending.len()
-            );
-            self.pending_tiles = pending;
-        }
-
-        if submitted > 0 {
-            tracing::info!(
-                tiles = submitted,
-                strategy = plan.strategy,
-                estimated_ms = plan.estimated_completion_ms,
-                "Prefetch batch submitted"
-            );
-        }
-
-        submitted
+        result.submitted
     }
 
     /// Mark tiles as cached (to avoid re-prefetching).
@@ -935,93 +813,24 @@ impl AdaptivePrefetchCoordinator {
             }
         };
 
-        // Filter out tiles already in cache (Bug 5 fix)
-        let cache_filtered = if let Some(ref cache) = self.memory_cache {
-            let mut filtered_tiles = Vec::with_capacity(plan.tiles.len());
-            let mut cache_hits = 0usize;
+        // Run the filtering pipeline (cache → patches → disk)
+        let (filtered_tiles, filter_counts) = super::filtering::run_filter_pipeline(
+            std::mem::take(&mut plan.tiles),
+            self.memory_cache.as_deref(),
+            &mut self.cached_tiles,
+            self.geo_index.as_ref(),
+            self.ortho_union_index.as_ref(),
+        )
+        .await;
+        plan.tiles = filtered_tiles;
 
-            for tile in &plan.tiles {
-                // Check local tracking first (fast path)
-                if self.cached_tiles.contains(tile) {
-                    cache_hits += 1;
-                    continue;
-                }
-
-                // Query the actual memory cache
-                if cache.contains(tile.row, tile.col, tile.zoom).await {
-                    cache_hits += 1;
-                    // Add to local tracking to avoid re-querying
-                    self.cached_tiles.insert(*tile);
-                    continue;
-                }
-
-                filtered_tiles.push(*tile);
-            }
-
-            if cache_hits > 0 {
-                tracing::debug!(
-                    cache_hits = cache_hits,
-                    remaining = filtered_tiles.len(),
-                    "Filtered cached tiles from prefetch plan"
-                );
-            }
-
-            plan.tiles = filtered_tiles;
-            cache_hits
-        } else {
-            0
-        };
-
-        // Step 1: Region-level filter — skip tiles in patch-owned DSF regions (Issue #51)
-        let before_patch = plan.tiles.len();
-        if let Some(ref geo_index) = self.geo_index {
-            let gi = Arc::clone(geo_index);
-            plan.tiles.retain(|tile| {
-                let (lat, lon) = tile.to_lat_lon();
-                let dsf = DsfTileCoord::from_lat_lon(lat, lon);
-                !gi.contains::<PatchCoverage>(&DsfRegion::new(dsf.lat, dsf.lon))
-            });
-        }
-        let patch_skipped = before_patch - plan.tiles.len();
-
-        if patch_skipped > 0 {
-            tracing::debug!(
-                patch_skipped,
-                remaining = plan.tiles.len(),
-                "Filtered tiles in patched regions"
-            );
-        }
-
-        // Step 2: Per-file disk filter — skip installed ortho tiles (Issue #39)
-        let disk_skipped = if let Some(ref index) = self.ortho_union_index {
-            let before_disk = plan.tiles.len();
-            plan.tiles.retain(|tile| {
-                let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
-                !index.dds_tile_exists(chunk_row, chunk_col, chunk_zoom)
-            });
-            let skipped = before_disk - plan.tiles.len();
-
-            if skipped > 0 {
-                tracing::debug!(
-                    skipped,
-                    remaining = plan.tiles.len(),
-                    "Filtered tiles already on disk"
-                );
-            }
-
-            skipped
-        } else {
-            0
-        };
-
-        let disk_filtered = patch_skipped + disk_skipped;
+        let total_filtered = filter_counts.total();
 
         tracing::debug!(
-            raw_plan_tiles =
-                plan.skipped_cached + cache_filtered + disk_filtered + plan.tiles.len(),
-            cache_skipped = plan.skipped_cached + cache_filtered,
-            patch_skipped,
-            disk_skipped,
+            raw_plan_tiles = plan.skipped_cached + total_filtered + plan.tiles.len(),
+            cache_skipped = plan.skipped_cached + filter_counts.cache_hits,
+            patch_skipped = filter_counts.patch_skipped,
+            disk_skipped = filter_counts.disk_skipped,
             remaining = plan.tiles.len(),
             strategy = plan.strategy,
             "Prefetch plan filter pipeline summary"
@@ -1042,8 +851,7 @@ impl AdaptivePrefetchCoordinator {
         // Update statistics
         self.total_cycles += 1;
         self.total_tiles_submitted += submitted as u64;
-        self.total_cache_hits +=
-            (plan.skipped_cached as usize + cache_filtered + disk_filtered) as u64;
+        self.total_cache_hits += (plan.skipped_cached as usize + total_filtered) as u64;
 
         // Update shared status for TUI
         self.update_shared_status(position, &plan, submitted);
@@ -1085,141 +893,56 @@ impl AdaptivePrefetchCoordinator {
         }
     }
 
-    /// Update the shared status for TUI display.
+    fn cycle_stats(&self) -> super::status_updater::CycleStats {
+        super::status_updater::CycleStats {
+            total_cycles: self.total_cycles,
+            total_tiles_submitted: self.total_tiles_submitted,
+            total_cache_hits: self.total_cache_hits,
+            total_deferred_cycles: self.total_deferred_cycles,
+        }
+    }
+
     fn update_shared_status(&self, position: (f64, f64), plan: &PrefetchPlan, submitted: usize) {
-        let Some(ref status) = self.shared_status else {
-            return;
-        };
-
-        // Update inferred position (adaptive doesn't have GPS status concept)
-        status.update_inferred_position(position.0, position.1);
-
-        // Determine prefetch mode for display
-        let prefetch_mode = match self.status.phase {
-            FlightPhase::Ground => crate::prefetch::state::PrefetchMode::Radial,
-            FlightPhase::Transition => crate::prefetch::state::PrefetchMode::Idle,
-            FlightPhase::Cruise => crate::prefetch::state::PrefetchMode::TileBased,
-        };
-        status.update_prefetch_mode(prefetch_mode);
-
-        // Update detailed stats
-        let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
-            ThrottleState::Active => CircuitState::Closed,
-            ThrottleState::Paused => CircuitState::Open,
-            ThrottleState::Resuming => CircuitState::HalfOpen,
-        });
-
-        // Get loading tiles (first 10 from plan)
-        let loading_tiles: Vec<(i32, i32)> = plan
-            .tiles
-            .iter()
-            .take(10)
-            .map(|t: &TileCoord| {
-                let (lat, lon) = t.to_lat_lon();
-                (lat.floor() as i32, lon.floor() as i32)
-            })
-            .collect();
-
-        let detailed = DetailedPrefetchStats {
-            cycles: self.total_cycles,
-            tiles_submitted_last_cycle: submitted as u64,
-            tiles_submitted_total: self.total_tiles_submitted,
-            cache_hits: self.total_cache_hits,
-            ttl_skipped: 0, // Not tracked in adaptive
-            active_zoom_levels: {
-                let mut zooms: Vec<u8> = plan.tiles.iter().map(|t| t.zoom).collect();
-                zooms.sort_unstable();
-                zooms.dedup();
-                zooms
-            },
-            is_active: submitted > 0,
-            circuit_state,
-            loading_tiles,
-            deferred_cycles: self.total_deferred_cycles,
-        };
-        status.update_detailed_stats(detailed);
+        if let Some(ref status) = self.shared_status {
+            super::status_updater::update_status_with_plan(
+                status,
+                &self.status,
+                self.throttler.as_ref(),
+                position,
+                plan,
+                submitted,
+                &self.cycle_stats(),
+            );
+        }
     }
 
-    /// Update shared status with position only.
-    ///
-    /// Called early in `process_telemetry` to show the TUI we're receiving telemetry,
-    /// even if no prefetch plan is generated (e.g., due to throttling).
     fn update_shared_status_position(&self, position: (f64, f64)) {
-        let Some(ref status) = self.shared_status else {
-            return;
-        };
-
-        // Update position - this also sets GPS status to Inferred
-        status.update_inferred_position(position.0, position.1);
+        if let Some(ref status) = self.shared_status {
+            super::status_updater::update_status_position(status, position);
+        }
     }
 
-    /// Update shared status when no plan was generated.
-    ///
-    /// This ensures the TUI shows the correct mode (throttled, idle, etc.)
-    /// even when no prefetch tiles are submitted.
     fn update_shared_status_no_plan(&self) {
-        let Some(ref status) = self.shared_status else {
-            return;
-        };
-
-        // Determine prefetch mode based on current state
-        let prefetch_mode = if !self.status.enabled {
-            crate::prefetch::state::PrefetchMode::Idle
-        } else if self.status.throttled {
-            crate::prefetch::state::PrefetchMode::CircuitOpen
-        } else if self.status.mode == StrategyMode::Disabled {
-            crate::prefetch::state::PrefetchMode::Idle
-        } else {
-            // Have a plan but it was empty or filtered - show the active mode
-            match self.status.phase {
-                FlightPhase::Ground => crate::prefetch::state::PrefetchMode::Radial,
-                FlightPhase::Transition => crate::prefetch::state::PrefetchMode::Idle,
-                FlightPhase::Cruise => crate::prefetch::state::PrefetchMode::TileBased,
-            }
-        };
-        status.update_prefetch_mode(prefetch_mode);
-
-        // Update detailed stats with no activity
-        let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
-            ThrottleState::Active => CircuitState::Closed,
-            ThrottleState::Paused => CircuitState::Open,
-            ThrottleState::Resuming => CircuitState::HalfOpen,
-        });
-
-        let detailed = DetailedPrefetchStats {
-            cycles: self.total_cycles,
-            tiles_submitted_last_cycle: 0,
-            tiles_submitted_total: self.total_tiles_submitted,
-            cache_hits: self.total_cache_hits,
-            ttl_skipped: 0,
-            active_zoom_levels: vec![],
-            is_active: false,
-            circuit_state,
-            loading_tiles: vec![],
-            deferred_cycles: self.total_deferred_cycles,
-        };
-        status.update_detailed_stats(detailed);
+        if let Some(ref status) = self.shared_status {
+            super::status_updater::update_status_no_plan(
+                status,
+                &self.status,
+                self.throttler.as_ref(),
+                &self.cycle_stats(),
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prefetch::adaptive::coordinator::test_support::{
+        ground_state, make_scenery_index, patched_region_area, test_calibration, test_plan,
+        AlwaysThrottle, BackpressureMockClient, CapLimitedDdsClient, DummyTracker,
+        HighLoadDdsClient, StableBoundsTracker,
+    };
     use crate::prefetch::adaptive::scenery_window::WindowState;
-    use std::time::Instant;
-
-    fn test_calibration() -> PerformanceCalibration {
-        PerformanceCalibration {
-            throughput_tiles_per_sec: 25.0,
-            avg_tile_generation_ms: 40,
-            tile_generation_stddev_ms: 10,
-            confidence: 0.9,
-            recommended_strategy: StrategyMode::Opportunistic,
-            calibrated_at: Instant::now(),
-            baseline_throughput: 25.0,
-            sample_count: 100,
-        }
-    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Creation tests
@@ -1527,32 +1250,6 @@ mod tests {
     // Patched region filtering tests (Issue #51)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Create an aircraft state at ground conditions (low speed, low AGL).
-    fn ground_state(lat: f64, lon: f64) -> AircraftState {
-        const HEADING_DEG: f32 = 90.0;
-        const GROUND_SPEED_KT: f32 = 10.0;
-        const AGL_FT: f32 = 5.0;
-        AircraftState::new(lat, lon, HEADING_DEG, GROUND_SPEED_KT, AGL_FT)
-    }
-
-    /// Build patched regions covering a radius around a DSF tile.
-    ///
-    /// Returns a HashSet covering `(center ± radius)` in both lat and lon,
-    /// ensuring all ground strategy ring tiles are captured.
-    fn patched_region_area(
-        center_lat: i32,
-        center_lon: i32,
-        radius: i32,
-    ) -> std::collections::HashSet<(i32, i32)> {
-        let mut regions = std::collections::HashSet::new();
-        for lat in (center_lat - radius)..=(center_lat + radius) {
-            for lon in (center_lon - radius)..=(center_lon + radius) {
-                regions.insert((lat, lon));
-            }
-        }
-        regions
-    }
-
     #[tokio::test]
     async fn test_prefetch_filters_patched_regions() {
         use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
@@ -1669,18 +1366,6 @@ mod tests {
     #[tokio::test]
     async fn test_process_telemetry_updates_status_when_throttled() {
         use crate::prefetch::state::PrefetchMode as StatePrefetchMode;
-        use crate::prefetch::throttler::ThrottleState;
-
-        // Create a mock throttler that always says to throttle
-        struct AlwaysThrottle;
-        impl PrefetchThrottler for AlwaysThrottle {
-            fn should_throttle(&self) -> bool {
-                true
-            }
-            fn state(&self) -> ThrottleState {
-                ThrottleState::Paused
-            }
-        }
 
         let shared_status = SharedPrefetchStatus::new();
         let mut coord = AdaptivePrefetchCoordinator::with_defaults()
@@ -1702,91 +1387,6 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
     // Backpressure tests (Phase 5)
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// Mock DDS client with configurable executor load and submission tracking.
-    struct BackpressureMockClient {
-        /// Simulated executor load (0.0 to 1.0).
-        pressure: f64,
-        submitted: std::sync::atomic::AtomicUsize,
-        /// If Some, return ChannelFull after this many successful submits.
-        fail_after: Option<usize>,
-    }
-
-    impl BackpressureMockClient {
-        fn new(pressure: f64) -> Self {
-            Self {
-                pressure,
-                submitted: std::sync::atomic::AtomicUsize::new(0),
-                fail_after: None,
-            }
-        }
-
-        fn with_fail_after(mut self, n: usize) -> Self {
-            self.fail_after = Some(n);
-            self
-        }
-
-        fn submitted_count(&self) -> usize {
-            self.submitted.load(std::sync::atomic::Ordering::Relaxed)
-        }
-    }
-
-    impl crate::executor::DdsClient for BackpressureMockClient {
-        fn submit(
-            &self,
-            _request: crate::runtime::JobRequest,
-        ) -> Result<(), crate::executor::DdsClientError> {
-            let count = self.submitted.load(std::sync::atomic::Ordering::Relaxed);
-            if let Some(limit) = self.fail_after {
-                if count >= limit {
-                    return Err(crate::executor::DdsClientError::ChannelFull);
-                }
-            }
-            self.submitted
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn request_dds(
-            &self,
-            _tile: TileCoord,
-            _cancellation: CancellationToken,
-        ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
-            let (_, rx) = tokio::sync::oneshot::channel();
-            rx
-        }
-
-        fn request_dds_with_options(
-            &self,
-            _tile: TileCoord,
-            _priority: crate::executor::Priority,
-            _origin: crate::runtime::RequestOrigin,
-            _cancellation: CancellationToken,
-        ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
-            let (_, rx) = tokio::sync::oneshot::channel();
-            rx
-        }
-
-        fn is_connected(&self) -> bool {
-            true
-        }
-
-        fn executor_load(&self) -> f64 {
-            self.pressure
-        }
-    }
-
-    fn test_plan(tile_count: usize) -> PrefetchPlan {
-        let tiles: Vec<TileCoord> = (0..tile_count)
-            .map(|i| TileCoord {
-                row: 100 + i as u32,
-                col: 200,
-                zoom: 14,
-            })
-            .collect();
-        let cal = test_calibration();
-        PrefetchPlan::with_tiles(tiles, &cal, "test", 0, tile_count)
-    }
 
     #[test]
     fn test_prefetch_defers_under_high_backpressure() {
@@ -1891,38 +1491,7 @@ mod tests {
 
     #[test]
     fn test_coordinator_with_scene_tracker() {
-        use crate::scene_tracker::{DdsTileCoord, GeoBounds, GeoRegion, SceneTracker};
-        use std::collections::HashSet;
-
-        struct DummyTracker;
-        impl SceneTracker for DummyTracker {
-            fn requested_tiles(&self) -> HashSet<DdsTileCoord> {
-                HashSet::new()
-            }
-            fn is_tile_requested(&self, _tile: &DdsTileCoord) -> bool {
-                false
-            }
-            fn is_burst_active(&self) -> bool {
-                false
-            }
-            fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
-                vec![]
-            }
-            fn total_requests(&self) -> u64 {
-                0
-            }
-            fn loaded_regions(&self) -> HashSet<GeoRegion> {
-                HashSet::new()
-            }
-            fn is_region_loaded(&self, _region: &GeoRegion) -> bool {
-                false
-            }
-            fn loaded_bounds(&self) -> Option<GeoBounds> {
-                None
-            }
-        }
-
-        let tracker: Arc<dyn SceneTracker> = Arc::new(DummyTracker);
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> = Arc::new(DummyTracker);
         let coord = AdaptivePrefetchCoordinator::with_defaults().with_scene_tracker(tracker);
         assert!(coord.scene_tracker.is_some());
     }
@@ -1930,44 +1499,9 @@ mod tests {
     #[test]
     fn test_coordinator_with_scenery_window_returns_plan_on_boundary() {
         use crate::geo_index::GeoIndex;
-        use crate::scene_tracker::{DdsTileCoord, GeoBounds, GeoRegion, SceneTracker};
-        use std::collections::HashSet;
 
-        /// Mock SceneTracker that returns stable bounds to trigger Ready state.
-        struct StableBoundsTracker;
-        impl SceneTracker for StableBoundsTracker {
-            fn requested_tiles(&self) -> HashSet<DdsTileCoord> {
-                HashSet::new()
-            }
-            fn is_tile_requested(&self, _tile: &DdsTileCoord) -> bool {
-                false
-            }
-            fn is_burst_active(&self) -> bool {
-                false
-            }
-            fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
-                vec![]
-            }
-            fn total_requests(&self) -> u64 {
-                0
-            }
-            fn loaded_regions(&self) -> HashSet<GeoRegion> {
-                HashSet::new()
-            }
-            fn is_region_loaded(&self, _region: &GeoRegion) -> bool {
-                false
-            }
-            fn loaded_bounds(&self) -> Option<GeoBounds> {
-                Some(GeoBounds {
-                    min_lat: 47.0,
-                    max_lat: 53.0,
-                    min_lon: 3.0,
-                    max_lon: 11.0,
-                })
-            }
-        }
-
-        let tracker: Arc<dyn SceneTracker> = Arc::new(StableBoundsTracker);
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
+            Arc::new(StableBoundsTracker::default_bounds());
         let geo_index = Arc::new(GeoIndex::new());
 
         let config = AdaptivePrefetchConfig {
@@ -2017,44 +1551,9 @@ mod tests {
     #[test]
     fn test_boundary_plan_tiles_sorted_by_distance_from_aircraft() {
         use crate::geo_index::GeoIndex;
-        use crate::scene_tracker::{DdsTileCoord, GeoBounds, GeoRegion, SceneTracker};
-        use std::collections::HashSet;
 
-        /// Mock SceneTracker with stable bounds for triggering cruise boundary.
-        struct StableBoundsTracker;
-        impl SceneTracker for StableBoundsTracker {
-            fn requested_tiles(&self) -> HashSet<DdsTileCoord> {
-                HashSet::new()
-            }
-            fn is_tile_requested(&self, _tile: &DdsTileCoord) -> bool {
-                false
-            }
-            fn is_burst_active(&self) -> bool {
-                false
-            }
-            fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
-                vec![]
-            }
-            fn total_requests(&self) -> u64 {
-                0
-            }
-            fn loaded_regions(&self) -> HashSet<GeoRegion> {
-                HashSet::new()
-            }
-            fn is_region_loaded(&self, _region: &GeoRegion) -> bool {
-                false
-            }
-            fn loaded_bounds(&self) -> Option<GeoBounds> {
-                Some(GeoBounds {
-                    min_lat: 47.0,
-                    max_lat: 53.0,
-                    min_lon: 3.0,
-                    max_lon: 11.0,
-                })
-            }
-        }
-
-        let tracker: Arc<dyn SceneTracker> = Arc::new(StableBoundsTracker);
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
+            Arc::new(StableBoundsTracker::default_bounds());
         let geo_index = Arc::new(GeoIndex::new());
 
         let config = AdaptivePrefetchConfig {
@@ -2103,44 +1602,8 @@ mod tests {
 
     #[test]
     fn test_coordinator_no_plan_when_far_from_boundary() {
-        use crate::scene_tracker::{DdsTileCoord, GeoBounds, GeoRegion, SceneTracker};
-        use std::collections::HashSet;
-
-        /// Mock SceneTracker that returns stable bounds.
-        struct StableBoundsTracker;
-        impl SceneTracker for StableBoundsTracker {
-            fn requested_tiles(&self) -> HashSet<DdsTileCoord> {
-                HashSet::new()
-            }
-            fn is_tile_requested(&self, _tile: &DdsTileCoord) -> bool {
-                false
-            }
-            fn is_burst_active(&self) -> bool {
-                false
-            }
-            fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
-                vec![]
-            }
-            fn total_requests(&self) -> u64 {
-                0
-            }
-            fn loaded_regions(&self) -> HashSet<GeoRegion> {
-                HashSet::new()
-            }
-            fn is_region_loaded(&self, _region: &GeoRegion) -> bool {
-                false
-            }
-            fn loaded_bounds(&self) -> Option<GeoBounds> {
-                Some(GeoBounds {
-                    min_lat: 47.0,
-                    max_lat: 53.0,
-                    min_lon: 3.0,
-                    max_lon: 11.0,
-                })
-            }
-        }
-
-        let tracker: Arc<dyn SceneTracker> = Arc::new(StableBoundsTracker);
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
+            Arc::new(StableBoundsTracker::default_bounds());
 
         let config = AdaptivePrefetchConfig {
             mode: PrefetchMode::Aggressive,
@@ -2172,43 +1635,9 @@ mod tests {
     #[test]
     fn test_coordinator_boundary_uses_geo_index_filtering() {
         use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion};
-        use crate::scene_tracker::{DdsTileCoord, GeoBounds, GeoRegion, SceneTracker};
-        use std::collections::HashSet;
 
-        struct StableBoundsTracker;
-        impl SceneTracker for StableBoundsTracker {
-            fn requested_tiles(&self) -> HashSet<DdsTileCoord> {
-                HashSet::new()
-            }
-            fn is_tile_requested(&self, _tile: &DdsTileCoord) -> bool {
-                false
-            }
-            fn is_burst_active(&self) -> bool {
-                false
-            }
-            fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
-                vec![]
-            }
-            fn total_requests(&self) -> u64 {
-                0
-            }
-            fn loaded_regions(&self) -> HashSet<GeoRegion> {
-                HashSet::new()
-            }
-            fn is_region_loaded(&self, _region: &GeoRegion) -> bool {
-                false
-            }
-            fn loaded_bounds(&self) -> Option<GeoBounds> {
-                Some(GeoBounds {
-                    min_lat: 47.0,
-                    max_lat: 53.0,
-                    min_lon: 3.0,
-                    max_lon: 11.0,
-                })
-            }
-        }
-
-        let tracker: Arc<dyn SceneTracker> = Arc::new(StableBoundsTracker);
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
+            Arc::new(StableBoundsTracker::default_bounds());
         let geo_index = Arc::new(GeoIndex::new());
 
         // Mark ALL potential boundary regions as already prefetched
@@ -2274,34 +1703,6 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
     // Scenery index zoom level tests
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// Helper to create a SceneryIndex with tiles at a specific chunk zoom level.
-    fn make_scenery_index(lat: i32, lon: i32, chunk_zoom: u8) -> Arc<SceneryIndex> {
-        use crate::coord::{to_tile_coords, CHUNKS_PER_TILE_SIDE, CHUNK_ZOOM_OFFSET};
-        use crate::prefetch::scenery_index::{SceneryIndexConfig, SceneryTile};
-
-        let index = SceneryIndex::new(SceneryIndexConfig::default());
-        let tile_zoom = chunk_zoom - CHUNK_ZOOM_OFFSET;
-
-        for lat_step in 0..4u32 {
-            for lon_step in 0..4u32 {
-                let sample_lat = lat as f64 + (lat_step as f64 * 0.25) + 0.125;
-                let sample_lon = lon as f64 + (lon_step as f64 * 0.25) + 0.125;
-                if let Ok(coord) = to_tile_coords(sample_lat, sample_lon, tile_zoom) {
-                    index.add_tile(SceneryTile {
-                        row: coord.row * CHUNKS_PER_TILE_SIDE,
-                        col: coord.col * CHUNKS_PER_TILE_SIDE,
-                        chunk_zoom,
-                        lat: sample_lat as f32,
-                        lon: sample_lon as f32,
-                        is_sea: false,
-                    });
-                }
-            }
-        }
-
-        Arc::new(index)
-    }
 
     #[test]
     fn test_get_tiles_for_region_without_index_uses_zoom_14() {
@@ -2379,44 +1780,10 @@ mod tests {
     #[test]
     fn test_region_maintenance_runs_when_no_plan_generated() {
         use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion};
-        use crate::scene_tracker::{DdsTileCoord, GeoBounds, GeoRegion, SceneTracker};
-        use std::collections::HashSet;
 
-        struct StableBoundsTracker;
-        impl SceneTracker for StableBoundsTracker {
-            fn requested_tiles(&self) -> HashSet<DdsTileCoord> {
-                HashSet::new()
-            }
-            fn is_tile_requested(&self, _tile: &DdsTileCoord) -> bool {
-                false
-            }
-            fn is_burst_active(&self) -> bool {
-                false
-            }
-            fn current_burst_tiles(&self) -> Vec<DdsTileCoord> {
-                vec![]
-            }
-            fn total_requests(&self) -> u64 {
-                0
-            }
-            fn loaded_regions(&self) -> HashSet<GeoRegion> {
-                HashSet::new()
-            }
-            fn is_region_loaded(&self, _region: &GeoRegion) -> bool {
-                false
-            }
-            fn loaded_bounds(&self) -> Option<GeoBounds> {
-                // Wide window so center is far from edges
-                Some(GeoBounds {
-                    min_lat: 45.0,
-                    max_lat: 55.0,
-                    min_lon: 0.0,
-                    max_lon: 14.0,
-                })
-            }
-        }
-
-        let tracker: Arc<dyn SceneTracker> = Arc::new(StableBoundsTracker);
+        // Wide window so center is far from edges
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
+            Arc::new(StableBoundsTracker::with_bounds(45.0, 55.0, 0.0, 14.0));
         let geo_index = Arc::new(GeoIndex::new());
 
         // Pre-populate InProgress regions (simulating a previous boundary cycle)
@@ -2483,69 +1850,6 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
     // Pending tiles carry-over tests
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// Mock DdsClient that accepts N submissions, then returns ChannelFull.
-    struct CapLimitedDdsClient {
-        limit: usize,
-        submitted: std::sync::atomic::AtomicUsize,
-    }
-
-    impl CapLimitedDdsClient {
-        fn new(limit: usize) -> Self {
-            Self {
-                limit,
-                submitted: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-
-        /// Reset the counter to allow another batch of submissions.
-        fn reset(&self) {
-            self.submitted.store(0, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    impl DdsClient for CapLimitedDdsClient {
-        fn submit(
-            &self,
-            _request: crate::runtime::JobRequest,
-        ) -> Result<(), crate::executor::DdsClientError> {
-            let prev = self
-                .submitted
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if prev >= self.limit {
-                // Undo the increment since we're rejecting
-                self.submitted
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                Err(crate::executor::DdsClientError::ChannelFull)
-            } else {
-                Ok(())
-            }
-        }
-
-        fn request_dds(
-            &self,
-            _tile: TileCoord,
-            _cancel: CancellationToken,
-        ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
-            let (_, rx) = tokio::sync::oneshot::channel();
-            rx
-        }
-
-        fn request_dds_with_options(
-            &self,
-            _tile: TileCoord,
-            _priority: crate::executor::Priority,
-            _origin: crate::runtime::RequestOrigin,
-            _cancel: CancellationToken,
-        ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
-            let (_, rx) = tokio::sync::oneshot::channel();
-            rx
-        }
-
-        fn is_connected(&self) -> bool {
-            true
-        }
-    }
 
     #[tokio::test]
     async fn test_pending_tiles_retained_on_channel_full() {
@@ -2970,46 +2274,6 @@ mod tests {
     fn test_pending_cap_on_backpressure_defer() {
         // When executor load exceeds BACKPRESSURE_DEFER_THRESHOLD and the
         // plan is stored as pending, the cap must still be applied.
-
-        /// Mock DdsClient that reports high executor load.
-        struct HighLoadDdsClient;
-
-        impl DdsClient for HighLoadDdsClient {
-            fn submit(
-                &self,
-                _request: crate::runtime::JobRequest,
-            ) -> Result<(), crate::executor::DdsClientError> {
-                Ok(())
-            }
-
-            fn request_dds(
-                &self,
-                _tile: TileCoord,
-                _cancel: CancellationToken,
-            ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
-                let (_, rx) = tokio::sync::oneshot::channel();
-                rx
-            }
-
-            fn request_dds_with_options(
-                &self,
-                _tile: TileCoord,
-                _priority: crate::executor::Priority,
-                _origin: crate::runtime::RequestOrigin,
-                _cancel: CancellationToken,
-            ) -> tokio::sync::oneshot::Receiver<crate::runtime::DdsResponse> {
-                let (_, rx) = tokio::sync::oneshot::channel();
-                rx
-            }
-
-            fn is_connected(&self) -> bool {
-                true
-            }
-
-            fn executor_load(&self) -> f64 {
-                0.95 // Above BACKPRESSURE_DEFER_THRESHOLD (0.8)
-            }
-        }
 
         let client = Arc::new(HighLoadDdsClient);
 

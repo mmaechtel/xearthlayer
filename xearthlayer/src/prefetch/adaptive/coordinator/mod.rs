@@ -36,9 +36,14 @@
 
 mod constants;
 mod core;
+mod filtering;
+mod plan_executor;
 mod runner;
 mod status;
+mod status_updater;
 mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod time_budget;
 
 // Re-export primary types
