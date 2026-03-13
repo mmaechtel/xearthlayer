@@ -74,6 +74,8 @@ pub struct PrewarmStatus {
     pub patch_skipped: usize,
     /// Tiles that already exist on disk (XEL cache, etc.).
     pub disk_hits: usize,
+    /// Number of tiles that actually need generation (after all filtering).
+    pub to_generate: usize,
     /// Whether prewarm has finished (success or failure).
     pub is_complete: bool,
     /// Whether prewarm was cancelled by user.
@@ -91,6 +93,7 @@ impl PrewarmStatus {
             cache_hits: 0,
             patch_skipped: 0,
             disk_hits: 0,
+            to_generate: total,
             is_complete: false,
             was_cancelled: false,
         }
@@ -104,12 +107,20 @@ impl PrewarmStatus {
     }
 
     /// Progress as a fraction from 0.0 to 1.0.
+    ///
+    /// Based on tiles that actually need generation (`to_generate`), not the
+    /// total including filtered tiles. This ensures the progress bar starts
+    /// at 0% and reaches 100% representing actual work done.
     pub fn progress_fraction(&self) -> f64 {
-        if self.total == 0 {
-            return 1.0; // Empty prewarm is "complete"
+        if self.to_generate == 0 {
+            return 1.0; // Nothing to generate = complete
         }
-        (self.completed + self.cache_hits + self.patch_skipped + self.disk_hits) as f64
-            / self.total as f64
+        self.completed as f64 / self.to_generate as f64
+    }
+
+    /// Number of tiles that need generation (after all filtering).
+    pub fn tiles_to_process(&self) -> usize {
+        self.to_generate
     }
 
     /// Total tiles that have been processed (completed + failed + cache_hits + patch_skipped + disk_hits).
@@ -273,9 +284,12 @@ impl<M: MemoryCache + Send + Sync + 'static> PrewarmContext<M> {
                 .dds_tile_exists(chunk_row, chunk_col, chunk_zoom)
         });
         let disk_hits = before_disk - to_generate.len();
-        if disk_hits > 0 {
+        {
             let mut s = self.status.lock();
-            s.disk_hits = disk_hits;
+            if disk_hits > 0 {
+                s.disk_hits = disk_hits;
+            }
+            s.to_generate = to_generate.len();
         }
 
         let cache_hits = {
@@ -526,11 +540,16 @@ mod tests {
     #[test]
     fn test_status_progress_fraction() {
         let mut status = PrewarmStatus::new("TEST".to_string(), 100);
+        // to_generate defaults to total initially
         assert_eq!(status.progress_fraction(), 0.0);
 
-        status.completed = 30;
+        // After filtering, to_generate is reduced
+        status.to_generate = 60;
         status.cache_hits = 10;
-        status.disk_hits = 10;
+        status.disk_hits = 30;
+
+        // Progress based on completed / to_generate (not total)
+        status.completed = 30;
         assert!((status.progress_fraction() - 0.5).abs() < 0.001);
 
         // Empty prewarm should show as complete
@@ -585,6 +604,67 @@ mod tests {
         let snapshot = handle.status();
         assert_eq!(snapshot.completed, 25);
         assert_eq!(snapshot.icao, "KJFK");
+    }
+
+    #[test]
+    fn test_progress_fraction_based_on_to_generate_not_total() {
+        // Simulates: 5652 total, 3136 patch_skipped, 46 disk_hits, 2470 to generate
+        let mut status = PrewarmStatus::new("LFLL".to_string(), 5652);
+        status.to_generate = 2470;
+        status.patch_skipped = 3136;
+        status.disk_hits = 46;
+
+        // Before any work, progress should be 0% (not 56%)
+        assert!(
+            status.progress_fraction() < 0.01,
+            "Progress should be ~0% before any tiles are generated, got {:.1}%",
+            status.progress_fraction() * 100.0
+        );
+
+        // After generating half the tiles that need work
+        status.completed = 1235;
+        assert!(
+            (status.progress_fraction() - 0.5).abs() < 0.01,
+            "Progress should be ~50% after generating half of to_generate, got {:.1}%",
+            status.progress_fraction() * 100.0
+        );
+
+        // After all generation complete
+        status.completed = 2470;
+        assert!(
+            (status.progress_fraction() - 1.0).abs() < 0.01,
+            "Progress should be 100% when all to_generate tiles are done, got {:.1}%",
+            status.progress_fraction() * 100.0
+        );
+    }
+
+    #[test]
+    fn test_progress_fraction_zero_to_generate_is_complete() {
+        // All tiles filtered out (all patch-owned or disk hits)
+        let mut status = PrewarmStatus::new("KSFO".to_string(), 100);
+        status.to_generate = 0;
+        status.patch_skipped = 80;
+        status.disk_hits = 20;
+
+        assert_eq!(
+            status.progress_fraction(),
+            1.0,
+            "Progress should be 100% when nothing needs generating"
+        );
+    }
+
+    #[test]
+    fn test_tiles_to_process_returns_to_generate() {
+        let mut status = PrewarmStatus::new("EDDB".to_string(), 8000);
+        status.to_generate = 3000;
+        status.patch_skipped = 4500;
+        status.disk_hits = 500;
+
+        assert_eq!(
+            status.tiles_to_process(),
+            3000,
+            "tiles_to_process should return the number of tiles that need generation"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
