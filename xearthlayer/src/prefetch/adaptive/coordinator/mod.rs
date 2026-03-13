@@ -39,6 +39,8 @@ mod core;
 mod runner;
 mod status;
 mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod time_budget;
 
 // Re-export primary types
