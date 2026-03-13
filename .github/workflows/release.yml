@@ -496,9 +496,15 @@ jobs:
           RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          # Update version.json with the new release info
+          # Collect actual artifact filenames from downloaded artifacts
+          DEB_FILE=$(basename "$(ls artifacts/debian-package/*.deb)")
+          RPM_FILE=$(basename "$(ls artifacts/rpm-package/*.rpm)")
+          TARBALL_FILE=$(basename "$(ls artifacts/linux-binary/*.tar.gz)")
+          GPU_TARBALL_FILE=$(basename "$(ls artifacts/linux-binary-gpu/*.tar.gz)")
+          GPU_DEB_FILE=$(basename "$(ls artifacts/debian-package-gpu/*.deb)")
           RELEASE_DATE=$(date +%Y-%m-%d)
 
+          # Generate version.json from actual artifact names
           cat > version.json << EOF
           {
             "version": "${VERSION}",
@@ -507,15 +513,15 @@ jobs:
             "homepage": "https://xearthlayer.app",
             "assets": {
               "deb": {
-                "filename": "xearthlayer_${VERSION}-1_amd64.deb",
+                "filename": "${DEB_FILE}",
                 "description": "Debian/Ubuntu package"
               },
               "rpm": {
-                "filename": "xearthlayer-${VERSION}-1.fc43.x86_64.rpm",
+                "filename": "${RPM_FILE}",
                 "description": "Fedora/RHEL package"
               },
               "tarball": {
-                "filename": "xearthlayer-${RELEASE_TAG}-x86_64-linux.tar.gz",
+                "filename": "${TARBALL_FILE}",
                 "description": "Linux binary tarball"
               },
               "aur": {
@@ -523,11 +529,11 @@ jobs:
                 "description": "Arch Linux AUR package"
               },
               "tarball-gpu": {
-                "filename": "xearthlayer-gpu-${RELEASE_TAG}-x86_64-linux.tar.gz",
+                "filename": "${GPU_TARBALL_FILE}",
                 "description": "Linux binary tarball (GPU encoding)"
               },
               "deb-gpu": {
-                "filename": "xearthlayer_${VERSION}-1_amd64-gpu.deb",
+                "filename": "${GPU_DEB_FILE}",
                 "description": "Debian/Ubuntu package (GPU encoding)"
               }
             },
@@ -535,12 +541,16 @@ jobs:
           }
           EOF
 
-          # Commit and push version.json update
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.json
-          git commit -m "chore: update version.json to ${VERSION}" || echo "No changes to commit"
-          git push origin HEAD:main || echo "Push failed - version.json may need manual update"
+          # Update version.json on main via GitHub API (atomic, avoids merge conflicts)
+          CONTENT=$(base64 -w0 version.json)
+          SHA=$(gh api "repos/${{ github.repository }}/contents/version.json" --jq '.sha')
+          gh api "repos/${{ github.repository }}/contents/version.json" \
+            -X PUT \
+            -f message="chore: update version.json to ${VERSION}" \
+            -f content="${CONTENT}" \
+            -f sha="${SHA}" \
+            -f branch="main"
+          echo "version.json updated to ${VERSION} via API"
 
       - name: Notify website of new release
         env:

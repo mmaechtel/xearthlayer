@@ -196,65 +196,36 @@ gh api repos/samsoir/xearthlayer/rulesets
 
 ---
 
-### Issue: version.json Push Rejected
+### Issue: version.json Not Updated
 
 **Symptoms:**
-In the release workflow logs:
-```
-! [rejected] HEAD -> main (fetch first)
-error: failed to push some refs
-Push failed - version.json may need manual update
-```
+After the release workflow completes, `version.json` on main still shows the old version.
 
 **Cause:**
-The release workflow runs on a detached HEAD (from the tag). If the main branch was updated (e.g., PR merged) before the workflow pushes `version.json`, the push is rejected due to diverged history.
+The GitHub API call to update `version.json` failed (e.g., permissions issue, API outage).
+
+**Note:** As of v0.3.1, the publish step uses the GitHub Contents API for atomic updates,
+eliminating the previous race condition with `git push` from a detached HEAD.
 
 **Solution:**
-Update `version.json` manually:
+Update `version.json` manually via the GitHub API or locally:
 
 ```bash
-# Ensure you're on main and up to date
-git checkout main
-git pull
+# Check current version.json
+gh api repos/samsoir/xearthlayer/contents/version.json --jq '.content' | base64 -d | jq .version
 
-# Update version.json
-cat > version.json << 'EOF'
-{
-  "version": "X.Y.Z",
-  "tag": "vX.Y.Z",
-  "release_date": "YYYY-MM-DD",
-  "homepage": "https://xearthlayer.app",
-  "assets": {
-    "deb": {
-      "filename": "xearthlayer_X.Y.Z-1_amd64.deb",
-      "description": "Debian/Ubuntu package"
-    },
-    "rpm": {
-      "filename": "xearthlayer-X.Y.Z-1.fc43.x86_64.rpm",
-      "description": "Fedora/RHEL package"
-    },
-    "tarball": {
-      "filename": "xearthlayer-vX.Y.Z-x86_64-linux.tar.gz",
-      "description": "Linux binary tarball"
-    },
-    "aur": {
-      "filename": "aur-package.zip",
-      "description": "Arch Linux AUR package"
-    }
-  },
-  "download_base_url": "https://github.com/samsoir/xearthlayer/releases/download/vX.Y.Z"
-}
-EOF
-
-# Commit and push
+# If stale, update locally
+git checkout main && git pull
+# Edit version.json with correct version, release_date, and asset filenames
 git add version.json
 git commit -m "chore: update version.json to X.Y.Z"
 git push
 ```
 
 **Prevention:**
-- Merge the release PR **AFTER** the release workflow completes
-- The workflow updates `version.json` as part of the publish step
+- The workflow now uses the GitHub Contents API (`gh api repos/.../contents/version.json -X PUT`)
+  which is atomic and doesn't require a clean merge base
+- Asset filenames are collected from actual build artifacts, not predicted
 
 ---
 
