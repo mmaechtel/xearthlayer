@@ -11,12 +11,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coord::TileCoord;
 use crate::executor::{DaemonMemoryCache, DdsClient};
-use crate::geo_index::{DsfRegion, GeoIndex, PatchCoverage};
+use crate::geo_index::{DsfRegion, GeoIndex};
 use crate::ortho_union::OrthoUnionIndex;
-use crate::prefetch::state::{AircraftState, DetailedPrefetchStats, SharedPrefetchStatus};
-use crate::prefetch::throttler::{PrefetchThrottler, ThrottleState};
-use crate::prefetch::tile_based::DsfTileCoord;
-use crate::prefetch::CircuitState;
+use crate::prefetch::state::{AircraftState, SharedPrefetchStatus};
+use crate::prefetch::throttler::PrefetchThrottler;
 use crate::prefetch::SceneryIndex;
 
 use super::super::boundary_monitor::BoundaryAxis;
@@ -625,146 +623,26 @@ impl AdaptivePrefetchCoordinator {
     ///
     /// Number of tiles submitted. Returns 0 if deferred due to backpressure.
     pub fn execute(&mut self, plan: &PrefetchPlan, cancellation: CancellationToken) -> usize {
-        let _span = tracing::debug_span!(
-            target: "profiling",
-            "prefetch_execute",
-            tile_count = plan.tiles.len(),
-            strategy = plan.strategy,
-        )
-        .entered();
-
         let Some(ref client) = self.dds_client else {
             tracing::warn!("No DDS client configured - cannot execute prefetch");
             return 0;
         };
 
-        // Check executor resource utilization before submitting
-        let load = client.executor_load();
-        if load > BACKPRESSURE_DEFER_THRESHOLD {
+        let result = super::plan_executor::execute_plan(
+            plan,
+            client.as_ref(),
+            &mut self.transition_throttle,
+            cancellation,
+        );
+
+        if result.deferred {
             self.total_deferred_cycles += 1;
-            // TEMPORARILY REVERTED for RED test verification
-            // Store tiles as pending so they're retried when load drops (capped)
-            self.pending_tiles = if plan.tiles.len() > MAX_PENDING_TILES {
-                plan.tiles[..MAX_PENDING_TILES].to_vec()
-            } else {
-                plan.tiles.clone()
-            };
-            tracing::info!(
-                load = format!("{:.1}%", load * 100.0),
-                tiles_planned = plan.tiles.len(),
-                "Executor backpressure — deferring prefetch cycle, tiles stored as pending"
-            );
-            return 0;
+        }
+        if !result.pending.is_empty() {
+            self.pending_tiles = result.pending;
         }
 
-        // Determine how many tiles to submit based on executor load
-        let max_tiles = if load > BACKPRESSURE_REDUCE_THRESHOLD {
-            let reduced =
-                ((plan.tiles.len() as f64) * BACKPRESSURE_REDUCED_FRACTION).ceil() as usize;
-            tracing::debug!(
-                load = format!("{:.1}%", load * 100.0),
-                full_plan = plan.tiles.len(),
-                reduced_to = reduced,
-                "Moderate backpressure — reducing prefetch submission"
-            );
-            reduced
-        } else {
-            plan.tiles.len()
-        };
-
-        // Apply transition throttle (takeoff ramp-up)
-        let max_tiles = if self.transition_throttle.is_active() {
-            let fraction = self.transition_throttle.fraction();
-            if fraction == 0.0 {
-                // Store tiles as pending so they're submitted once ramp begins (capped)
-                self.pending_tiles = if plan.tiles.len() > MAX_PENDING_TILES {
-                    plan.tiles[..MAX_PENDING_TILES].to_vec()
-                } else {
-                    plan.tiles.clone()
-                };
-                tracing::debug!(
-                    tiles_deferred = plan.tiles.len(),
-                    "Transition throttle — grace period, tiles stored as pending"
-                );
-                return 0;
-            }
-            let throttled = ((max_tiles as f64) * fraction).ceil() as usize;
-            tracing::debug!(
-                fraction = format!("{:.0}%", fraction * 100.0),
-                full = max_tiles,
-                throttled_to = throttled,
-                "Transition throttle — ramping up"
-            );
-            throttled
-        } else {
-            max_tiles
-        };
-
-        // Store tiles beyond the throttle/backpressure cutoff as pending
-        // so they're drained in subsequent cycles rather than lost.
-        let throttle_overflow: Vec<TileCoord> = if max_tiles < plan.tiles.len() {
-            plan.tiles[max_tiles..].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let mut submitted = 0;
-        let tiles_to_submit: Vec<TileCoord> = plan.tiles.iter().take(max_tiles).copied().collect();
-        let mut channel_remainder = Vec::new();
-        for (idx, tile) in tiles_to_submit.iter().enumerate() {
-            let request =
-                crate::runtime::JobRequest::prefetch_with_cancellation(*tile, cancellation.clone());
-            match client.submit(request) {
-                Ok(()) => submitted += 1,
-                Err(crate::executor::DdsClientError::ChannelFull) => {
-                    channel_remainder = tiles_to_submit[idx..].to_vec();
-                    tracing::debug!(
-                        submitted,
-                        channel_remaining = channel_remainder.len(),
-                        "Channel full — storing remainder for next cycle"
-                    );
-                    break;
-                }
-                Err(crate::executor::DdsClientError::ChannelClosed) => {
-                    tracing::warn!("Executor channel closed — stopping prefetch");
-                    break;
-                }
-            }
-        }
-
-        // Merge channel remainder + throttle overflow into pending_tiles
-        if !channel_remainder.is_empty() || !throttle_overflow.is_empty() {
-            let mut pending = channel_remainder;
-            pending.extend(throttle_overflow);
-            // Apply safety cap to prevent executor flooding
-            if pending.len() > MAX_PENDING_TILES {
-                tracing::warn!(
-                    total = pending.len(),
-                    cap = MAX_PENDING_TILES,
-                    dropped = pending.len() - MAX_PENDING_TILES,
-                    "Pending tiles exceed cap — truncating to prevent executor flood"
-                );
-                pending.truncate(MAX_PENDING_TILES);
-            }
-            tracing::debug!(
-                submitted,
-                pending = pending.len(),
-                "Storing {} tiles for subsequent cycles",
-                pending.len()
-            );
-            self.pending_tiles = pending;
-        }
-
-        if submitted > 0 {
-            tracing::info!(
-                tiles = submitted,
-                strategy = plan.strategy,
-                estimated_ms = plan.estimated_completion_ms,
-                "Prefetch batch submitted"
-            );
-        }
-
-        submitted
+        result.submitted
     }
 
     /// Mark tiles as cached (to avoid re-prefetching).
@@ -935,93 +813,24 @@ impl AdaptivePrefetchCoordinator {
             }
         };
 
-        // Filter out tiles already in cache (Bug 5 fix)
-        let cache_filtered = if let Some(ref cache) = self.memory_cache {
-            let mut filtered_tiles = Vec::with_capacity(plan.tiles.len());
-            let mut cache_hits = 0usize;
+        // Run the filtering pipeline (cache → patches → disk)
+        let (filtered_tiles, filter_counts) = super::filtering::run_filter_pipeline(
+            std::mem::take(&mut plan.tiles),
+            self.memory_cache.as_deref(),
+            &mut self.cached_tiles,
+            self.geo_index.as_ref(),
+            self.ortho_union_index.as_ref(),
+        )
+        .await;
+        plan.tiles = filtered_tiles;
 
-            for tile in &plan.tiles {
-                // Check local tracking first (fast path)
-                if self.cached_tiles.contains(tile) {
-                    cache_hits += 1;
-                    continue;
-                }
-
-                // Query the actual memory cache
-                if cache.contains(tile.row, tile.col, tile.zoom).await {
-                    cache_hits += 1;
-                    // Add to local tracking to avoid re-querying
-                    self.cached_tiles.insert(*tile);
-                    continue;
-                }
-
-                filtered_tiles.push(*tile);
-            }
-
-            if cache_hits > 0 {
-                tracing::debug!(
-                    cache_hits = cache_hits,
-                    remaining = filtered_tiles.len(),
-                    "Filtered cached tiles from prefetch plan"
-                );
-            }
-
-            plan.tiles = filtered_tiles;
-            cache_hits
-        } else {
-            0
-        };
-
-        // Step 1: Region-level filter — skip tiles in patch-owned DSF regions (Issue #51)
-        let before_patch = plan.tiles.len();
-        if let Some(ref geo_index) = self.geo_index {
-            let gi = Arc::clone(geo_index);
-            plan.tiles.retain(|tile| {
-                let (lat, lon) = tile.to_lat_lon();
-                let dsf = DsfTileCoord::from_lat_lon(lat, lon);
-                !gi.contains::<PatchCoverage>(&DsfRegion::new(dsf.lat, dsf.lon))
-            });
-        }
-        let patch_skipped = before_patch - plan.tiles.len();
-
-        if patch_skipped > 0 {
-            tracing::debug!(
-                patch_skipped,
-                remaining = plan.tiles.len(),
-                "Filtered tiles in patched regions"
-            );
-        }
-
-        // Step 2: Per-file disk filter — skip installed ortho tiles (Issue #39)
-        let disk_skipped = if let Some(ref index) = self.ortho_union_index {
-            let before_disk = plan.tiles.len();
-            plan.tiles.retain(|tile| {
-                let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
-                !index.dds_tile_exists(chunk_row, chunk_col, chunk_zoom)
-            });
-            let skipped = before_disk - plan.tiles.len();
-
-            if skipped > 0 {
-                tracing::debug!(
-                    skipped,
-                    remaining = plan.tiles.len(),
-                    "Filtered tiles already on disk"
-                );
-            }
-
-            skipped
-        } else {
-            0
-        };
-
-        let disk_filtered = patch_skipped + disk_skipped;
+        let total_filtered = filter_counts.total();
 
         tracing::debug!(
-            raw_plan_tiles =
-                plan.skipped_cached + cache_filtered + disk_filtered + plan.tiles.len(),
-            cache_skipped = plan.skipped_cached + cache_filtered,
-            patch_skipped,
-            disk_skipped,
+            raw_plan_tiles = plan.skipped_cached + total_filtered + plan.tiles.len(),
+            cache_skipped = plan.skipped_cached + filter_counts.cache_hits,
+            patch_skipped = filter_counts.patch_skipped,
+            disk_skipped = filter_counts.disk_skipped,
             remaining = plan.tiles.len(),
             strategy = plan.strategy,
             "Prefetch plan filter pipeline summary"
@@ -1042,8 +851,7 @@ impl AdaptivePrefetchCoordinator {
         // Update statistics
         self.total_cycles += 1;
         self.total_tiles_submitted += submitted as u64;
-        self.total_cache_hits +=
-            (plan.skipped_cached as usize + cache_filtered + disk_filtered) as u64;
+        self.total_cache_hits += (plan.skipped_cached as usize + total_filtered) as u64;
 
         // Update shared status for TUI
         self.update_shared_status(position, &plan, submitted);
@@ -1085,120 +893,44 @@ impl AdaptivePrefetchCoordinator {
         }
     }
 
-    /// Update the shared status for TUI display.
+    fn cycle_stats(&self) -> super::status_updater::CycleStats {
+        super::status_updater::CycleStats {
+            total_cycles: self.total_cycles,
+            total_tiles_submitted: self.total_tiles_submitted,
+            total_cache_hits: self.total_cache_hits,
+            total_deferred_cycles: self.total_deferred_cycles,
+        }
+    }
+
     fn update_shared_status(&self, position: (f64, f64), plan: &PrefetchPlan, submitted: usize) {
-        let Some(ref status) = self.shared_status else {
-            return;
-        };
-
-        // Update inferred position (adaptive doesn't have GPS status concept)
-        status.update_inferred_position(position.0, position.1);
-
-        // Determine prefetch mode for display
-        let prefetch_mode = match self.status.phase {
-            FlightPhase::Ground => crate::prefetch::state::PrefetchMode::Radial,
-            FlightPhase::Transition => crate::prefetch::state::PrefetchMode::Idle,
-            FlightPhase::Cruise => crate::prefetch::state::PrefetchMode::TileBased,
-        };
-        status.update_prefetch_mode(prefetch_mode);
-
-        // Update detailed stats
-        let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
-            ThrottleState::Active => CircuitState::Closed,
-            ThrottleState::Paused => CircuitState::Open,
-            ThrottleState::Resuming => CircuitState::HalfOpen,
-        });
-
-        // Get loading tiles (first 10 from plan)
-        let loading_tiles: Vec<(i32, i32)> = plan
-            .tiles
-            .iter()
-            .take(10)
-            .map(|t: &TileCoord| {
-                let (lat, lon) = t.to_lat_lon();
-                (lat.floor() as i32, lon.floor() as i32)
-            })
-            .collect();
-
-        let detailed = DetailedPrefetchStats {
-            cycles: self.total_cycles,
-            tiles_submitted_last_cycle: submitted as u64,
-            tiles_submitted_total: self.total_tiles_submitted,
-            cache_hits: self.total_cache_hits,
-            ttl_skipped: 0, // Not tracked in adaptive
-            active_zoom_levels: {
-                let mut zooms: Vec<u8> = plan.tiles.iter().map(|t| t.zoom).collect();
-                zooms.sort_unstable();
-                zooms.dedup();
-                zooms
-            },
-            is_active: submitted > 0,
-            circuit_state,
-            loading_tiles,
-            deferred_cycles: self.total_deferred_cycles,
-        };
-        status.update_detailed_stats(detailed);
+        if let Some(ref status) = self.shared_status {
+            super::status_updater::update_status_with_plan(
+                status,
+                &self.status,
+                self.throttler.as_ref(),
+                position,
+                plan,
+                submitted,
+                &self.cycle_stats(),
+            );
+        }
     }
 
-    /// Update shared status with position only.
-    ///
-    /// Called early in `process_telemetry` to show the TUI we're receiving telemetry,
-    /// even if no prefetch plan is generated (e.g., due to throttling).
     fn update_shared_status_position(&self, position: (f64, f64)) {
-        let Some(ref status) = self.shared_status else {
-            return;
-        };
-
-        // Update position - this also sets GPS status to Inferred
-        status.update_inferred_position(position.0, position.1);
+        if let Some(ref status) = self.shared_status {
+            super::status_updater::update_status_position(status, position);
+        }
     }
 
-    /// Update shared status when no plan was generated.
-    ///
-    /// This ensures the TUI shows the correct mode (throttled, idle, etc.)
-    /// even when no prefetch tiles are submitted.
     fn update_shared_status_no_plan(&self) {
-        let Some(ref status) = self.shared_status else {
-            return;
-        };
-
-        // Determine prefetch mode based on current state
-        let prefetch_mode = if !self.status.enabled {
-            crate::prefetch::state::PrefetchMode::Idle
-        } else if self.status.throttled {
-            crate::prefetch::state::PrefetchMode::CircuitOpen
-        } else if self.status.mode == StrategyMode::Disabled {
-            crate::prefetch::state::PrefetchMode::Idle
-        } else {
-            // Have a plan but it was empty or filtered - show the active mode
-            match self.status.phase {
-                FlightPhase::Ground => crate::prefetch::state::PrefetchMode::Radial,
-                FlightPhase::Transition => crate::prefetch::state::PrefetchMode::Idle,
-                FlightPhase::Cruise => crate::prefetch::state::PrefetchMode::TileBased,
-            }
-        };
-        status.update_prefetch_mode(prefetch_mode);
-
-        // Update detailed stats with no activity
-        let circuit_state = self.throttler.as_ref().map(|t| match t.state() {
-            ThrottleState::Active => CircuitState::Closed,
-            ThrottleState::Paused => CircuitState::Open,
-            ThrottleState::Resuming => CircuitState::HalfOpen,
-        });
-
-        let detailed = DetailedPrefetchStats {
-            cycles: self.total_cycles,
-            tiles_submitted_last_cycle: 0,
-            tiles_submitted_total: self.total_tiles_submitted,
-            cache_hits: self.total_cache_hits,
-            ttl_skipped: 0,
-            active_zoom_levels: vec![],
-            is_active: false,
-            circuit_state,
-            loading_tiles: vec![],
-            deferred_cycles: self.total_deferred_cycles,
-        };
-        status.update_detailed_stats(detailed);
+        if let Some(ref status) = self.shared_status {
+            super::status_updater::update_status_no_plan(
+                status,
+                &self.status,
+                self.throttler.as_ref(),
+                &self.cycle_stats(),
+            );
+        }
     }
 }
 
