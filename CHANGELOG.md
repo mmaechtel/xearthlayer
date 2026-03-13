@@ -7,6 +7,208 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-03-13
+
+> **Note**: Major release featuring GPU-accelerated DDS encoding, a complete rewrite of the prefetch system to a boundary-driven model, and extensive stability and performance improvements across the pipeline.
+
+### Added
+
+- **GPU-Accelerated DDS Encoding** ([#67](https://github.com/samsoir/xearthlayer/issues/67)): Optional GPU compute shader pipeline for DDS texture compression
+  - `GpuEncoderChannel` — channel-based GPU encoding architecture eliminating Mutex contention
+  - `WgpuCompressor` — wgpu/WGSL compute shaders via `block_compression` crate (ISPC kernels ported to GPU)
+  - Dedicated GPU worker task receives encode requests via `mpsc` channel
+  - GPU device selection via `texture.gpu_device` config setting
+  - Compressor backend selection: `software`, `ispc`, or `gpu` via `texture.compressor` config setting
+  - Queue depth diagnostic logging for GPU worker monitoring
+  - Requires `--features gpu-encode` build flag
+
+- **ISPC SIMD Block Compressor** ([#58](https://github.com/samsoir/xearthlayer/issues/58)): High-performance CPU-based DDS compression
+  - Intel ISPC-optimized BC1/BC3 compression via `intel_tex_2` crate
+  - Significantly faster than pure-Rust software compressor
+  - Now the default compressor backend
+
+- **Boundary-Driven Prefetch System** ([#58](https://github.com/samsoir/xearthlayer/issues/58)): Complete rewrite of the predictive tile caching model
+  - `SceneryWindow` — three-window model (XP Window, XEL Window, Retained) derived from empirical X-Plane measurements
+  - `BoundaryMonitor` — position-based DSF boundary edge detection (row and column axes)
+  - `BoundaryStrategy` — converts boundary crossings to target DSF region lists for prefetch
+  - Asymmetric loading depth: 3 rows × 3-4 cols (lat crossings), 2 cols × 3-4 rows (lon crossings)
+  - Dynamic longitude column computation via `lon_tiles_for_latitude()` utility
+  - Region completion tracking with staleness timeout
+  - World rebuild detection in SceneryWindow
+  - Retention inference and eviction of stale PrefetchedRegion and cached_tiles outside retained window
+
+- **Transition Throttle** ([#62](https://github.com/samsoir/xearthlayer/issues/62)): Smooth prefetch ramp-up after ground-to-cruise transition
+  - Phase-driven fraction throttle with configurable grace period and ramp duration
+  - MSL-based phase release (transition completes at altitude)
+  - `IntegerRangeSpec` and `FloatRangeSpec` config validators
+
+- **GeoIndex Geospatial Reference Database** ([#51](https://github.com/samsoir/xearthlayer/issues/51)): Type-keyed, region-indexed spatial lookup
+  - `PatchCoverage` layer — tracks which 1°×1° DSF regions are owned by scenery patches
+  - `RetainedRegion` layer — tracks regions in SceneryWindow's retained set
+  - `PrefetchedRegion` layer — four-state model (InProgress, Prefetched, NoCoverage, absent)
+  - Atomic bulk loading via `populate()` with RwLock + DashMap sharding
+  - Used by FUSE (`is_geo_filtered`), prewarm, and prefetch for patch region exclusion
+
+- **Online Network Position Source** ([#52](https://github.com/samsoir/xearthlayer/issues/52)): Aircraft position from online ATC networks
+  - VATSIM, IVAO, and PilotEdge support via REST API polling
+  - Configurable pilot ID and poll interval
+  - Debug logging for data feed health monitoring
+  - Integrates with `StateAggregator` for accuracy-based source selection
+
+- **Chrome Trace Profiling**: Performance analysis via `--profile` flag
+  - Non-blocking writer with fuse3 trace noise filtering
+  - Dedicated target for surgical trace filtering
+  - Instrument coverage on `BuildAndCacheDdsTask`
+  - `make` targets for profiling builds (`--features profiling`)
+
+- **Prefetch Diagnostics** ([#58](https://github.com/samsoir/xearthlayer/issues/58), [#59](https://github.com/samsoir/xearthlayer/issues/59)):
+  - Boundary crossing and region targeting diagnostic logging
+  - Per-origin FUSE cache hit rate tracking with double-counting fix
+  - Thousand separators in telemetry display for readability
+
+- **CI/CD Improvements**:
+  - GPU feature compilation check in CI pipeline ([#74](https://github.com/samsoir/xearthlayer/pull/74))
+  - `xearthlayer-gpu` artifact in release pipeline
+  - `chore/*` branch pattern added to CI triggers
+
+- **Community Standards** ([#55](https://github.com/samsoir/xearthlayer/pull/55)):
+  - Contributing guide (`CONTRIBUTING.md`)
+  - Security policy (`SECURITY.md`)
+  - Pull request template
+  - Code of conduct
+
+### Fixed
+
+- **Priority Inversion in Job Executor** ([#56](https://github.com/samsoir/xearthlayer/issues/56)): Pipeline-balanced concurrency and resource-aware backpressure
+  - Network pool rebalanced: `clamp(ceil(cpu*1.5), 8, 64)` — pipeline-balanced with CPU pool
+  - Backpressure uses actual resource pool utilization (`executor_load()`) instead of channel pressure
+  - Prefetch quota and FUSE resilience improvements
+  - Scene load time reduced from 8m30s to 3m20s with 100+ tiles/sec prefetch throughput
+
+- **Circuit Breaker Self-Tripping** ([#59](https://github.com/samsoir/xearthlayer/issues/59)): Circuit breaker no longer blocks prefetch during cruise
+  - Switched from FUSE request counting (which included harmless cache hits) to resource pool utilization
+  - Removed dead `record_request()` from FUSE read path
+  - Deduplicated TileCoords in `get_tiles_for_region`
+
+- **Prewarm Cache Miss** ([#63](https://github.com/samsoir/xearthlayer/issues/63)): Progress bar rebased on tiles needing generation
+  - Previously counted all tiles including those already cached, showing misleading progress
+
+- **Water Mask DDS Guard** ([#68](https://github.com/samsoir/xearthlayer/issues/68)): Prevent virtual DDS generation for water mask textures
+  - FUSE no longer attempts to generate DDS for water mask files
+
+- **Cache Count Formatting** ([#70](https://github.com/samsoir/xearthlayer/issues/70)): Wired `format_count` into cache hit/miss display
+
+- **Disk Cache Startup Performance** ([#46](https://github.com/samsoir/xearthlayer/issues/46)): Restructured disk cache into region subdirectories
+  - Region-based layout (1°×1° DSF subdirs, e.g., `+33-119/`) replaces flat directory
+  - Parallel scanning via rayon over region directories for fast startup
+
+- **Patch Region Handling** ([#51](https://github.com/samsoir/xearthlayer/issues/51)):
+  - Fixed geo-filter region calculation and added package fallthrough
+  - Removed DDS gate in patched regions
+  - Fixed GO2 zoom parsing
+  - Prewarm now checks disk for existing DDS tiles before generating
+  - Region-level ownership for FUSE, prewarm, and prefetch
+
+- **Overlay Union Behavior** ([#45](https://github.com/samsoir/xearthlayer/issues/45)): Use consolidated overlay for install/remove/update
+
+- **Packages List Hang** ([#47](https://github.com/samsoir/xearthlayer/pull/47)): Fixed hang in patches list command (contributed by [@mmaechtel](https://github.com/mmaechtel))
+
+- **HTTP Concurrency**: Raised FD limit at startup, restored 1024 HTTP permits after FD exhaustion fix
+
+- **CLI Improvements**: Moved `raise_fd_limit` after logging init; `--debug` and `--profile` flags now combine correctly
+
+### Changed
+
+- **Prefetch Architecture Rewrite** ([#58](https://github.com/samsoir/xearthlayer/issues/58)): Boundary-driven model replaces band/cone-based approach
+  - SceneryWindow locked to configured dimensions based on empirical measurements (3° lat × 3°/cos(lat) lon)
+  - Configurable: `load_depth_lat=3`, `load_depth_lon=2`, `trigger_distance=1.5`, `default_window_rows=3`, `window_lon_extent=3.0`
+  - Prewarm grid changed from square to rectangular: `grid_rows=3`, `grid_cols=4`
+
+- **Coordinator Core Refactored** ([#73](https://github.com/samsoir/xearthlayer/pull/73)): Extracted into focused modules
+  - Filtering, execution, and status extracted to separate modules
+  - Test mocks moved to `test_support` module
+
+- **Network Pool Sizing** ([#56](https://github.com/samsoir/xearthlayer/issues/56)): Cap raised from 48 to 64 concurrent tiles
+
+- **Log Verbosity** ([#50](https://github.com/samsoir/xearthlayer/pull/50)): Per-request log messages demoted from INFO to DEBUG
+
+- **Config Split**: `config/file.rs` and `service/orchestrator.rs` split into submodules for maintainability
+
+### Removed
+
+- **Dead Code Audit** ([#75](https://github.com/samsoir/xearthlayer/pull/75)): Removed dead code and unused `allow(dead_code)` annotations
+- **Legacy Prefetch Components** ([#58](https://github.com/samsoir/xearthlayer/issues/58)): Removed `CruiseStrategy`, `BandCalculator`, `BoundaryPrioritizer`, `TurnDetector` (superseded by boundary-driven model)
+- **Dead FUSE Code** ([#59](https://github.com/samsoir/xearthlayer/issues/59)): Removed unused `record_request()` from FUSE read path
+
+### Deprecated
+
+- **Configuration Keys**: The following keys are deprecated (run `xearthlayer config upgrade` to migrate):
+  - `prefetch.load_depth` — replaced by `prefetch.load_depth_lat` and `prefetch.load_depth_lon`
+  - `prefetch.default_window_cols` — now computed dynamically from latitude
+  - `prewarm.grid_size` — replaced by `prewarm.grid_rows` and `prewarm.grid_cols`
+  - Legacy band-based prefetch settings replaced by boundary-driven settings
+
+### Documentation
+
+- GPU acceleration documentation and build options
+- Updated adaptive prefetch design to v2.0 — boundary-driven model
+- X-Plane scenery loading whitepaper updated to v1.1 and v1.2
+- GPU channel architecture design and implementation plan
+- GeoIndex design documentation
+- Transition ramp design speclet
+- Boundary-driven prefetch implementation plan
+- Compressed flight test logs for scenery loading research
+- Updated CLAUDE.md with current architecture and concurrency limits
+- Updated README with GPU encoding feature
+
+### Upgrade Notes
+
+**New `config.ini` settings for v0.3.1:**
+
+```ini
+[texture]
+# Compressor backend: software, ispc, or gpu (requires --features gpu-encode)
+compressor = ispc
+# GPU device selection (optional, for multi-GPU systems)
+# gpu_device = 0
+
+[prefetch]
+# Boundary-driven prefetch (replaces band-based settings)
+load_depth_lat = 3        ; DSF rows to load on latitude boundary crossing
+load_depth_lon = 2        ; DSF cols to load on longitude boundary crossing
+trigger_distance = 1.5    ; Degrees from window edge to trigger prefetch
+default_window_rows = 3   ; Scenery window height in DSF rows
+window_lon_extent = 3.0   ; Scenery window longitude extent in degrees
+
+[prewarm]
+# Rectangular grid (replaces square grid_size)
+grid_rows = 3             ; DSF rows to prewarm around airport
+grid_cols = 4             ; DSF cols to prewarm around airport
+
+[online_network]
+# Online ATC network position (VATSIM/IVAO/PilotEdge)
+enabled = false
+# pilot_id =              ; Your CID/VID on the network
+# poll_interval_secs = 15
+```
+
+**Optional GPU encoding (requires build flag):**
+
+```bash
+# Build with GPU encoding support
+cargo build --release --features gpu-encode
+
+# Configure in config.ini
+[texture]
+compressor = gpu
+```
+
+Run `xearthlayer config upgrade` to automatically add new settings with defaults.
+
+### Acknowledgements
+
+- Thanks to [@mmaechtel](https://github.com/mmaechtel) for fixing the packages list hang ([#47](https://github.com/samsoir/xearthlayer/pull/47)) and for extensive testing and verification throughout this release
+
 ## [0.3.0] - 2026-02-04
 
 > **Note**: This is a major release introducing the Adaptive Prefetch System and a complete rewrite of the execution core.
@@ -631,7 +833,8 @@ Run `xearthlayer config upgrade` to automatically add new settings with defaults
 - Linux support only (Windows and macOS planned for future releases)
 - Requires FUSE3 for filesystem mounting
 
-[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/samsoir/xearthlayer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/samsoir/xearthlayer/compare/v0.2.12...v0.3.0
 [0.2.12]: https://github.com/samsoir/xearthlayer/compare/v0.2.10...v0.2.12
 [0.2.10]: https://github.com/samsoir/xearthlayer/compare/v0.2.9...v0.2.10

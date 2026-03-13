@@ -254,7 +254,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          dnf install -y rust cargo fuse3-devel rpm-build
+          dnf install -y rust cargo fuse3-devel rpm-build gcc-c++
 
       - name: Build release binary
         run: cargo build --release
