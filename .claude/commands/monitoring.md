@@ -40,6 +40,7 @@ Falls `$ARGUMENTS` leer, AskUserQuestion verwenden:
 | 60 Min (Standard) | `-d 3600` |
 | 90 Min (Langflug) | `-d 5400` |
 | 120 Min (Maximal) | `-d 7200` |
+| 150 Min (Extra-Lang) | `-d 9000` |
 
 **Frage 2: bpftrace-Sidecar**
 
@@ -50,84 +51,116 @@ Falls `$ARGUMENTS` leer, AskUserQuestion verwenden:
 
 Falls `$ARGUMENTS` eine Zahl enthaelt: Dauer = Argument in Minuten, Sidecar = Ja (Default).
 
+**WICHTIG:** Dauer IMMER grosszuegig waehlen — lieber zu lang als zu kurz. sysmon.py kann jederzeit gestoppt werden, aber fehlende Daten am Ende sind unwiederbringlich (Run Y: sysmon lief nur 20 Min bei 2h-Flug).
+
 ### 1.2 Run-Verzeichnis vorbereiten
 
-Run-Verzeichnis unter `/tmp/` mit Zeitstempel benennen:
+Run-Verzeichnis direkt im Repository anlegen (nicht unter `/tmp/`):
+
+```bash
+RUN_DIR="monitoring/run_<LABEL>"
+mkdir -p "$RUN_DIR"
+```
+
+### 1.3 sudo-Befehle ausgeben
+
+**ZUERST** dem User ALLE sudo-Befehle kompakt auflisten, die er in einem separaten Terminal ausfuehren muss:
 
 ```
-RUN_DIR="/tmp/sysmon_run_$(date +%Y%m%d_%H%M)"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SUDO-BEFEHLE (bitte im separaten Terminal ausfuehren)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+sudo bash monitoring/sysmon_trace.sh -o <RUN_DIR>
+sudo dmesg | tee <RUN_DIR>/dmesg_pre.log > /dev/null
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### 1.3 Monitoring starten
+### 1.4 Nicht-sudo-Skripte selber starten
 
 sysmon.py im Hintergrund starten (IMMER mit `--xplane` fuer FPS/CPU/GPU-Telemetrie):
 
 ```bash
-nohup python3 monitoring/sysmon.py -d <SEKUNDEN> --xplane -o "$RUN_DIR" > "$RUN_DIR/sysmon.log" 2>&1 &
-SYSMON_PID=$!
+python3 monitoring/sysmon.py -d <SEKUNDEN> --xplane -o "$RUN_DIR" &
 ```
 
-Dem User die Ausgabe zeigen und bestaetigen dass sysmon.py laeuft.
+Direkt mit `run_in_background=true` ausfuehren — kein nohup noetig.
 
-### 1.3b Verifikation (PFLICHT — 5-10 Sekunden nach Start)
+### 1.5 Verifikation (PFLICHT — 5-10 Sekunden nach Start)
 
 **Alle Datenquellen pruefen, BEVOR der Flug beginnt:**
 
 ```bash
+# Prozesse laufen?
+ps aux | grep -E 'sysmon\.py|xplane_telemetry|bpftrace' | grep -v grep
+
 # CSVs wachsen?
-wc -l "$RUN_DIR"/*.csv
+ls -la "$RUN_DIR"/*.csv
 
-# X-Plane Telemetrie: FPS/Lat/Lon vorhanden (nicht 0.0)?
-tail -3 "$RUN_DIR/xplane_telemetry.csv"
+# bpftrace-Traces vorhanden? (falls Sidecar gestartet)
+ls -la "$RUN_DIR"/trace_*.log
 
-# Prozesse sichtbar?
-tail -3 "$RUN_DIR/proc.csv"
-
-# Telemetrie-Subprocess Fehler?
-cat "$RUN_DIR/xplane_telemetry.log"
-
-# bpftrace-Traces aktiv? (falls Sidecar gestartet)
-tail -5 "$RUN_DIR/trace_reclaim.log"
+# dmesg_pre.log nicht leer?
+wc -c "$RUN_DIR/dmesg_pre.log"
 ```
 
 **Bei Problemen sofort melden!** Haeufige Fehler:
 - `xplane_telemetry.csv` leer/nur Header → X-Plane UDP-Port nicht offen (Settings > Network > Accept incoming connections)
 - `proc.csv` zeigt kein X-Plane → X-Plane noch nicht gestartet (OK, kommt spaeter)
 - `trace_reclaim.log` leer → User hat Sidecar noch nicht gestartet (Erinnerung ausgeben)
+- `dmesg_pre.log` 0 Bytes → Ownership-Problem (sudo hat Verzeichnis als root angelegt → `sudo chown -R $USER <RUN_DIR>`)
+- Run-Verzeichnis gehoert root → Sidecar vor sysmon gestartet. Fix: `sudo chown -R $USER <RUN_DIR>`
 
-### 1.4 Sidecar-Befehl ausgeben (wenn gewaehlt)
-
-Den sudo-Befehl NICHT selbst ausfuehren — dem User anzeigen zum manuellen Starten:
+### 1.6 Status-Meldung
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MONITORING GESTARTET
+MONITORING LAEUFT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  sysmon.py: PID <PID>, Dauer <N> Min, Output: <RUN_DIR>
-  Telemetrie: xplane_telemetry.py (FPS/CPU/GPU, 5 Hz via UDP)
+  sysmon.py:  PID <PID>, Dauer <N> Min
+  Telemetrie: xplane_telemetry.py (5 Hz UDP)
+  Sidecar:    <Ja/Nein> (3 bpftrace-Tracer)
+  Output:     <RUN_DIR>
 
-  Bitte in einem separaten Terminal starten:
-
-  sudo bash monitoring/sysmon_trace.sh -o <RUN_DIR>
-
-  Dann X-Plane + XEarthLayer starten und Flug beginnen.
-  Monitoring endet automatisch nach <N> Minuten.
-  Oder jederzeit mit /monitoring-stop beenden.
+  Guten Flug!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### 1.5 Warten
+### 1.7 Watchdog — alle 20 Minuten pruefen
+
+Nach dem Start einen Loop-Check einrichten: Alle 20 Minuten automatisch pruefen ob alle Monitoring-Prozesse noch laufen und Daten schreiben.
+
+**Check-Logik (alle 20 Min):**
+
+```bash
+# 1. Prozesse noch da?
+ps aux | grep -E 'sysmon\.py|xplane_telemetry|bpftrace' | grep -v grep | wc -l
+
+# 2. CSVs wachsen noch? (Dateiaenderung < 60s alt?)
+find "$RUN_DIR" -name "*.csv" -mmin -1 | wc -l
+```
+
+**Ausfuehrung:** Den `/loop`-Skill mit 20-Minuten-Intervall verwenden. Falls `/loop` nicht verfuegbar, manuell mit `run_in_background` und `sleep 1200` zwischen Checks.
+
+**Bei Ausfall:**
+- sysmon.py gestoppt → Neu starten mit Restdauer
+- xplane_telemetry.py weg → sysmon.py neu starten (startet Telemetrie als Subprocess)
+- bpftrace weg → User informieren, sudo-Befehl erneut ausgeben
+
+### 1.8 Warten
 
 Der Skill pausiert hier. Der User fliegt. Zwei Wege zum Fortfahren:
 
 **A) Timer laeuft ab:** sysmon.py beendet sich automatisch nach der konfigurierten Dauer. Der User meldet sich zurueck (z.B. "fertig", "Analyse starten", "Flug beendet").
 
-**B) User bricht vorzeitig ab:** User sagt "stop" oder "fertig" vor Timer-Ende. Dann sysmon.py stoppen:
+**B) User bricht vorzeitig ab:** User sagt "stop" oder "fertig" vor Timer-Ende. Dann sysmon.py und xplane_telemetry.py stoppen:
 
 ```bash
-kill $SYSMON_PID
+# PIDs finden und stoppen
+ps aux | grep -E 'sysmon\.py|xplane_telemetry' | grep -v grep | awk '{print $2}' | xargs kill
 ```
 
 In beiden Faellen: Dem User mitteilen dass er `sysmon_trace.sh` im anderen Terminal mit Ctrl+C stoppen soll (falls gestartet).
@@ -310,23 +343,9 @@ Gemaess ANALYSIS_RULES.txt Section 4:
 ## 10. Zusammenfassung
 ```
 
-### 4.3 Run-Daten sichern (PFLICHT)
+### 4.3 Run-Daten pruefen
 
-Die Run-Daten aus `/tmp/` ins Repository kopieren, damit sie nach Reboot nicht verloren gehen:
-
-```bash
-PERSIST_DIR="monitoring/run_<LABEL>"
-cp -r "$RUN_DIR" "$PERSIST_DIR"
-```
-
-Dem User bestaetigen:
-
-```
-Run-Daten gesichert: monitoring/run_<LABEL>/
-(Quelle: <RUN_DIR>)
-```
-
-**WICHTIG:** Dieser Schritt ist nicht optional. Ohne Persistierung gehen die Rohdaten beim naechsten Reboot verloren.
+Run-Daten liegen bereits im Repository (seit Phase 1.2 direkt unter `monitoring/run_<LABEL>/` angelegt). Pruefen ob alle erwarteten Dateien vorhanden und nicht leer sind.
 
 ### 4.4 ANALYSE_HISTORY.md aktualisieren
 
@@ -388,4 +407,5 @@ Monitoring-Analysen werden NICHT automatisch committed. Der User entscheidet ob 
 - **Grosse CSV-Dateien:** Nicht komplett in den Kontext laden. Gezielt Zeitfenster und Schluessel-Spalten lesen.
 - **ANALYSIS_RULES.txt ist bindend:** Alle Schwellwerte, Korrelationsketten und Known Signatures aus diesem Dokument verwenden. Keine eigenen Schwellwerte erfinden.
 - **Vergleich mit frueheren Runs:** `monitoring/ANALYSE_HISTORY.md` und vorhandene `ANALYSE_RUN_*.md` laden fuer Kontext.
-- **Run-Verzeichnisse:** Werden in Phase 4.3 automatisch nach `monitoring/run_<label>/` kopiert. Die `/tmp/`-Originale gehen bei Reboot verloren.
+- **Run-Verzeichnisse:** Werden direkt unter `monitoring/run_<label>/` angelegt (kein /tmp/ mehr).
+- **Watchdog:** Alle 20 Min pruefen ob sysmon.py + bpftrace noch laufen. Bei Ausfall: sysmon neu starten, User fuer bpftrace informieren.
