@@ -81,7 +81,29 @@ Kompletter System-Freeze (kein Bild/Maus/Tastatur/Netzwerk) = PCIe-Bus-Lockup du
 
 ---
 
-## Aktueller Tuning-Stack (validiert durch Run T)
+## Run Y — Bestaetigungsrun: Run-T-Stack + irqbalance (2026-03-15)
+
+**Region:** Costa Rica (Ground/Low-Level), 20 Min sysmon + 123 Min bpftrace
+**Aenderungen:** Run-T-Stack + irqbalance aktiv. Drei sysctl auf Defaults belassen (vfs_cache_pressure=100, dirty_bg=10, dirty_ratio=20).
+
+| Metrik | Run T | Run Y | Delta |
+|--------|-------|-------|-------|
+| Main Thread Reclaim | **0** | **0** | = PERFEKT |
+| allocstall Samples | 1 | **0** | BESSER |
+| FPS < 25 | 3,1% | **0,3%** | -90% (regionbedingt) |
+| Swap Used | ja | **0 MB** | PERFEKT |
+| Slow IO (>5ms) | 236 | **124.060** | REGRESSION (3-Min-Burst) |
+| EMFILE / CB Trips | 0 / 0 | 0 / 0 | OK |
+
+**Ergebnis:** Memory-Subsystem perfekt — Run-T-Stack + irqbalance bestaetigt. Massiver Slow-IO-Burst (124K Events in 3 Min, max 792ms um 21:04–21:06) ist ein neues Phaenomen, lag ausserhalb des sysmon-Fensters.
+
+**Problem:** sysmon.py lief nur 20 Min (Default-Dauer), Flug ging 2+ Stunden.
+
+→ Details: `ANALYSE_RUN_Y_20260315.md`
+
+---
+
+## Aktueller Tuning-Stack (validiert durch Run T + Y)
 
 ```
 vm.min_free_kbytes      = 2097152    (2 GB)
@@ -98,6 +120,6 @@ Readahead               = 256 KB
 irqbalance              = aktiv (seit Run W validiert)
 ```
 
-## Nächster Schritt
+## Naechster Schritt
 
-**Run Y:** Bestätigungsrun mit Run-T-Stack + irqbalance. Erwartung: 0 Main Thread Reclaim, ≤ 3,5% FPS < 25.
+**Run Z:** Wiederholung auf europaeischer Route (EDDH↔EDDM) mit voller sysmon-Dauer. Slow-IO-Burst untersuchen. Optional: vfs_cache_pressure/dirty_ratios auf Run-T-Level setzen.
