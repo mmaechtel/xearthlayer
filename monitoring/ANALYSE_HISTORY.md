@@ -73,6 +73,14 @@
 
 ---
 
+## System-Freeze (2026-03-14, während Run W)
+
+Kompletter System-Freeze (kein Bild/Maus/Tastatur/Netzwerk) = PCIe-Bus-Lockup durch NVIDIA-Treiber. Diagnose und Gegenmaßnahmen:
+
+→ Details: `CRASH_ANALYSIS_20260314.md`
+
+---
+
 ## Aktueller Tuning-Stack (validiert durch Run T)
 
 ```
