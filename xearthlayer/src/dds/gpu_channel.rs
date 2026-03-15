@@ -84,6 +84,9 @@ mod inner {
         output_size: u64,
         submission_index: wgpu::SubmissionIndex,
         response: oneshot::Sender<Result<Vec<u8>, DdsError>>,
+        /// Receives the result of `map_async` — `Ok(())` on success, or
+        /// `Err(BufferAsyncError)` if the device was lost / mapping failed.
+        map_result_rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     }
 
     /// Convert a [`DdsFormat`] to the corresponding `block_compression` variant
@@ -195,15 +198,21 @@ mod inner {
         // Submit — non-blocking, GPU starts executing immediately
         let submission_index = queue.submit(std::iter::once(encoder.finish()));
 
-        // Initiate async buffer mapping (will be ready after device.poll)
+        // Initiate async buffer mapping (will be ready after device.poll).
+        // Use a channel to propagate mapping errors instead of silently
+        // ignoring them — accessing an unmapped buffer causes SIGBUS.
         let buffer_slice = readback_buffer.slice(..);
-        buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+        let (map_tx, map_rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = map_tx.send(result);
+        });
 
         InFlightRequest {
             readback_buffer,
             output_size,
             submission_index,
             response: request.response,
+            map_result_rx: map_rx,
         }
     }
 
@@ -216,6 +225,19 @@ mod inner {
                     timeout: Some(std::time::Duration::from_secs(10)),
                 })
                 .map_err(|e| DdsError::CompressionFailed(format!("GPU poll failed: {e}")))?;
+
+            // Check that buffer mapping succeeded (callback fired during poll).
+            // wgpu guarantees map_async callback fires during poll(), so recv()
+            // cannot deadlock here — the sender always sends before poll returns.
+            in_flight
+                .map_result_rx
+                .recv()
+                .map_err(|_| {
+                    DdsError::CompressionFailed("GPU map_async callback never fired".to_string())
+                })?
+                .map_err(|e| {
+                    DdsError::CompressionFailed(format!("GPU buffer mapping failed: {e}"))
+                })?;
 
             let buffer_slice = in_flight.readback_buffer.slice(..in_flight.output_size);
             let data = buffer_slice.get_mapped_range();
@@ -317,7 +339,7 @@ pub use inner::*;
 mod tests {
     use super::*;
     use crate::dds::compressor::BlockCompressor;
-    use crate::dds::{DdsFormat, SoftwareCompressor};
+    use crate::dds::{DdsError, DdsFormat, SoftwareCompressor};
     use image::RgbaImage;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
@@ -734,6 +756,35 @@ mod tests {
             .await
             .expect("worker should stop within timeout")
             .expect("worker should not panic");
+    }
+
+    /// Mapping error is propagated through the channel (mock worker, no GPU needed).
+    #[tokio::test]
+    async fn test_gpu_worker_mapping_error_propagates() {
+        let (tx, mut rx) = mpsc::channel::<GpuEncodeRequest>(CHANNEL_CAPACITY);
+        let channel = GpuEncoderChannel::new(tx);
+
+        // Mock worker that always sends back an error (simulating map failure)
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = req.response.send(Err(DdsError::CompressionFailed(
+                    "GPU buffer mapping failed: simulated".to_string(),
+                )));
+            }
+        });
+
+        let result = tokio::task::spawn_blocking(move || {
+            let image = RgbaImage::new(4, 4);
+            channel.compress(&image, DdsFormat::BC1)
+        })
+        .await
+        .expect("spawn_blocking should not panic");
+
+        let err = result.expect_err("should fail with mapping error");
+        assert!(
+            err.to_string().contains("mapping failed"),
+            "error should mention mapping failure, got: {err}"
+        );
     }
 
     /// Full pipeline with 4096×4096 tile (realistic workload).
