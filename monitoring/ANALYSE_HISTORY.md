@@ -103,7 +103,54 @@ Kompletter System-Freeze (kein Bild/Maus/Tastatur/Netzwerk) = PCIe-Bus-Lockup du
 
 ---
 
-## Aktueller Tuning-Stack (validiert durch Run T + Y)
+## Run Z — Voller 130-Min-Run: YMML→YSSY (2026-03-16)
+
+**Route:** Melbourne → Sydney (ToLiss A320), 130 Min, FL370
+**Aenderungen:** Volle sysmon-Dauer (150 Min konfiguriert), australische Route statt europaeisch
+
+| Metrik | Run T | Run Y | Run Z | Delta Z vs Y |
+|--------|-------|-------|-------|--------------|
+| Main Thread Reclaim | **0** | **0** | **326** (1s Burst) | ⚠️ Startup-Only |
+| allocstall Samples | 1 | 0 | **5** | ⚠️ |
+| FPS < 25 | 3,1% | 0,3% | **4,09%** | Routenabhaengig |
+| Slow IO (>5ms) | 236 | 124.060 | **1.743** | ✅ 71× besser |
+| Swap Peak | ja | 0 MB | 3.724 MB | Laengerer Flug |
+| EMFILE / CB Trips | 0/0 | 0/0 | 0/0 | ✅ |
+| PSI Pressure | — | — | **0** | ✅ |
+
+**Ergebnis:** Slow-IO-Problem geloest (71× Reduktion). Memory-Stack funktioniert im Steady-State (0 Reclaim nach Min 7). Einziger Reclaim-Burst waehrend Startup (Min 7, 326 Events in 1s, max 9,9 ms) durch gleichzeitiges DSF-Loading + DDS-Burst. VRAM nahe Limit (93,9%).
+
+**Aktion:** XEL Soft-Start evaluieren (max_concurrent_jobs rampen statt sofort 32). NVMe PM QOS pruefen.
+
+→ Details: `ANALYSE_RUN_Z_20260316.md`
+
+---
+
+## Run AA — Vorbelasteter Europa-Run: Stansted→EDDN (2026-03-16)
+
+**Route:** England → Nuernberg (FL400), 83 Min
+**Problem:** System nicht frisch — Swap bei Start 7,9 GB (Run Z Altlast), available nur 42 GB statt 80 GB
+
+| Metrik | Run Z | Run AA | Delta |
+|--------|-------|--------|-------|
+| Main Thread Reclaim | 326 | **46.723** | 143× ❌❌❌ |
+| Max Reclaim-Latenz | 9,9 ms | **85,5 ms** | 9× ❌ |
+| Reclaim-Zeit Main Thread | ~0,1s | **17,4s** | ❌❌❌ |
+| allocstall Peak | 350,8 | **7.907** | ❌ |
+| Slow IO (>5ms) | 1.743 | **413** | ✅ 76% besser |
+| FPS < 25 | 4,09% | **3,30%** | ✅ |
+| Swap Peak | 3.724 MB | **18.236 MB** | 5× ❌ |
+| X-Plane RSS Peak | 19.477 MB | **24.860 MB** | +28% (europaeische Scenery) |
+
+**Ergebnis:** Nicht als Vergleich geeignet — System war vorbelastet. 46K Main Thread Reclaim Events sind direkte Folge der Swap-Altlast + schwerer europaeischer Scenery. Slow IO weiter verbessert. FPS unter 3,5% Ziel.
+
+**Aktion:** Wiederholung auf gleicher Route mit **frischem System** (Reboot oder Swap-Reset).
+
+→ Details: `ANALYSE_RUN_AA_20260316.md`
+
+---
+
+## Aktueller Tuning-Stack (validiert durch Run T + Y + Z)
 
 ```
 vm.min_free_kbytes      = 2097152    (2 GB)
@@ -122,4 +169,4 @@ irqbalance              = aktiv (seit Run W validiert)
 
 ## Naechster Schritt
 
-**Run Z:** Wiederholung auf europaeischer Route (EDDH↔EDDM) mit voller sysmon-Dauer. Slow-IO-Burst untersuchen. Optional: vfs_cache_pressure/dirty_ratios auf Run-T-Level setzen.
+**Run AB:** Gleiche europaeische Route (UK→EDDN oder EDDH→EDDM) mit **frischem System** (Reboot). Ziel: Europaeische Baseline ohne Swap-Altlast etablieren.
