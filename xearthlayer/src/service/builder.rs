@@ -5,13 +5,12 @@
 
 use super::config::ServiceConfig;
 use super::error::ServiceError;
-use crate::cache::{DiskCacheConfig, MemoryCache, MemoryCacheConfig};
+use crate::cache::{MemoryCache, MemoryCacheConfig};
 use crate::provider::{
     AsyncProviderFactory, AsyncProviderType, AsyncReqwestClient, Provider, ProviderConfig,
     ProviderFactory, ReqwestClient,
 };
 use crate::texture::DdsTextureEncoder;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
@@ -32,8 +31,6 @@ pub struct ProviderComponents {
 pub struct CacheComponents {
     /// Shared memory cache for async pipeline (DDS tiles in memory with LRU eviction).
     pub memory_cache: Option<Arc<MemoryCache>>,
-    /// Cache directory path for disk cache (chunks stored via ParallelDiskCache).
-    pub cache_dir: Option<PathBuf>,
 }
 
 /// Create sync and async providers from configuration.
@@ -199,23 +196,15 @@ pub fn create_cache(
     _provider_name: &str,
 ) -> Result<CacheComponents, ServiceError> {
     if !config.cache_enabled() {
-        return Ok(CacheComponents {
-            memory_cache: None,
-            cache_dir: None,
-        });
+        return Ok(CacheComponents { memory_cache: None });
     }
 
     // Get defaults from config types
-    let disk_defaults = DiskCacheConfig::default();
     let memory_defaults = MemoryCacheConfig::default();
 
-    let mut cache_dir = disk_defaults.cache_dir;
     let mut mem_size = memory_defaults.max_size_bytes;
 
     // Apply user-configured overrides
-    if let Some(dir) = config.cache_directory() {
-        cache_dir = dir.clone();
-    }
     if let Some(size) = config.cache_memory_size() {
         mem_size = size;
     }
@@ -225,7 +214,6 @@ pub fn create_cache(
 
     Ok(CacheComponents {
         memory_cache: Some(memory_cache),
-        cache_dir: Some(cache_dir),
     })
 }
 
@@ -343,6 +331,5 @@ mod tests {
         let config = ServiceConfig::builder().cache_enabled(false).build();
         let result = create_cache(&config, "test").unwrap();
         assert!(result.memory_cache.is_none());
-        assert!(result.cache_dir.is_none());
     }
 }
