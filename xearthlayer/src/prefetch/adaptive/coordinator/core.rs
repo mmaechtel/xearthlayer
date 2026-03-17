@@ -482,13 +482,15 @@ impl AdaptivePrefetchCoordinator {
                 return None;
             }
             FlightPhase::Cruise => {
-                // Update scenery window from scene tracker
-                if let Some(ref tracker) = self.scene_tracker {
-                    self.scenery_window.update_from_tracker(tracker.as_ref());
+                let (lat, lon) = position;
+
+                // Safety net: if aircraft is outside window (rapid movement, init edge case),
+                // re-center unconditionally so crossings can fire.
+                if self.scenery_window.is_aircraft_outside(lat, lon) {
+                    self.scenery_window.center_on_position(lat, lon);
                 }
 
                 // Update retained region tracking (drives eviction of stale state)
-                let (lat, lon) = position;
                 if let Some(ref geo_index) = self.geo_index {
                     self.scenery_window.update_retention(lat, lon, geo_index);
                 }
@@ -581,6 +583,11 @@ impl AdaptivePrefetchCoordinator {
                         }
                     }
                 }
+
+                // Re-center window on aircraft after processing crossings.
+                // This ensures the window follows the aircraft without
+                // relying on SceneTracker bounds (which drift over long flights).
+                self.scenery_window.center_on_position(lat, lon);
 
                 if all_tiles.is_empty() {
                     return None;
@@ -2310,5 +2317,58 @@ mod tests {
             coord.pending_tiles.len(),
             MAX_PENDING_TILES
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Position-based window centering tests (#86)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_long_flight_window_follows_aircraft_not_tracker() {
+        use crate::geo_index::GeoIndex;
+
+        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
+            Arc::new(StableBoundsTracker::with_bounds(47.0, 53.0, 3.0, 11.0));
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            trigger_distance: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_scene_tracker(tracker)
+            .with_geo_index(geo_index);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Enter cruise phase
+        coord.update((50.0, 7.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 7.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Fly 10° north — if window drifts, crossings would target departure lon
+        for step in 0..10 {
+            let lat = 50.0 + step as f64;
+            coord.update((lat, 7.0), 0.0, 200.0, 35000.0);
+        }
+
+        // Window should be near aircraft (lat ~60), not spanning 47-60
+        let window_bounds = coord.scenery_window.window_bounds();
+        if let Some((min_lat, max_lat, _, _)) = window_bounds {
+            let span = max_lat - min_lat;
+            assert!(
+                span <= 5.0,
+                "Window span should be ~3° (configured), not {} (drifted)",
+                span
+            );
+            assert!(
+                max_lat >= 58.0,
+                "Window max_lat should be near aircraft (~60°), got {}",
+                max_lat
+            );
+        }
     }
 }
