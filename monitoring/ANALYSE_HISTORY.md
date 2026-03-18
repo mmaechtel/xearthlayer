@@ -167,6 +167,47 @@ Readahead               = 256 KB
 irqbalance              = aktiv (seit Run W validiert)
 ```
 
+## Run AB — Europaeische Baseline: Budapest→Duesseldorf (2026-03-16)
+
+**Route:** LHBP → EDDL (ToLiss A320), 90 Min, FL-Cruise, ~800 km
+**Aenderungen:** Frischer Reboot, Run-T-Stack + irqbalance, sysmon volle 90 Min
+
+| Metrik | Run T | Run Z | Run AA | Run AB | Delta AB vs Z |
+|--------|-------|-------|--------|--------|---------------|
+| Main Thread Reclaim | **0** | 326 | 46.723 | **20.515** | 63× ❌ |
+| Max Reclaim-Latenz | — | 9,9 ms | 85,5 ms | **80,7 ms** | 8× ❌ |
+| allocstall Samples | 1 | 5 | 77 | **11** | 2× ⚠️ |
+| Slow IO (>5ms) | 236 | 1.743 | 413 | **185** | ✅ 9× besser |
+| FPS < 25 | 3,1% | 4,09% | 3,30% | **3,76%** | ≈ |
+| Swap Peak | ja | 3.724 MB | 18.236 MB | **16.518 MB** | 4× ❌ |
+| Fence Events | 0 | 0 | 0 | **3.810** | NEU ❌ |
+| EMFILE / CB Trips | 0/0 | 0/0 | 0/0 | 0/0 | ✅ |
+
+**Ergebnis:** Europaeische Baseline etabliert. min_free_kbytes=2GB reicht NICHT fuer europaeische Langfluege — X-Plane RSS wuechst auf 25 GB, Direct Reclaim kehrt auf den Main Thread zurueck (20K Events, 80ms Max). Slow IO bester Wert aller Runs (185). 3.810 DMA Fence Events sind neu und unerklrt.
+
+**Aktion:** min_free_kbytes auf 3 GB erhoehen. GPU P2→P0 untersuchen.
+
+→ Details: `ANALYSE_RUN_AB_20260316.md`
+
+---
+
+## Aktueller Tuning-Stack (validiert durch Run T + Y + Z, unzureichend fuer Europa)
+
+```
+vm.min_free_kbytes      = 2097152    (2 GB) — ERHOEHUNG AUF 3 GB EMPFOHLEN
+vm.watermark_scale_factor = 125
+vm.swappiness           = 8
+vm.page_cluster         = 0
+vm.vfs_cache_pressure   = 60
+vm.dirty_background_ratio = 3
+vm.dirty_ratio          = 10
+zram                    = 16 GB lz4
+IO-Scheduler            = none (alle NVMe)
+WBT                     = 0
+Readahead               = 256 KB
+irqbalance              = aktiv (seit Run W validiert)
+```
+
 ## Naechster Schritt
 
-**Run AB:** Gleiche europaeische Route (UK→EDDN oder EDDH→EDDM) mit **frischem System** (Reboot). Ziel: Europaeische Baseline ohne Swap-Altlast etablieren.
+**Run AC:** Gleiche oder aehnliche europaeische Route mit **min_free_kbytes=3GB**. Ziel: Europaeische Reclaim-Events eliminieren. Optional: GPU P0 forcieren.
