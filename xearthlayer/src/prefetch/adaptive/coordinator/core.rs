@@ -533,8 +533,10 @@ impl AdaptivePrefetchCoordinator {
                     "Sliding prefetch box: new regions detected"
                 );
 
-                // Expand regions to tiles and track state
-                let mut all_tiles = Vec::new();
+                // Expand regions to tiles. Track which region each tile belongs
+                // to so we can mark only submitted regions as InProgress after
+                // truncation. Regions with no tiles are marked NoCoverage immediately.
+                let mut tiles_with_region: Vec<(TileCoord, DsfRegion)> = Vec::new();
                 for region in &new_regions {
                     let tiles = self.get_tiles_for_region(region);
                     if tiles.is_empty() {
@@ -542,40 +544,54 @@ impl AdaptivePrefetchCoordinator {
                             self.boundary_strategy.mark_no_coverage(region, geo_index);
                         }
                     } else {
-                        if let Some(ref geo_index) = self.geo_index {
-                            self.boundary_strategy.mark_in_progress(region, geo_index);
+                        for tile in tiles {
+                            tiles_with_region.push((tile, *region));
                         }
-                        tracing::debug!(
-                            region_lat = region.lat,
-                            region_lon = region.lon,
-                            tiles = tiles.len(),
-                            "Prefetch target: region queued"
-                        );
-                        all_tiles.extend(tiles);
                     }
                 }
 
-                if all_tiles.is_empty() {
+                if tiles_with_region.is_empty() {
                     return None;
                 }
 
                 // Sort tiles by distance from aircraft so nearest tiles
                 // are submitted first.
-                crate::coord::sort_tiles_by_distance(&mut all_tiles, lat, lon);
+                tiles_with_region.sort_by(|a, b| {
+                    let (a_lat, a_lon) = a.0.to_lat_lon();
+                    let (b_lat, b_lon) = b.0.to_lat_lon();
+                    let da = (a_lat - lat).powi(2) + (a_lon - lon).powi(2);
+                    let db = (b_lat - lat).powi(2) + (b_lon - lon).powi(2);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                });
 
-                // Enforce max_tiles_per_cycle limit. Without this, the first
-                // cruise tick can submit 1000+ tiles from the full box, saturating
-                // the executor and blocking X-Plane's on-demand FUSE reads.
-                // Remaining tiles will be picked up on subsequent ticks as
-                // regions stay untracked until their tiles are submitted.
+                // Enforce max_tiles_per_cycle limit. Only regions whose tiles
+                // survive truncation are marked InProgress — regions whose tiles
+                // are entirely truncated stay untracked and are retried next tick.
                 let max_tiles = self.config.max_tiles_per_cycle as usize;
-                if all_tiles.len() > max_tiles {
+                if tiles_with_region.len() > max_tiles {
                     tracing::debug!(
-                        total = all_tiles.len(),
+                        total = tiles_with_region.len(),
                         limit = max_tiles,
                         "Sliding box prefetch capped at max_tiles_per_cycle"
                     );
-                    all_tiles.truncate(max_tiles);
+                    tiles_with_region.truncate(max_tiles);
+                }
+
+                // Mark submitted regions as InProgress
+                let mut marked_regions = HashSet::new();
+                let mut all_tiles = Vec::with_capacity(tiles_with_region.len());
+                for (tile, region) in tiles_with_region {
+                    if marked_regions.insert(region) {
+                        if let Some(ref geo_index) = self.geo_index {
+                            self.boundary_strategy.mark_in_progress(&region, geo_index);
+                        }
+                        tracing::debug!(
+                            region_lat = region.lat,
+                            region_lon = region.lon,
+                            "Prefetch target: region queued"
+                        );
+                    }
+                    all_tiles.push(tile);
                 }
 
                 let total = all_tiles.len();
@@ -2420,6 +2436,68 @@ mod tests {
             plans_generated >= 5,
             "Should generate plans as aircraft crosses new DSF boundaries, got {}",
             plans_generated
+        );
+    }
+
+    #[test]
+    fn test_truncated_regions_not_marked_in_progress() {
+        use crate::geo_index::{GeoIndex, PrefetchedRegion};
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        // Very low cap to force truncation — only 5 tiles allowed
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            max_tiles_per_cycle: 5,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index));
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // First tick — box covers ~16 regions but only 5 tiles submitted
+        let plan1 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        if coord.status.phase != FlightPhase::Cruise {
+            return; // Skip if phase detector didn't reach cruise
+        }
+
+        assert!(plan1.is_some(), "Should generate plan on first tick");
+        let plan1 = plan1.unwrap();
+        assert!(
+            plan1.tiles.len() <= 5,
+            "Plan should be capped at 5 tiles, got {}",
+            plan1.tiles.len()
+        );
+
+        // Count how many regions are marked InProgress
+        let tracked_count = geo_index.regions::<PrefetchedRegion>().len();
+
+        // Key: with 5 tiles and ~16 tiles per region, at most 1-2 regions
+        // should be marked. If all 16 regions were marked, it's the bug.
+        assert!(
+            tracked_count < 10,
+            "Only regions with submitted tiles should be marked InProgress, \
+             but {} regions were tracked (expected < 10)",
+            tracked_count
+        );
+
+        // Second tick at same position — should find more new regions to submit
+        let plan2 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        assert!(
+            plan2.is_some(),
+            "Second tick should find untracked regions from truncated first tick"
         );
     }
 }
