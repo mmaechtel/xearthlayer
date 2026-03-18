@@ -4,7 +4,9 @@
 //! enumerates the DSF regions (1°×1°) it covers, and filters out
 //! regions already tracked in the GeoIndex.
 
-use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion};
+use tracing::debug;
+
+use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion, RetainedRegion};
 
 /// A heading-aware prefetch region around the aircraft.
 ///
@@ -77,6 +79,56 @@ impl PrefetchBox {
             .collect()
     }
 
+    /// Update retained regions in GeoIndex based on the prefetch box bounds.
+    ///
+    /// All DSF regions within the box (+ 1° buffer) are marked as retained.
+    /// Regions outside are evicted. This ensures the retention area covers
+    /// the full prefetch box, preventing `evict_non_retained()` from removing
+    /// regions that were just prefetched.
+    pub fn update_retention(
+        &self,
+        lat: f64,
+        lon: f64,
+        track: f64,
+        buffer: i32,
+        geo_index: &GeoIndex,
+    ) {
+        let (lat_min, lat_max, lon_min, lon_max) = self.bounds(lat, lon, track);
+
+        let dsf_lat_min = lat_min.floor() as i32 - buffer;
+        let dsf_lat_max = (lat_max - 1e-9).floor() as i32 + buffer;
+        let dsf_lon_min = lon_min.floor() as i32 - buffer;
+        let dsf_lon_max = (lon_max - 1e-9).floor() as i32 + buffer;
+
+        // Add all regions in the retained area
+        for lat_i in dsf_lat_min..=dsf_lat_max {
+            for lon_i in dsf_lon_min..=dsf_lon_max {
+                let region = DsfRegion::new(lat_i, lon_i);
+                if !geo_index.contains::<RetainedRegion>(&region) {
+                    debug!(lat = lat_i, lon = lon_i, "retention: adding region");
+                    geo_index.insert::<RetainedRegion>(region, RetainedRegion);
+                }
+            }
+        }
+
+        // Evict regions outside the retained area
+        let retained_regions = geo_index.regions::<RetainedRegion>();
+        for region in retained_regions {
+            if region.lat < dsf_lat_min
+                || region.lat > dsf_lat_max
+                || region.lon < dsf_lon_min
+                || region.lon > dsf_lon_max
+            {
+                debug!(
+                    lat = region.lat,
+                    lon = region.lon,
+                    "retention: evicting region"
+                );
+                geo_index.remove::<RetainedRegion>(&region);
+            }
+        }
+    }
+
     /// Compute the geographic bounds of the box.
     ///
     /// Returns `(lat_min, lat_max, lon_min, lon_max)`.
@@ -128,7 +180,10 @@ mod tests {
 
         // Must include regions west of aircraft (ahead)
         let has_west = regions.iter().any(|r| r.lon == 12);
-        assert!(has_west, "Should include lon=12 (3° west of aircraft at 15°)");
+        assert!(
+            has_west,
+            "Should include lon=12 (3° west of aircraft at 15°)"
+        );
 
         // Must include region east of aircraft (behind, 1°)
         let has_east = regions.iter().any(|r| r.lon == 15);
@@ -136,7 +191,10 @@ mod tests {
 
         // Should NOT include lon=17 (2° behind — beyond 1° behind margin)
         let has_far_east = regions.iter().any(|r| r.lon == 17);
-        assert!(!has_far_east, "Should not include lon=17 (beyond behind margin)");
+        assert!(
+            !has_far_east,
+            "Should not include lon=17 (beyond behind margin)"
+        );
     }
 
     #[test]
@@ -151,7 +209,10 @@ mod tests {
         assert!(has_north, "Should include lat=48 (behind)");
 
         let has_far_north = regions.iter().any(|r| r.lat == 50);
-        assert!(!has_far_north, "Should not include lat=50 (beyond behind margin)");
+        assert!(
+            !has_far_north,
+            "Should not include lat=50 (beyond behind margin)"
+        );
     }
 
     #[test]
@@ -232,7 +293,71 @@ mod tests {
 
         let new = pbox.new_regions(48.0, 15.0, 270.0, &geo_index);
 
-        assert!(!new.contains(&tracked), "Should exclude already-tracked region");
+        assert!(
+            !new.contains(&tracked),
+            "Should exclude already-tracked region"
+        );
         assert!(!new.is_empty(), "Should have untracked regions");
+    }
+
+    #[test]
+    fn test_retention_covers_prefetch_box_bounds() {
+        use crate::geo_index::GeoIndex;
+
+        let pbox = PrefetchBox::new(3.0, 1.0);
+        let geo_index = GeoIndex::new();
+
+        // Heading west: box lon [12, 16], lat [46, 50] (symmetric)
+        pbox.update_retention(48.0, 15.0, 270.0, 1, &geo_index);
+
+        // All regions in the box should be retained (+ 1° buffer)
+        // Box: lat 46..49, lon 12..15. With buffer: lat 45..50, lon 11..16
+        let all_box_regions = pbox.regions(48.0, 15.0, 270.0);
+        for region in &all_box_regions {
+            assert!(
+                geo_index.contains::<RetainedRegion>(region),
+                "Region ({}, {}) in prefetch box should be retained",
+                region.lat,
+                region.lon
+            );
+        }
+
+        // Buffer regions should also be retained
+        assert!(
+            geo_index.contains::<RetainedRegion>(&DsfRegion::new(45, 11)),
+            "Buffer region should be retained"
+        );
+    }
+
+    #[test]
+    fn test_retention_does_not_evict_prefetched_regions() {
+        use crate::geo_index::GeoIndex;
+        use crate::prefetch::adaptive::boundary_strategy::BoundaryStrategy;
+
+        let pbox = PrefetchBox::new(3.0, 1.0);
+        let geo_index = GeoIndex::new();
+
+        // Mark a region in the box as InProgress (simulating prefetch)
+        let region = DsfRegion::new(48, 12);
+        BoundaryStrategy::new().mark_in_progress(&region, &geo_index);
+        assert!(geo_index.contains::<PrefetchedRegion>(&region));
+
+        // Update retention from the prefetch box
+        pbox.update_retention(48.0, 15.0, 270.0, 1, &geo_index);
+
+        // Region should still be retained
+        assert!(
+            geo_index.contains::<RetainedRegion>(&region),
+            "InProgress region in box should be retained"
+        );
+
+        // Evict non-retained (the maintenance step that was causing the bug)
+        BoundaryStrategy::evict_non_retained(&geo_index);
+
+        // InProgress region should NOT have been evicted
+        assert!(
+            geo_index.contains::<PrefetchedRegion>(&region),
+            "InProgress region should survive eviction when retention covers the box"
+        );
     }
 }

@@ -489,13 +489,17 @@ impl AdaptivePrefetchCoordinator {
             FlightPhase::Cruise => {
                 let (lat, lon) = position;
 
-                // Keep SceneryWindow centered on aircraft for retention tracking.
-                // update_retention() depends on window position for eviction decisions.
-                self.scenery_window.center_on_position(lat, lon);
-
-                // Update retained region tracking (drives eviction of stale state)
+                // Update retained region tracking from prefetch box bounds.
+                // This must cover the full prefetch box + buffer so that
+                // evict_non_retained() doesn't remove regions we just prefetched.
                 if let Some(ref geo_index) = self.geo_index {
-                    self.scenery_window.update_retention(lat, lon, geo_index);
+                    self.prefetch_box.update_retention(
+                        lat,
+                        lon,
+                        track,
+                        self.config.window_buffer as i32,
+                        geo_index,
+                    );
                 }
 
                 // Compute sliding prefetch box regions
