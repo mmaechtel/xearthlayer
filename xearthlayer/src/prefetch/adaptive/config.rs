@@ -127,6 +127,20 @@ pub struct AdaptivePrefetchConfig {
     /// Columns computed as `ceil(lon_extent / cos(latitude))`.
     /// Range: 1.0 - 10.0
     pub window_lon_extent: f64,
+
+    // Sliding prefetch box settings
+    /// Degrees ahead of aircraft in direction of travel per axis.
+    ///
+    /// Must be >= X-Plane's ~3.5° look-ahead to ensure tiles are ready
+    /// before X-Plane requests them.
+    /// Range: 1.0 - 6.0
+    pub forward_margin: f64,
+
+    /// Degrees behind aircraft per axis.
+    ///
+    /// Keeps recently-passed tiles available for X-Plane's trailing edge.
+    /// Range: 0.5 - 3.0
+    pub behind_margin: f64,
 }
 
 impl Default for AdaptivePrefetchConfig {
@@ -151,6 +165,8 @@ impl Default for AdaptivePrefetchConfig {
             stale_region_timeout: Duration::from_secs(120),
             default_window_rows: 3,
             window_lon_extent: 3.0,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
         }
     }
 }
