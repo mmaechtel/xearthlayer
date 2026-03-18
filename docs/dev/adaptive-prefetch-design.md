@@ -307,11 +307,22 @@ The `SceneryWindow` is the core computational model. It derives window dimension
 |-------|-----------|--------------|
 | `Uninitialized` | No telemetry, no FUSE data | No predictions |
 | `Assumed` | Telemetry present, no FUSE activity (ocean/sparse start) | Default dimensions (3 lat × dynamic lon based on latitude) |
-| `Ready` | First tracker bounds observed | Empirical dimensions (3 lat × 3/cos(lat) lon) centered on tracker center |
+| `Ready` | First tracker bounds observed, or first boundary crossing | Fixed dimensions (3 lat × 3/cos(lat) lon) centered on aircraft position |
 
-### Window Derivation
+### Sliding Prefetch Box (Cruise Phase)
 
-When SceneTracker first reports `loaded_bounds()`, the window transitions directly to `Ready` using empirical dimensions (~3° lat × ~3°/cos(lat) lon) centered on the tracker's reported center. These dimensions are based on direct measurement of X-Plane's in-sim map at three airports across different latitudes (see whitepaper v1.2). The empirical dimensions are used instead of measured SceneTracker bounds because X-Plane's initial partial load typically reports fewer regions than the actual window size.
+The cruise phase uses a **sliding prefetch box** instead of boundary monitors. The box moves with the aircraft every telemetry tick, biased in the direction of travel:
+
+- **Per-axis bias:** 3° ahead, 1° behind on any axis with a forward heading component
+- **Symmetric perpendicular:** 2° each side on axes with no heading component (exact cardinal headings)
+- **Region enumeration:** DSF regions (1°×1°) within the box are enumerated via `floor()` arithmetic
+- **Deduplication:** GeoIndex tracks `PrefetchedRegion` state — only new regions trigger tile expansion
+
+This replaced the boundary-monitor approach which had a fundamental timing problem: X-Plane loads tiles 3.3-3.7° ahead of the aircraft, but boundary monitors only triggered 1° from the window edge, leaving zero lead time for prefetch. The sliding box maintains tiles 3° ahead at all times.
+
+**Empirical basis:** LOWW→LPPT flight testing (2026-03-17) showed X-Plane consistently loads 2 DSF columns/rows beyond its current boundary when the aircraft is ~1° away. A 3° forward margin covers this with a 1° safety buffer.
+
+**SceneryWindow retained for:** retention tracking (`update_retention()`), world rebuild detection (`check_for_rebuild()`). The `center_on_position()` call keeps the window aligned for retention eviction.
 
 ### World Rebuild Detection
 

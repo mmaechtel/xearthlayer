@@ -56,7 +56,7 @@ impl Default for SceneryWindowConfig {
             default_rows: 3,
             lon_extent: 3.0,
             buffer: 1,
-            trigger_distance: 1.5,
+            trigger_distance: 1.0,
             load_depth_lat: 3,
             load_depth_lon: 2,
         }
@@ -172,21 +172,11 @@ impl SceneryWindow {
                 self.init_monitors_from_bounds(&expanded);
             }
             WindowState::Ready => {
-                // Slide the monitors to track X-Plane's evolving loaded area.
-                // The SceneTracker's bounds reflect what X-Plane has actually
-                // requested, so we keep the window aligned as the aircraft moves.
-                if let Some(ref mut lat_mon) = self.lat_monitor {
-                    lat_mon.update_edges(bounds.min_lat, bounds.max_lat);
-                }
-                if let Some(ref mut lon_mon) = self.lon_monitor {
-                    lon_mon.update_edges(bounds.min_lon, bounds.max_lon);
-                }
-                self.last_bounds = Some((
-                    bounds.min_lat,
-                    bounds.max_lat,
-                    bounds.min_lon,
-                    bounds.max_lon,
-                ));
+                // In position-based mode, Ready state no longer slides
+                // monitors from tracker bounds. Window position is managed
+                // by center_on_position() called after boundary crossings.
+                // Tracker data is only used for the initial Uninitialized → Ready
+                // transition.
             }
         }
     }
@@ -394,6 +384,62 @@ impl SceneryWindow {
         }
 
         false
+    }
+
+    /// Re-center the window on the aircraft's current position.
+    ///
+    /// Moves both boundary monitors so the aircraft is at the center
+    /// of the configured window dimensions. Also recomputes longitude
+    /// columns for the current latitude.
+    ///
+    /// No-op if monitors haven't been initialized yet.
+    pub fn center_on_position(&mut self, lat: f64, lon: f64) {
+        let (rows, _old_cols) = match self.window_size {
+            Some(size) => size,
+            None => return,
+        };
+
+        // Recompute cols for current latitude
+        let cols = self.config.compute_cols(lat);
+        self.window_size = Some((rows, cols));
+
+        let half_rows = rows as f64 / 2.0;
+        let half_cols = cols as f64 / 2.0;
+
+        if let Some(ref mut lat_mon) = self.lat_monitor {
+            lat_mon.update_edges(lat - half_rows, lat + half_rows);
+        }
+        if let Some(ref mut lon_mon) = self.lon_monitor {
+            lon_mon.update_edges(lon - half_cols, lon + half_cols);
+        }
+
+        self.last_bounds = Some((
+            lat - half_rows,
+            lat + half_rows,
+            lon - half_cols,
+            lon + half_cols,
+        ));
+
+        debug!(
+            lat = format!("{:.2}", lat),
+            lon = format!("{:.2}", lon),
+            rows,
+            cols,
+            "scenery window: re-centered on aircraft position"
+        );
+    }
+
+    /// Returns `true` if the aircraft is outside the current window bounds.
+    ///
+    /// Used as a safety net: if the aircraft moves rapidly (or initialization
+    /// centered the window elsewhere), re-centering is triggered unconditionally.
+    pub fn is_aircraft_outside(&self, lat: f64, lon: f64) -> bool {
+        match self.window_bounds() {
+            Some((min_lat, max_lat, min_lon, max_lon)) => {
+                lat < min_lat || lat > max_lat || lon < min_lon || lon > max_lon
+            }
+            None => false, // No monitors yet — can't be "outside"
+        }
     }
 
     /// Initialize boundary monitors from real geographic bounds.
@@ -858,10 +904,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_ready_state_slides_monitors_on_tracker_update() {
-        // Scenario: Window in Ready state at lat 51-54.
-        // SceneTracker reports new bounds shifted south (50-53).
-        // After update, the south boundary should have moved from 51 to 50.
+    fn test_ready_state_slides_via_center_on_position() {
         let config = SceneryWindowConfig {
             trigger_distance: 0.3,
             ..SceneryWindowConfig::default()
@@ -869,96 +912,300 @@ mod tests {
         let mut window = SceneryWindow::new(config);
         let tracker = std::sync::Arc::new(MockSceneTracker::new());
 
-        // Transition to Ready
+        // Transition to Ready via tracker (initial positioning)
         tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
-        window.update_from_tracker(tracker.as_ref());
         window.update_from_tracker(tracker.as_ref());
         assert!(matches!(window.state(), WindowState::Ready));
 
-        // Aircraft at center of window — no crossings
+        // Aircraft at center — no crossings
         let crossings = window.check_boundaries(52.5, 10.0);
         assert!(crossings.is_empty(), "No crossing expected at center");
 
-        // Now SceneTracker reports shifted bounds (aircraft moving south)
-        tracker.set_bounds(make_bounds(50.0, 53.0, 8.0, 12.0));
-        window.update_from_tracker(tracker.as_ref());
+        // Aircraft moves south — re-center window on new position
+        window.center_on_position(50.5, 10.0);
 
-        // Aircraft near new south edge (50.0 + 0.2 = 50.2, within 0.3 trigger)
-        let crossings = window.check_boundaries(50.2, 10.0);
+        // Aircraft near new south edge: at lat 50.5, window = [49.0, 52.0].
+        // Check 49.0 + 0.2 = 49.2, which is 0.2° from min edge → within 0.3 trigger
+        let crossings = window.check_boundaries(49.2, 10.0);
         assert!(
             !crossings.is_empty(),
-            "Should detect crossing near new south edge after window slide"
+            "Should detect crossing near south edge after re-centering"
         );
-        assert!(crossings.iter().any(|c| c.axis == BoundaryAxis::Latitude));
     }
 
     #[test]
-    fn test_window_slides_continuously_through_multiple_updates() {
-        // Simulates an aircraft flying south through multiple DSF boundaries.
-        // Each tracker update should slide the window, enabling new crossings.
+    fn test_window_slides_continuously_via_center_on_position() {
         let config = SceneryWindowConfig {
             trigger_distance: 0.3,
             ..SceneryWindowConfig::default()
         };
-        let mut window = SceneryWindow::new(config);
-        let tracker = std::sync::Arc::new(MockSceneTracker::new());
-
-        // Initialize to Ready at lat 51-54, lon 8-12
-        tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
-        window.update_from_tracker(tracker.as_ref());
-        window.update_from_tracker(tracker.as_ref());
-        assert!(matches!(window.state(), WindowState::Ready));
-
-        let mut crossing_count = 0;
-
-        // Simulate flying south: each step the loaded area shifts by ~1°
-        for step in 0..5 {
-            let south_shift = step as f64;
-            let new_min = 51.0 - south_shift;
-            let new_max = 54.0 - south_shift;
-            tracker.set_bounds(make_bounds(new_min, new_max, 8.0, 12.0));
-            window.update_from_tracker(tracker.as_ref());
-
-            // Check near the south edge
-            let near_south = new_min + 0.2;
-            let crossings = window.check_boundaries(near_south, 10.0);
-            if !crossings.is_empty() {
-                crossing_count += 1;
-            }
-        }
-
-        // Should get crossings at multiple steps, not just the first
-        assert!(
-            crossing_count >= 3,
-            "Expected crossings at multiple sliding positions, got {}",
-            crossing_count
-        );
-    }
-
-    #[test]
-    fn test_window_bounds_reflect_latest_tracker_update() {
-        // After sliding, window_bounds() should return the latest edges.
-        let config = SceneryWindowConfig::default();
         let mut window = SceneryWindow::new(config);
         let tracker = std::sync::Arc::new(MockSceneTracker::new());
 
         // Initialize to Ready
         tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
         window.update_from_tracker(tracker.as_ref());
+        assert!(matches!(window.state(), WindowState::Ready));
+
+        let mut crossing_count = 0;
+
+        // Simulate flying south: each step re-centers 1° further south
+        for step in 0..5 {
+            let aircraft_lat = 52.5 - step as f64;
+            window.center_on_position(aircraft_lat, 10.0);
+
+            // Check near south edge (aircraft_lat - half_rows + 0.2)
+            let south_edge = aircraft_lat - 1.5; // half of 3 rows
+            let near_south = south_edge + 0.2;
+            let crossings = window.check_boundaries(near_south, 10.0);
+            if !crossings.is_empty() {
+                crossing_count += 1;
+            }
+        }
+
+        assert!(
+            crossing_count >= 3,
+            "Expected crossings at multiple positions, got {}",
+            crossing_count
+        );
+    }
+
+    #[test]
+    fn test_window_bounds_reflect_center_on_position() {
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+
+        // Initialize to Ready
+        tracker.set_bounds(make_bounds(51.0, 54.0, 8.0, 12.0));
         window.update_from_tracker(tracker.as_ref());
 
-        let bounds = window.window_bounds();
-        assert_eq!(bounds, Some((51.0, 54.0, 8.0, 12.0)));
+        // Re-center on (50.0, 9.0)
+        // At lat 50°: cols = ceil(3.0/cos(50°)) = 5, half_cols = 2.5
+        window.center_on_position(50.0, 9.0);
 
-        // Slide south
-        tracker.set_bounds(make_bounds(49.0, 52.0, 7.0, 11.0));
+        let bounds = window.window_bounds();
+        let (min_lat, max_lat, min_lon, max_lon) = bounds.unwrap();
+        assert!((min_lat - 48.5).abs() < 0.01);
+        assert!((max_lat - 51.5).abs() < 0.01);
+        assert!((min_lon - 6.5).abs() < 0.01);
+        assert!((max_lon - 11.5).abs() < 0.01);
+    }
+
+    // =========================================================================
+    // Position-based centering tests
+    // =========================================================================
+
+    #[test]
+    fn test_center_on_position_moves_window() {
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        // Lazy-init monitors at (50.0, 7.0) via check_boundaries
+        window.set_assumed_dimensions(3, 50.0);
+        window.check_boundaries(50.0, 7.0);
+
+        // Window should be centered on (50.0, 7.0)
+        let bounds = window.window_bounds().unwrap();
+        assert!((bounds.0 - 48.5).abs() < 0.01); // min_lat
+        assert!((bounds.1 - 51.5).abs() < 0.01); // max_lat
+
+        // Re-center on new position (52.0, 9.0)
+        window.center_on_position(52.0, 9.0);
+
+        let bounds = window.window_bounds().unwrap();
+        // At lat 52°: cols = ceil(3.0/cos(52°)) = ceil(4.87) = 5
+        assert!(
+            (bounds.0 - 50.5).abs() < 0.01,
+            "min_lat should be 50.5, got {}",
+            bounds.0
+        );
+        assert!(
+            (bounds.1 - 53.5).abs() < 0.01,
+            "max_lat should be 53.5, got {}",
+            bounds.1
+        );
+    }
+
+    #[test]
+    fn test_center_on_position_clears_trigger_zone() {
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        window.set_assumed_dimensions(3, 50.0);
+
+        // Aircraft near north edge — should trigger crossing
+        window.check_boundaries(50.0, 7.0); // init monitors
+        let crossings = window.check_boundaries(51.2, 7.0);
+        assert!(
+            !crossings.is_empty(),
+            "Should fire crossing near north edge"
+        );
+
+        // Re-center on aircraft position
+        window.center_on_position(51.2, 7.0);
+
+        // After centering, aircraft is at center — no crossings
+        let crossings = window.check_boundaries(51.2, 7.0);
+        assert!(
+            crossings.is_empty(),
+            "No crossing expected after re-centering"
+        );
+    }
+
+    #[test]
+    fn test_center_on_position_recomputes_cols_for_latitude() {
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        // Start at equator: cols = ceil(3.0/cos(0)) = 3
+        window.set_assumed_dimensions(3, 0.0);
+        assert_eq!(window.window_size(), Some((3, 3)));
+
+        // Lazy-init at equator
+        window.check_boundaries(0.0, 7.0);
+
+        // Re-center at 60°N: cols = ceil(3.0/cos(60°)) = ceil(6.0) = 6
+        window.center_on_position(60.0, 7.0);
+        assert_eq!(window.window_size(), Some((3, 6)));
+    }
+
+    #[test]
+    fn test_center_on_position_noop_before_init() {
+        let mut window = SceneryWindow::new(SceneryWindowConfig::default());
+        // No set_assumed_dimensions, no check_boundaries — monitors are None
+        window.center_on_position(50.0, 7.0); // should not panic
+        assert!(window.window_bounds().is_none());
+    }
+
+    #[test]
+    fn test_is_aircraft_outside_window() {
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        window.set_assumed_dimensions(3, 50.0);
+        window.check_boundaries(50.0, 7.0); // init monitors
+
+        // At center — inside
+        assert!(!window.is_aircraft_outside(50.0, 7.0));
+        // Near edge — inside
+        assert!(!window.is_aircraft_outside(51.0, 7.0));
+        // Beyond north edge — outside
+        assert!(window.is_aircraft_outside(52.0, 7.0));
+        // Beyond south edge — outside
+        assert!(window.is_aircraft_outside(47.0, 7.0));
+        // Beyond east edge — outside
+        assert!(window.is_aircraft_outside(50.0, 12.0));
+        // No monitors — not outside (can't tell)
+        let window2 = SceneryWindow::new(SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        });
+        assert!(!window2.is_aircraft_outside(99.0, 99.0));
+    }
+
+    #[test]
+    fn test_ready_state_ignores_tracker_bound_changes() {
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        let tracker = std::sync::Arc::new(MockSceneTracker::new());
+
+        // Initialize to Ready centered at (50.0, 7.0)
+        tracker.set_bounds(make_bounds(47.0, 53.0, 3.0, 11.0));
+        window.update_from_tracker(tracker.as_ref());
+        assert!(matches!(window.state(), WindowState::Ready));
+
+        let initial_bounds = window.window_bounds().unwrap();
+
+        // Tracker bounds grow (simulating departure drift)
+        tracker.set_bounds(make_bounds(43.0, 53.0, 0.0, 11.0));
         window.update_from_tracker(tracker.as_ref());
 
-        let bounds = window.window_bounds();
+        // Window bounds should NOT have changed
+        let after_bounds = window.window_bounds().unwrap();
         assert_eq!(
-            bounds,
-            Some((49.0, 52.0, 7.0, 11.0)),
-            "window_bounds should reflect latest tracker update"
+            initial_bounds, after_bounds,
+            "Window should not drift with tracker bounds in Ready state"
+        );
+    }
+
+    // =========================================================================
+    // Full flight simulation test
+    // =========================================================================
+
+    #[test]
+    fn test_full_flight_simulation_no_drift() {
+        // Simulate LFMN departure, fly 10° NW
+        let config = SceneryWindowConfig {
+            trigger_distance: 1.0,
+            ..SceneryWindowConfig::default()
+        };
+        let mut window = SceneryWindow::new(config);
+        window.set_assumed_dimensions(3, 43.0); // Nice, France
+
+        // Initialize monitors at departure
+        window.check_boundaries(43.7, 7.3);
+
+        let mut total_crossings = 0;
+        let mut last_crossing_lat = 43.7_f64;
+
+        // Fly NW at ~0.1° increments (simulating ~10km steps)
+        for step in 0..100 {
+            let lat = 43.7 + step as f64 * 0.1;
+            let lon = 7.3 - step as f64 * 0.05;
+
+            let crossings = window.check_boundaries(lat, lon);
+            if !crossings.is_empty() {
+                total_crossings += 1;
+                last_crossing_lat = lat;
+
+                // Re-center after crossing (as coordinator would)
+                window.center_on_position(lat, lon);
+            }
+
+            // Verify window stays near aircraft at all times
+            if let Some((min_lat, max_lat, _, _)) = window.window_bounds() {
+                assert!(
+                    lat >= min_lat && lat <= max_lat,
+                    "Aircraft at {:.1}° should be inside window [{:.1}, {:.1}]",
+                    lat,
+                    min_lat,
+                    max_lat
+                );
+                let span = max_lat - min_lat;
+                assert!(
+                    span <= 4.0,
+                    "Window span {:.1}° should not exceed 4° (configured 3° + margin)",
+                    span
+                );
+            }
+        }
+
+        // Should have had multiple crossings over 10° of travel
+        assert!(
+            total_crossings >= 5,
+            "Expected >=5 crossings over 10°, got {}",
+            total_crossings
+        );
+        // Last crossing should be near the aircraft's final position
+        assert!(
+            last_crossing_lat > 50.0,
+            "Last crossing at {:.1}° should be near final position, not departure",
+            last_crossing_lat
         );
     }
 }

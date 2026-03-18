@@ -17,12 +17,12 @@ use crate::prefetch::state::{AircraftState, SharedPrefetchStatus};
 use crate::prefetch::throttler::PrefetchThrottler;
 use crate::prefetch::SceneryIndex;
 
-use super::super::boundary_monitor::BoundaryAxis;
 use super::super::boundary_strategy::BoundaryStrategy;
 use super::super::calibration::{PerformanceCalibration, StrategyMode};
 use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
 use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
+use super::super::prefetch_box::PrefetchBox;
 use super::super::scenery_window::{SceneryWindow, SceneryWindowConfig};
 use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
 use super::super::transition_throttle::TransitionThrottle;
@@ -153,8 +153,11 @@ pub struct AdaptivePrefetchCoordinator {
     /// Scenery window model for boundary-driven prefetch.
     scenery_window: SceneryWindow,
 
-    /// Boundary strategy for generating target regions.
+    /// Boundary strategy for region lifecycle management.
     boundary_strategy: BoundaryStrategy,
+
+    /// Sliding prefetch box for cruise-phase region detection.
+    prefetch_box: PrefetchBox,
 
     /// Scene tracker for observing X-Plane tile requests.
     scene_tracker: Option<Arc<dyn SceneTracker>>,
@@ -212,6 +215,7 @@ impl AdaptivePrefetchCoordinator {
         // cols will be recomputed from real latitude on first tracker update.
         scenery_window.set_assumed_dimensions(config.default_window_rows, 0.0);
         let boundary_strategy = BoundaryStrategy::new();
+        let prefetch_box = PrefetchBox::new(config.forward_margin, config.behind_margin);
 
         Self {
             config,
@@ -233,6 +237,7 @@ impl AdaptivePrefetchCoordinator {
             geo_index: None,
             scenery_window,
             boundary_strategy,
+            prefetch_box,
             scene_tracker: None,
             scenery_index: None,
             pending_tiles: Vec::new(),
@@ -482,119 +487,116 @@ impl AdaptivePrefetchCoordinator {
                 return None;
             }
             FlightPhase::Cruise => {
-                // Update scenery window from scene tracker
-                if let Some(ref tracker) = self.scene_tracker {
-                    self.scenery_window.update_from_tracker(tracker.as_ref());
-                }
-
-                // Update retained region tracking (drives eviction of stale state)
                 let (lat, lon) = position;
+
+                // Update retained region tracking from prefetch box bounds.
+                // This must cover the full prefetch box + buffer so that
+                // evict_non_retained() doesn't remove regions we just prefetched.
                 if let Some(ref geo_index) = self.geo_index {
-                    self.scenery_window.update_retention(lat, lon, geo_index);
+                    self.prefetch_box.update_retention(
+                        lat,
+                        lon,
+                        track,
+                        self.config.window_buffer as i32,
+                        geo_index,
+                    );
                 }
 
-                // Check boundary crossings
-                let crossings = self.scenery_window.check_boundaries(lat, lon);
+                // Compute sliding prefetch box regions
+                let new_regions = if let Some(ref geo_index) = self.geo_index {
+                    self.prefetch_box.new_regions(lat, lon, track, geo_index)
+                } else {
+                    self.prefetch_box.regions(lat, lon, track)
+                };
 
-                if crossings.is_empty() {
+                if new_regions.is_empty() {
                     tracing::trace!(
                         lat = format!("{:.2}", lat),
                         lon = format!("{:.2}", lon),
-                        window_state = ?self.scenery_window.state(),
-                        "Cruise: no boundary crossings"
+                        track = format!("{:.1}", track),
+                        "Cruise: no new regions in prefetch box"
                     );
                     return None;
                 }
 
-                // Generate target regions from crossings
-                let bounds = self.scenery_window.window_bounds();
-                let mut all_tiles = Vec::new();
+                // Log the box bounds for debugging
+                let (box_lat_min, box_lat_max, box_lon_min, box_lon_max) =
+                    self.prefetch_box.bounds(lat, lon, track);
+                tracing::debug!(
+                    aircraft = format!("{:.4}°, {:.4}°", lat, lon),
+                    track = format!("{:.1}°", track),
+                    box_bounds = format!(
+                        "[{:.1}:{:.1}N, {:.1}:{:.1}E]",
+                        box_lat_min, box_lat_max, box_lon_min, box_lon_max
+                    ),
+                    new_regions = new_regions.len(),
+                    "Sliding prefetch box: new regions detected"
+                );
 
-                if let Some((lat_min, lat_max, lon_min, lon_max)) = bounds {
-                    // Log each detected crossing with full context
-                    for crossing in &crossings {
-                        let dir_label = match (crossing.axis, crossing.direction) {
-                            (BoundaryAxis::Latitude, 1) => "N",
-                            (BoundaryAxis::Latitude, _) => "S",
-                            (BoundaryAxis::Longitude, 1) => "E",
-                            (BoundaryAxis::Longitude, _) => "W",
-                        };
-                        tracing::debug!(
-                            axis = ?crossing.axis,
-                            direction = dir_label,
-                            dsf_coord = crossing.dsf_coord,
-                            depth = crossing.depth,
-                            urgency = format!("{:.2}", crossing.urgency),
-                            aircraft = format!("{:.4}°, {:.4}°", lat, lon),
-                            window = format!("[{:.1}:{:.1}N, {:.1}:{:.1}E]",
-                                lat_min, lat_max, lon_min, lon_max),
-                            "Boundary crossing detected"
-                        );
-                    }
-
-                    for crossing in &crossings {
-                        let cross_range = match crossing.axis {
-                            BoundaryAxis::Latitude => {
-                                (lon_min.floor() as i32, (lon_max - 1.0).floor() as i32)
-                            }
-                            BoundaryAxis::Longitude => {
-                                (lat_min.floor() as i32, (lat_max - 1.0).floor() as i32)
-                            }
-                        };
-                        let targets = self
-                            .boundary_strategy
-                            .generate_regions(crossing, cross_range);
+                // Expand regions to tiles. Track which region each tile belongs
+                // to so we can mark only submitted regions as InProgress after
+                // truncation. Regions with no tiles are marked NoCoverage immediately.
+                let mut tiles_with_region: Vec<(TileCoord, DsfRegion)> = Vec::new();
+                for region in &new_regions {
+                    let tiles = self.get_tiles_for_region(region);
+                    if tiles.is_empty() {
                         if let Some(ref geo_index) = self.geo_index {
-                            let filtered = self
-                                .boundary_strategy
-                                .filter_already_handled(&targets, geo_index);
-                            for target in filtered {
-                                let tiles = self.get_tiles_for_region(&target.region);
-                                if tiles.is_empty() {
-                                    self.boundary_strategy
-                                        .mark_no_coverage(&target.region, geo_index);
-                                    tracing::debug!(
-                                        region_lat = target.region.lat,
-                                        region_lon = target.region.lon,
-                                        depth_index = target.depth_index,
-                                        "Prefetch target: no coverage"
-                                    );
-                                } else {
-                                    self.boundary_strategy
-                                        .mark_in_progress(&target.region, geo_index);
-                                    tracing::debug!(
-                                        region_lat = target.region.lat,
-                                        region_lon = target.region.lon,
-                                        depth_index = target.depth_index,
-                                        tiles = tiles.len(),
-                                        axis = ?target.axis,
-                                        "Prefetch target: region queued"
-                                    );
-                                    all_tiles.extend(tiles);
-                                }
-                            }
-                        } else {
-                            // No GeoIndex -- expand all targets without filtering
-                            for target in &targets {
-                                all_tiles.extend(self.get_tiles_for_region(&target.region));
-                            }
+                            self.boundary_strategy.mark_no_coverage(region, geo_index);
+                        }
+                    } else {
+                        for tile in tiles {
+                            tiles_with_region.push((tile, *region));
                         }
                     }
                 }
 
-                if all_tiles.is_empty() {
+                if tiles_with_region.is_empty() {
                     return None;
                 }
 
-                // Sort tiles by distance from aircraft so near-boundary tiles
-                // are submitted first. Without this, HashSet iteration order
-                // within each region is random, causing far-edge tiles to be
-                // processed while X-Plane is already requesting near-edge ones.
-                crate::coord::sort_tiles_by_distance(&mut all_tiles, lat, lon);
+                // Sort tiles by distance from aircraft so nearest tiles
+                // are submitted first.
+                tiles_with_region.sort_by(|a, b| {
+                    let (a_lat, a_lon) = a.0.to_lat_lon();
+                    let (b_lat, b_lon) = b.0.to_lat_lon();
+                    let da = (a_lat - lat).powi(2) + (a_lon - lon).powi(2);
+                    let db = (b_lat - lat).powi(2) + (b_lon - lon).powi(2);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Enforce max_tiles_per_cycle limit. Only regions whose tiles
+                // survive truncation are marked InProgress — regions whose tiles
+                // are entirely truncated stay untracked and are retried next tick.
+                let max_tiles = self.config.max_tiles_per_cycle as usize;
+                if tiles_with_region.len() > max_tiles {
+                    tracing::debug!(
+                        total = tiles_with_region.len(),
+                        limit = max_tiles,
+                        "Sliding box prefetch capped at max_tiles_per_cycle"
+                    );
+                    tiles_with_region.truncate(max_tiles);
+                }
+
+                // Mark submitted regions as InProgress
+                let mut marked_regions = HashSet::new();
+                let mut all_tiles = Vec::with_capacity(tiles_with_region.len());
+                for (tile, region) in tiles_with_region {
+                    if marked_regions.insert(region) {
+                        if let Some(ref geo_index) = self.geo_index {
+                            self.boundary_strategy.mark_in_progress(&region, geo_index);
+                        }
+                        tracing::debug!(
+                            region_lat = region.lat,
+                            region_lon = region.lon,
+                            "Prefetch target: region queued"
+                        );
+                    }
+                    all_tiles.push(tile);
+                }
 
                 let total = all_tiles.len();
-                self.status.active_strategy = "boundary";
-                PrefetchPlan::with_tiles(all_tiles, &calibration, "boundary", 0, total)
+                self.status.active_strategy = "sliding_box";
+                PrefetchPlan::with_tiles(all_tiles, &calibration, "sliding_box", 0, total)
             }
         };
 
@@ -2309,6 +2311,193 @@ mod tests {
             "Deferred pending tiles ({}) should not exceed MAX_PENDING_TILES ({})",
             coord.pending_tiles.len(),
             MAX_PENDING_TILES
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Position-based window centering tests (#86)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sliding_box_generates_plan_on_first_cruise_tick() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Enter cruise — no scene tracker or boundary monitors needed
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // First cruise tick should generate a plan from the sliding box
+        let plan = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        if coord.status.phase == FlightPhase::Cruise {
+            assert!(
+                plan.is_some(),
+                "Sliding box should generate plan on first cruise tick"
+            );
+            let plan = plan.unwrap();
+            assert!(!plan.tiles.is_empty(), "Plan should have tiles");
+            assert_eq!(coord.status.active_strategy, "sliding_box");
+        }
+    }
+
+    #[test]
+    fn test_sliding_box_deduplicates_across_ticks() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // First tick — generates plan, marks regions InProgress
+        let plan1 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        // Second tick at same position — all regions already tracked
+        let plan2 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        if coord.status.phase == FlightPhase::Cruise {
+            assert!(plan1.is_some(), "First tick should generate plan");
+            assert!(
+                plan2.is_none(),
+                "Second tick at same position should generate no plan (all regions tracked)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_long_flight_generates_plans_at_each_position() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+        coord.update((50.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut plans_generated = 0;
+
+        // Fly 20° west in 1° steps from lon=15. The box is 4° wide (3° ahead +
+        // 1° behind), so new regions enter the box every 1° of westward travel.
+        for step in 0..20 {
+            let lon = 15.0 - step as f64;
+            let plan = coord.update((50.0, lon), 270.0, 200.0, 35000.0);
+            if plan.is_some() {
+                plans_generated += 1;
+            }
+        }
+
+        assert!(
+            plans_generated >= 5,
+            "Should generate plans as aircraft crosses new DSF boundaries, got {}",
+            plans_generated
+        );
+    }
+
+    #[test]
+    fn test_truncated_regions_not_marked_in_progress() {
+        use crate::geo_index::{GeoIndex, PrefetchedRegion};
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        // Very low cap to force truncation — only 5 tiles allowed
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            max_tiles_per_cycle: 5,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index));
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // First tick — box covers ~16 regions but only 5 tiles submitted
+        let plan1 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        if coord.status.phase != FlightPhase::Cruise {
+            return; // Skip if phase detector didn't reach cruise
+        }
+
+        assert!(plan1.is_some(), "Should generate plan on first tick");
+        let plan1 = plan1.unwrap();
+        assert!(
+            plan1.tiles.len() <= 5,
+            "Plan should be capped at 5 tiles, got {}",
+            plan1.tiles.len()
+        );
+
+        // Count how many regions are marked InProgress
+        let tracked_count = geo_index.regions::<PrefetchedRegion>().len();
+
+        // Key: with 5 tiles and ~16 tiles per region, at most 1-2 regions
+        // should be marked. If all 16 regions were marked, it's the bug.
+        assert!(
+            tracked_count < 10,
+            "Only regions with submitted tiles should be marked InProgress, \
+             but {} regions were tracked (expected < 10)",
+            tracked_count
+        );
+
+        // Second tick at same position — should find more new regions to submit
+        let plan2 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        assert!(
+            plan2.is_some(),
+            "Second tick should find untracked regions from truncated first tick"
         );
     }
 }

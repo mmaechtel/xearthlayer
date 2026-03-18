@@ -78,6 +78,7 @@ mod config;
 mod coordinator;
 mod ground_strategy;
 mod phase_detector;
+mod prefetch_box;
 mod scenery_window;
 mod strategy;
 mod transition_throttle;
@@ -94,6 +95,7 @@ pub use config::{AdaptivePrefetchConfig, CalibrationConfig, KillswitchMode, Pref
 pub use coordinator::{AdaptivePrefetchCoordinator, CoordinatorStatus};
 pub use ground_strategy::{GroundStrategy, LoadedAreaBounds};
 pub use phase_detector::{FlightPhase, PhaseDetector};
+pub use prefetch_box::PrefetchBox;
 pub use scenery_window::{SceneryWindow, SceneryWindowConfig, WindowState};
 pub use strategy::{AdaptivePrefetchStrategy, PrefetchPlan, PrefetchPlanMetadata, TrackQuadrant};
 pub use transition_throttle::TransitionThrottle;
