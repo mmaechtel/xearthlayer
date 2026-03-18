@@ -18,11 +18,11 @@ use crate::prefetch::throttler::PrefetchThrottler;
 use crate::prefetch::SceneryIndex;
 
 use super::super::boundary_strategy::BoundaryStrategy;
-use super::super::prefetch_box::PrefetchBox;
 use super::super::calibration::{PerformanceCalibration, StrategyMode};
 use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
 use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
+use super::super::prefetch_box::PrefetchBox;
 use super::super::scenery_window::{SceneryWindow, SceneryWindowConfig};
 use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
 use super::super::transition_throttle::TransitionThrottle;
@@ -535,13 +535,11 @@ impl AdaptivePrefetchCoordinator {
                     let tiles = self.get_tiles_for_region(region);
                     if tiles.is_empty() {
                         if let Some(ref geo_index) = self.geo_index {
-                            self.boundary_strategy
-                                .mark_no_coverage(region, geo_index);
+                            self.boundary_strategy.mark_no_coverage(region, geo_index);
                         }
                     } else {
                         if let Some(ref geo_index) = self.geo_index {
-                            self.boundary_strategy
-                                .mark_in_progress(region, geo_index);
+                            self.boundary_strategy.mark_in_progress(region, geo_index);
                         }
                         tracing::debug!(
                             region_lat = region.lat,
@@ -2286,51 +2284,123 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_long_flight_window_follows_aircraft_not_tracker() {
+    fn test_sliding_box_generates_plan_on_first_cruise_tick() {
         use crate::geo_index::GeoIndex;
 
-        let tracker: Arc<dyn crate::scene_tracker::SceneTracker> =
-            Arc::new(StableBoundsTracker::with_bounds(47.0, 53.0, 3.0, 11.0));
         let geo_index = Arc::new(GeoIndex::new());
 
         let config = AdaptivePrefetchConfig {
             mode: PrefetchMode::Aggressive,
-            trigger_distance: 1.0,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
             ..Default::default()
         };
         let mut coord = AdaptivePrefetchCoordinator::new(config)
             .with_calibration(test_calibration())
-            .with_scene_tracker(tracker)
             .with_geo_index(geo_index);
 
         coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
 
-        // Enter cruise phase
-        coord.update((50.0, 7.0), 0.0, 200.0, 35000.0);
+        // Enter cruise — no scene tracker or boundary monitors needed
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
         std::thread::sleep(std::time::Duration::from_millis(5));
-        coord.update((50.0, 7.0), 0.0, 200.0, 35000.0);
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        // Fly 10° north — if window drifts, crossings would target departure lon
-        for step in 0..10 {
-            let lat = 50.0 + step as f64;
-            coord.update((lat, 7.0), 0.0, 200.0, 35000.0);
+        // First cruise tick should generate a plan from the sliding box
+        let plan = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        if coord.status.phase == FlightPhase::Cruise {
+            assert!(
+                plan.is_some(),
+                "Sliding box should generate plan on first cruise tick"
+            );
+            let plan = plan.unwrap();
+            assert!(!plan.tiles.is_empty(), "Plan should have tiles");
+            assert_eq!(coord.status.active_strategy, "sliding_box");
+        }
+    }
+
+    #[test]
+    fn test_sliding_box_deduplicates_across_ticks() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // First tick — generates plan, marks regions InProgress
+        let plan1 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        // Second tick at same position — all regions already tracked
+        let plan2 = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+
+        if coord.status.phase == FlightPhase::Cruise {
+            assert!(plan1.is_some(), "First tick should generate plan");
+            assert!(
+                plan2.is_none(),
+                "Second tick at same position should generate no plan (all regions tracked)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_long_flight_generates_plans_at_each_position() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+        coord.update((50.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut plans_generated = 0;
+
+        // Fly 20° west in 1° steps from lon=15. The box is 4° wide (3° ahead +
+        // 1° behind), so new regions enter the box every 1° of westward travel.
+        for step in 0..20 {
+            let lon = 15.0 - step as f64;
+            let plan = coord.update((50.0, lon), 270.0, 200.0, 35000.0);
+            if plan.is_some() {
+                plans_generated += 1;
+            }
         }
 
-        // Window should be near aircraft (lat ~60), not spanning 47-60
-        let window_bounds = coord.scenery_window.window_bounds();
-        if let Some((min_lat, max_lat, _, _)) = window_bounds {
-            let span = max_lat - min_lat;
-            assert!(
-                span <= 5.0,
-                "Window span should be ~3° (configured), not {} (drifted)",
-                span
-            );
-            assert!(
-                max_lat >= 58.0,
-                "Window max_lat should be near aircraft (~60°), got {}",
-                max_lat
-            );
-        }
+        assert!(
+            plans_generated >= 5,
+            "Should generate plans as aircraft crosses new DSF boundaries, got {}",
+            plans_generated
+        );
     }
 }
