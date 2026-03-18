@@ -17,8 +17,8 @@ use crate::prefetch::state::{AircraftState, SharedPrefetchStatus};
 use crate::prefetch::throttler::PrefetchThrottler;
 use crate::prefetch::SceneryIndex;
 
-use super::super::boundary_monitor::BoundaryAxis;
 use super::super::boundary_strategy::BoundaryStrategy;
+use super::super::prefetch_box::PrefetchBox;
 use super::super::calibration::{PerformanceCalibration, StrategyMode};
 use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
 use super::super::ground_strategy::GroundStrategy;
@@ -153,8 +153,11 @@ pub struct AdaptivePrefetchCoordinator {
     /// Scenery window model for boundary-driven prefetch.
     scenery_window: SceneryWindow,
 
-    /// Boundary strategy for generating target regions.
+    /// Boundary strategy for region lifecycle management.
     boundary_strategy: BoundaryStrategy,
+
+    /// Sliding prefetch box for cruise-phase region detection.
+    prefetch_box: PrefetchBox,
 
     /// Scene tracker for observing X-Plane tile requests.
     scene_tracker: Option<Arc<dyn SceneTracker>>,
@@ -212,6 +215,7 @@ impl AdaptivePrefetchCoordinator {
         // cols will be recomputed from real latitude on first tracker update.
         scenery_window.set_assumed_dimensions(config.default_window_rows, 0.0);
         let boundary_strategy = BoundaryStrategy::new();
+        let prefetch_box = PrefetchBox::new(config.forward_margin, config.behind_margin);
 
         Self {
             config,
@@ -233,6 +237,7 @@ impl AdaptivePrefetchCoordinator {
             geo_index: None,
             scenery_window,
             boundary_strategy,
+            prefetch_box,
             scene_tracker: None,
             scenery_index: None,
             pending_tiles: Vec::new(),
@@ -484,124 +489,81 @@ impl AdaptivePrefetchCoordinator {
             FlightPhase::Cruise => {
                 let (lat, lon) = position;
 
-                // Safety net: if aircraft is outside window (rapid movement, init edge case),
-                // re-center unconditionally so crossings can fire.
-                if self.scenery_window.is_aircraft_outside(lat, lon) {
-                    self.scenery_window.center_on_position(lat, lon);
-                }
+                // Keep SceneryWindow centered on aircraft for retention tracking.
+                // update_retention() depends on window position for eviction decisions.
+                self.scenery_window.center_on_position(lat, lon);
 
                 // Update retained region tracking (drives eviction of stale state)
                 if let Some(ref geo_index) = self.geo_index {
                     self.scenery_window.update_retention(lat, lon, geo_index);
                 }
 
-                // Check boundary crossings
-                let crossings = self.scenery_window.check_boundaries(lat, lon);
+                // Compute sliding prefetch box regions
+                let new_regions = if let Some(ref geo_index) = self.geo_index {
+                    self.prefetch_box.new_regions(lat, lon, track, geo_index)
+                } else {
+                    self.prefetch_box.regions(lat, lon, track)
+                };
 
-                if crossings.is_empty() {
+                if new_regions.is_empty() {
                     tracing::trace!(
                         lat = format!("{:.2}", lat),
                         lon = format!("{:.2}", lon),
-                        window_state = ?self.scenery_window.state(),
-                        "Cruise: no boundary crossings"
+                        track = format!("{:.1}", track),
+                        "Cruise: no new regions in prefetch box"
                     );
                     return None;
                 }
 
-                // Generate target regions from crossings
-                let bounds = self.scenery_window.window_bounds();
+                // Log the box bounds for debugging
+                let (box_lat_min, box_lat_max, box_lon_min, box_lon_max) =
+                    self.prefetch_box.bounds(lat, lon, track);
+                tracing::debug!(
+                    aircraft = format!("{:.4}°, {:.4}°", lat, lon),
+                    track = format!("{:.1}°", track),
+                    box_bounds = format!(
+                        "[{:.1}:{:.1}N, {:.1}:{:.1}E]",
+                        box_lat_min, box_lat_max, box_lon_min, box_lon_max
+                    ),
+                    new_regions = new_regions.len(),
+                    "Sliding prefetch box: new regions detected"
+                );
+
+                // Expand regions to tiles and track state
                 let mut all_tiles = Vec::new();
-
-                if let Some((lat_min, lat_max, lon_min, lon_max)) = bounds {
-                    // Log each detected crossing with full context
-                    for crossing in &crossings {
-                        let dir_label = match (crossing.axis, crossing.direction) {
-                            (BoundaryAxis::Latitude, 1) => "N",
-                            (BoundaryAxis::Latitude, _) => "S",
-                            (BoundaryAxis::Longitude, 1) => "E",
-                            (BoundaryAxis::Longitude, _) => "W",
-                        };
-                        tracing::debug!(
-                            axis = ?crossing.axis,
-                            direction = dir_label,
-                            dsf_coord = crossing.dsf_coord,
-                            depth = crossing.depth,
-                            urgency = format!("{:.2}", crossing.urgency),
-                            aircraft = format!("{:.4}°, {:.4}°", lat, lon),
-                            window = format!("[{:.1}:{:.1}N, {:.1}:{:.1}E]",
-                                lat_min, lat_max, lon_min, lon_max),
-                            "Boundary crossing detected"
-                        );
-                    }
-
-                    for crossing in &crossings {
-                        let cross_range = match crossing.axis {
-                            BoundaryAxis::Latitude => {
-                                (lon_min.floor() as i32, (lon_max - 1.0).floor() as i32)
-                            }
-                            BoundaryAxis::Longitude => {
-                                (lat_min.floor() as i32, (lat_max - 1.0).floor() as i32)
-                            }
-                        };
-                        let targets = self
-                            .boundary_strategy
-                            .generate_regions(crossing, cross_range);
+                for region in &new_regions {
+                    let tiles = self.get_tiles_for_region(region);
+                    if tiles.is_empty() {
                         if let Some(ref geo_index) = self.geo_index {
-                            let filtered = self
-                                .boundary_strategy
-                                .filter_already_handled(&targets, geo_index);
-                            for target in filtered {
-                                let tiles = self.get_tiles_for_region(&target.region);
-                                if tiles.is_empty() {
-                                    self.boundary_strategy
-                                        .mark_no_coverage(&target.region, geo_index);
-                                    tracing::debug!(
-                                        region_lat = target.region.lat,
-                                        region_lon = target.region.lon,
-                                        depth_index = target.depth_index,
-                                        "Prefetch target: no coverage"
-                                    );
-                                } else {
-                                    self.boundary_strategy
-                                        .mark_in_progress(&target.region, geo_index);
-                                    tracing::debug!(
-                                        region_lat = target.region.lat,
-                                        region_lon = target.region.lon,
-                                        depth_index = target.depth_index,
-                                        tiles = tiles.len(),
-                                        axis = ?target.axis,
-                                        "Prefetch target: region queued"
-                                    );
-                                    all_tiles.extend(tiles);
-                                }
-                            }
-                        } else {
-                            // No GeoIndex -- expand all targets without filtering
-                            for target in &targets {
-                                all_tiles.extend(self.get_tiles_for_region(&target.region));
-                            }
+                            self.boundary_strategy
+                                .mark_no_coverage(region, geo_index);
                         }
+                    } else {
+                        if let Some(ref geo_index) = self.geo_index {
+                            self.boundary_strategy
+                                .mark_in_progress(region, geo_index);
+                        }
+                        tracing::debug!(
+                            region_lat = region.lat,
+                            region_lon = region.lon,
+                            tiles = tiles.len(),
+                            "Prefetch target: region queued"
+                        );
+                        all_tiles.extend(tiles);
                     }
                 }
-
-                // Re-center window on aircraft after processing crossings.
-                // This ensures the window follows the aircraft without
-                // relying on SceneTracker bounds (which drift over long flights).
-                self.scenery_window.center_on_position(lat, lon);
 
                 if all_tiles.is_empty() {
                     return None;
                 }
 
                 // Sort tiles by distance from aircraft so near-boundary tiles
-                // are submitted first. Without this, HashSet iteration order
-                // within each region is random, causing far-edge tiles to be
-                // processed while X-Plane is already requesting near-edge ones.
+                // are submitted first.
                 crate::coord::sort_tiles_by_distance(&mut all_tiles, lat, lon);
 
                 let total = all_tiles.len();
-                self.status.active_strategy = "boundary";
-                PrefetchPlan::with_tiles(all_tiles, &calibration, "boundary", 0, total)
+                self.status.active_strategy = "sliding_box";
+                PrefetchPlan::with_tiles(all_tiles, &calibration, "sliding_box", 0, total)
             }
         };
 
