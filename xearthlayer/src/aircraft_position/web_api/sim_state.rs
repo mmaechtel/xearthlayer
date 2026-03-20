@@ -5,8 +5,19 @@
 //! X-Plane's Web API datarefs.
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use super::datarefs;
+
+/// Thread-safe shared sim state for cross-component access.
+///
+/// Updated by the [`super::WebApiAdapter`], read by the prefetch coordinator.
+pub type SharedSimState = Arc<RwLock<SimState>>;
+
+/// Create a new [`SharedSimState`] with default values.
+pub fn shared_sim_state() -> SharedSimState {
+    Arc::new(RwLock::new(SimState::default()))
+}
 
 /// X-Plane sim state from direct dataref observation.
 ///

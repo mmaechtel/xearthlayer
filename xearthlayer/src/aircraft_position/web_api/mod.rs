@@ -10,18 +10,5 @@ pub mod config;
 pub mod datarefs;
 pub mod sim_state;
 
-use std::sync::{Arc, RwLock};
-
-use self::sim_state::SimState;
-
 pub use adapter::WebApiAdapter;
-
-/// Thread-safe shared sim state for cross-component access.
-///
-/// Updated by the [`WebApiAdapter`], read by the prefetch coordinator.
-pub type SharedSimState = Arc<RwLock<SimState>>;
-
-/// Create a new [`SharedSimState`] with default values.
-pub fn shared_sim_state() -> SharedSimState {
-    Arc::new(RwLock::new(SimState::default()))
-}
+pub use sim_state::{shared_sim_state, SharedSimState};
