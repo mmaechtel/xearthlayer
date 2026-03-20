@@ -111,8 +111,11 @@ pub struct AdaptivePrefetchCoordinator {
     /// Ground strategy.
     ground_strategy: GroundStrategy,
 
-    /// Circuit breaker for throttling.
+    /// Circuit breaker for throttling (legacy, being replaced by SimState).
     pub(super) throttler: Option<Arc<dyn PrefetchThrottler>>,
+
+    /// X-Plane sim state from Web API (direct detection, replaces heuristics).
+    sim_state: crate::aircraft_position::web_api::sim_state::SimState,
 
     /// DDS client for submitting prefetch requests.
     pub(super) dds_client: Option<Arc<dyn DdsClient>>,
@@ -224,6 +227,7 @@ impl AdaptivePrefetchCoordinator {
             transition_throttle,
             ground_strategy,
             throttler: None,
+            sim_state: crate::aircraft_position::web_api::sim_state::SimState::default(),
             dds_client: None,
             memory_cache: None,
             cached_tiles: HashSet::new(),
@@ -256,10 +260,15 @@ impl AdaptivePrefetchCoordinator {
         self
     }
 
-    /// Set the circuit breaker for throttling.
+    /// Set the circuit breaker for throttling (legacy).
     pub fn with_throttler(mut self, throttler: Arc<dyn PrefetchThrottler>) -> Self {
         self.throttler = Some(throttler);
         self
+    }
+
+    /// Update the sim state from the Web API adapter.
+    pub fn set_sim_state(&mut self, state: crate::aircraft_position::web_api::sim_state::SimState) {
+        self.sim_state = state;
     }
 
     /// Set the DDS client for submitting prefetch requests.
@@ -428,6 +437,16 @@ impl AdaptivePrefetchCoordinator {
         ground_speed_kt: f32,
         msl_ft: f32,
     ) -> Option<PrefetchPlan> {
+        // Check sim state (scenery loading, replay → skip)
+        if !self.sim_state.should_prefetch() {
+            tracing::trace!(
+                scenery_loading = self.sim_state.scenery_loading,
+                replay = self.sim_state.replay,
+                "Prefetch skipped by sim state"
+            );
+            return None;
+        }
+
         // Check if enabled
         if !self.config.enabled {
             self.status.enabled = false;
@@ -2499,5 +2518,85 @@ mod tests {
             plan2.is_some(),
             "Second tick should find untracked regions from truncated first tick"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SimState integration tests (#79)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_coordinator_skips_when_scenery_loading() {
+        use crate::aircraft_position::web_api::sim_state::SimState;
+
+        let mut coord = AdaptivePrefetchCoordinator::with_defaults()
+            .with_calibration(test_calibration());
+
+        let loading = SimState {
+            scenery_loading: true,
+            ..SimState::default()
+        };
+        coord.set_sim_state(loading);
+
+        let plan = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        assert!(plan.is_none(), "Should skip prefetch when scenery loading");
+    }
+
+    #[test]
+    fn test_coordinator_skips_during_replay() {
+        use crate::aircraft_position::web_api::sim_state::SimState;
+
+        let mut coord = AdaptivePrefetchCoordinator::with_defaults()
+            .with_calibration(test_calibration());
+
+        let replay = SimState {
+            replay: true,
+            ..SimState::default()
+        };
+        coord.set_sim_state(replay);
+
+        let plan = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        assert!(plan.is_none(), "Should skip prefetch during replay");
+    }
+
+    #[test]
+    fn test_coordinator_continues_when_paused() {
+        use crate::aircraft_position::web_api::sim_state::SimState;
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            forward_margin: 3.0,
+            behind_margin: 1.0,
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(geo_index);
+
+        // Paused state — should still prefetch
+        let paused = SimState {
+            paused: true,
+            ..SimState::default()
+        };
+        coord.set_sim_state(paused);
+
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+
+        // Enter cruise
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let plan = coord.update((48.0, 15.0), 270.0, 200.0, 35000.0);
+        if coord.status.phase == FlightPhase::Cruise {
+            assert!(
+                plan.is_some(),
+                "Should continue prefetch when paused (opportunistic)"
+            );
+        }
     }
 }
