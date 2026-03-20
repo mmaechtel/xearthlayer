@@ -191,10 +191,40 @@ irqbalance              = aktiv (seit Run W validiert)
 
 ---
 
-## Aktueller Tuning-Stack (validiert durch Run T + Y + Z, unzureichend fuer Europa)
+## Run AC — 3GB min_free_kbytes Test: Manchester→Niederlande (2026-03-20)
+
+**Route:** EGCC → Niederlande (FL380), 120 Min
+**Aenderungen:** min_free_kbytes 2GB → **3GB** (einzige Aenderung). GPU-Takt-Lock NICHT aktiv.
+
+| Metrik | Run T | Run AB | **Run AC** | Delta AC vs AB |
+|--------|-------|--------|------------|----------------|
+| Main Thread Reclaim | **0** | 20.515 | **37.444** | +82% ❌ |
+| Max Reclaim-Latenz | — | 80,7 ms | **35,5 ms** | -56% ✅ |
+| Erste Stalls | — | Min 38 | **Min 101** | +63 Min ✅ |
+| Stall-freie Session | — | 42% | **84%** | ×2 ✅ |
+| allocstall Sum | ~1 | ~21.871 | **33.502** | +53% ❌ |
+| FPS-Drops (Cruise) | 3,1% | bis 39s | **max 1,1s** | ✅✅ |
+| Swap Peak | ja | 16.518 MB | **14.356 MB** | -13% ✅ |
+| XEL RSS Peak | — | — | **9.875 MB** | ⚠️ NEU |
+| XEL Threads Peak | — | — | **549** | ⚠️ NEU |
+| Slow IO (>5ms) | 236 | 185 | **5.061** | ❌ (laengere Session) |
+| CB Trips | 0 | 0 | **0** | ✅ |
+| GPU Throttling | — | ja (P2) | **nein (P0)** | ✅ |
+
+**Ergebnis:** 3GB min_free_kbytes verschiebt die Krise von Min 38 auf Min 113 — **84% der Session stall-frei** (vs 42%). Max-Latenz halbiert (35,5 vs 80,7 ms). FPS-Drops im Cruise alle unter 1,1s (vs 39s). ABER: Krise am Ende heftiger (8.884 allocstall/s Peak) weil groessere Schuld aufgebaut wird.
+
+**Haupterkenntnis:** XEL RSS wuchs auf 9,9 GB (konfiguriert: 2 GB). Combined RSS (X-Plane 22,7 + XEL 9,9 + QEMU 4,2 = 36,8 GB) ueberfordert 3GB kswapd-Vorlauf. XEL-RSS ist der primaere Hebel.
+
+**Aktion:** XEL-RSS-Wachstum begrenzen (warum 9,9 GB bei 2 GB config?). Dann Run AD auf gleicher Route.
+
+→ Details: `ANALYSE_RUN_AC_2026-03-20.md`
+
+---
+
+## Aktueller Tuning-Stack (validiert durch Run T + Y + Z, 3GB fuer Europa besser aber unzureichend)
 
 ```
-vm.min_free_kbytes      = 2097152    (2 GB) — ERHOEHUNG AUF 3 GB EMPFOHLEN
+vm.min_free_kbytes      = 3145728    (3 GB) — besser als 2 GB, aber XEL-RSS ist der Hebel
 vm.watermark_scale_factor = 125
 vm.swappiness           = 8
 vm.page_cluster         = 0
@@ -210,4 +240,4 @@ irqbalance              = aktiv (seit Run W validiert)
 
 ## Naechster Schritt
 
-**Run AC:** Gleiche oder aehnliche europaeische Route mit **min_free_kbytes=3GB**. Ziel: Europaeische Reclaim-Events eliminieren. Optional: GPU P0 forcieren.
+**Run AD:** Gleiche europaeische Route mit **XEL-RSS begrenzt**. Ziel: XEL RSS < 3 GB halten, Combined RSS < 30 GB. Dann 3GB min_free_kbytes erneut evaluieren.
