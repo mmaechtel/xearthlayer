@@ -74,6 +74,51 @@ impl ServiceOrchestrator {
         Ok(())
     }
 
+    /// Start the X-Plane Web API adapter.
+    ///
+    /// Connects to X-Plane's built-in Web API via REST + WebSocket for
+    /// 10Hz position and sim state updates. Requires no user configuration
+    /// (Web API is enabled by default since X-Plane 12.1.1).
+    pub fn start_web_api_adapter(&self) -> Result<(), ServiceError> {
+        let service = self
+            .mount_manager
+            .get_service()
+            .ok_or_else(|| ServiceError::NotStarted("No service available for Web API".into()))?;
+
+        let runtime_handle = service.runtime_handle().clone();
+
+        let web_api_config = crate::aircraft_position::web_api::config::WebApiConfig::default();
+        let (position_tx, mut position_rx) = mpsc::channel(32);
+        let sim_state = self.sim_state.clone();
+
+        let adapter = crate::aircraft_position::web_api::WebApiAdapter::new(
+            web_api_config.clone(),
+            position_tx,
+            sim_state,
+        );
+
+        // Spawn the adapter with cancellation
+        let adapter_cancellation = self.cancellation.clone();
+        runtime_handle.spawn(async move {
+            adapter.run(adapter_cancellation).await;
+            tracing::debug!("Web API adapter task exited");
+        });
+
+        // Bridge task: forward position updates to APT aggregator
+        let aircraft_position = self.aircraft_position.clone();
+        runtime_handle.spawn(async move {
+            while let Some(state) = position_rx.recv().await {
+                aircraft_position.receive_telemetry(state);
+            }
+        });
+
+        info!(
+            port = web_api_config.port,
+            "X-Plane Web API adapter started"
+        );
+        Ok(())
+    }
+
     /// Start the online network position adapter (VATSIM/IVAO/PilotEdge).
     ///
     /// This starts a poll loop daemon that fetches pilot position from an online

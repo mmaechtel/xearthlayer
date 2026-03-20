@@ -208,6 +208,9 @@ pub struct ServiceOrchestrator {
     /// Master cancellation token.
     cancellation: CancellationToken,
 
+    /// X-Plane sim state from Web API (shared with prefetch coordinator).
+    sim_state: crate::aircraft_position::web_api::SharedSimState,
+
     /// Configuration (retained for accessors).
     config: OrchestratorConfig,
 }
@@ -268,6 +271,9 @@ impl ServiceOrchestrator {
         let apt_aggregator = StateAggregator::new(apt_broadcast_tx);
         let aircraft_position = SharedAircraftPosition::new(apt_aggregator);
 
+        // Create shared sim state for Web API adapter → prefetch coordinator
+        let sim_state = crate::aircraft_position::web_api::shared_sim_state();
+
         // Create empty scenery index (populated during mount)
         let scenery_index = Arc::new(SceneryIndex::with_defaults());
 
@@ -284,6 +290,7 @@ impl ServiceOrchestrator {
             max_concurrent_jobs: 0,
             fuse_analyzer,
             scenery_index,
+            sim_state,
             cancellation,
             config,
         })
@@ -382,6 +389,11 @@ impl ServiceOrchestrator {
         }
         if let Err(e) = self.start_apt_telemetry() {
             tracing::warn!(error = %e, "Failed to start APT telemetry");
+        }
+
+        // Phase 3a: Start X-Plane Web API adapter (position + sim state)
+        if let Err(e) = self.start_web_api_adapter() {
+            tracing::warn!(error = %e, "Failed to start Web API adapter");
         }
 
         // Phase 3b: Start online network position (VATSIM/IVAO/PilotEdge)
@@ -611,6 +623,11 @@ impl ServiceOrchestrator {
     /// Get the aircraft position provider for TUI display.
     pub fn aircraft_position(&self) -> SharedAircraftPosition {
         self.aircraft_position.clone()
+    }
+
+    /// Get the shared sim state from the X-Plane Web API adapter.
+    pub fn sim_state(&self) -> crate::aircraft_position::web_api::SharedSimState {
+        self.sim_state.clone()
     }
 
     /// Get the prefetch status for TUI display.
