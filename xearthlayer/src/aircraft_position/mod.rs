@@ -73,6 +73,7 @@ pub mod network;
 mod provider;
 mod state;
 mod telemetry;
+pub mod web_api;
 
 pub use aggregator::{StateAggregator, StateAggregatorConfig};
 pub use flight_path::{FlightPathConfig, FlightPathHistory, PositionSample};
