@@ -4,6 +4,7 @@
 //! via REST for dataref ID lookup and WebSocket for 10Hz position
 //! and sim state subscriptions. Requires no user configuration.
 
+pub mod client;
 pub mod config;
 pub mod datarefs;
 pub mod sim_state;
