@@ -137,8 +137,8 @@ pub const DEFAULT_GENERATION_TIMEOUT_SECS: u64 = 10;
 // Prefetch defaults
 // =============================================================================
 
-/// Default UDP port for X-Plane telemetry (ForeFlight protocol).
-pub const DEFAULT_PREFETCH_UDP_PORT: u16 = 49002;
+/// Default Web API port for X-Plane SimState polling.
+pub const DEFAULT_WEB_API_PORT: u16 = 8086;
 
 /// Default maximum tiles to submit per prefetch cycle.
 /// This controls queue depth, not processing rate — actual CPU consumption
@@ -358,7 +358,7 @@ impl Default for ConfigFile {
                 enabled: true,
                 strategy: "adaptive".to_string(),
                 mode: "auto".to_string(),
-                udp_port: DEFAULT_PREFETCH_UDP_PORT,
+                web_api_port: DEFAULT_WEB_API_PORT,
                 max_tiles_per_cycle: DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
                 cycle_interval_ms: DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
                 calibration_aggressive_threshold: DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD,

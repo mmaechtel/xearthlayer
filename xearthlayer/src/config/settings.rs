@@ -175,8 +175,8 @@ pub struct PrefetchSettings {
     /// - "opportunistic": Circuit breaker triggers (moderate connections)
     /// - "disabled": Disable prefetch
     pub mode: String,
-    /// UDP port for X-Plane telemetry (default: 49002 for ForeFlight protocol)
-    pub udp_port: u16,
+    /// Web API port for X-Plane SimState polling (default: 8086)
+    pub web_api_port: u16,
     /// Maximum tiles to submit per prefetch cycle. Default: 200.
     /// Lower values reduce bandwidth competition with on-demand requests.
     pub max_tiles_per_cycle: usize,

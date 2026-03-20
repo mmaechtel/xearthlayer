@@ -77,8 +77,8 @@ pub struct PrefetchConfig {
     /// Adaptive prefetch mode: "auto", "aggressive", "opportunistic", or "disabled".
     pub mode: String,
 
-    /// UDP port for telemetry reception.
-    pub udp_port: u16,
+    /// Web API port for X-Plane SimState polling.
+    pub web_api_port: u16,
 
     /// Maximum tiles to prefetch per cycle.
     pub max_tiles_per_cycle: usize,
@@ -195,7 +195,7 @@ impl OrchestratorConfig {
             enabled: config.prefetch.enabled,
             strategy: config.prefetch.strategy.clone(),
             mode: config.prefetch.mode.clone(),
-            udp_port: config.prefetch.udp_port,
+            web_api_port: config.prefetch.web_api_port,
             max_tiles_per_cycle: config.prefetch.max_tiles_per_cycle,
             cycle_interval_ms: config.prefetch.cycle_interval_ms,
             calibration_aggressive_threshold: config.prefetch.calibration_aggressive_threshold,
@@ -315,7 +315,7 @@ mod tests {
         );
 
         // Verify prefetch config was extracted
-        assert_eq!(orch_config.prefetch.udp_port, config.prefetch.udp_port);
+        assert_eq!(orch_config.prefetch.web_api_port, config.prefetch.web_api_port);
         assert_eq!(orch_config.prefetch.strategy, config.prefetch.strategy);
     }
 }

@@ -171,8 +171,8 @@ strategy = {}
 ;   opportunistic - Circuit breaker triggers (moderate connections)
 ;   disabled     - Disable prefetch entirely
 mode = {}
-; UDP port for telemetry (default: 49002 for ForeFlight protocol)
-udp_port = {}
+; Web API port for X-Plane SimState polling (default: 8086, range: 1024-65535)
+web_api_port = {}
 
 ; Cycle limits
 ; Maximum tiles to submit per prefetch cycle (default: 200)
@@ -309,7 +309,7 @@ congestion_threshold = {}
         config.prefetch.enabled,
         config.prefetch.strategy,
         config.prefetch.mode,
-        config.prefetch.udp_port,
+        config.prefetch.web_api_port,
         config.prefetch.max_tiles_per_cycle,
         config.prefetch.cycle_interval_ms,
         config.prefetch.calibration_aggressive_threshold,

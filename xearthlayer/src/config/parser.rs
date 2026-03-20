@@ -319,13 +319,14 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                 }
             }
         }
-        if let Some(v) = section.get("udp_port") {
-            config.prefetch.udp_port = v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                section: "prefetch".to_string(),
-                key: "udp_port".to_string(),
-                value: v.to_string(),
-                reason: "must be a valid port number (1-65535)".to_string(),
-            })?;
+        if let Some(v) = section.get("web_api_port") {
+            config.prefetch.web_api_port =
+                v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                    section: "prefetch".to_string(),
+                    key: "web_api_port".to_string(),
+                    value: v.to_string(),
+                    reason: "must be a valid port number (1024-65535)".to_string(),
+                })?;
         }
         // Legacy settings cone_angle, inner_radius_nm, outer_radius_nm are deprecated (v0.4.0)
         // They are ignored if present in config file (use 'xearthlayer config upgrade')

@@ -105,6 +105,8 @@ pub const DEPRECATED_KEYS: &[&str] = &[
     // Removed - circuit breaker replaced by SimState from X-Plane Web API
     "prefetch.circuit_breaker_open_ms",
     "prefetch.circuit_breaker_half_open_secs",
+    // Removed - UDP telemetry replaced by X-Plane Web API polling
+    "prefetch.udp_port",
 ];
 
 /// Result of analyzing a configuration file for upgrade needs.

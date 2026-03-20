@@ -511,5 +511,4 @@ mod tests {
             assert!((bounds.height() - 1.0).abs() < 0.0001);
         }
     }
-
 }

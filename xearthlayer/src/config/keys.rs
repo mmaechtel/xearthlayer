@@ -78,7 +78,7 @@ pub enum ConfigKey {
     PrefetchEnabled,
     PrefetchStrategy,
     PrefetchMode,
-    PrefetchUdpPort,
+    PrefetchWebApiPort,
     PrefetchMaxTilesPerCycle,
     PrefetchCycleIntervalMs,
 
@@ -177,7 +177,7 @@ impl FromStr for ConfigKey {
             "prefetch.enabled" => Ok(ConfigKey::PrefetchEnabled),
             "prefetch.strategy" => Ok(ConfigKey::PrefetchStrategy),
             "prefetch.mode" => Ok(ConfigKey::PrefetchMode),
-            "prefetch.udp_port" => Ok(ConfigKey::PrefetchUdpPort),
+            "prefetch.web_api_port" => Ok(ConfigKey::PrefetchWebApiPort),
             "prefetch.max_tiles_per_cycle" => Ok(ConfigKey::PrefetchMaxTilesPerCycle),
             "prefetch.cycle_interval_ms" => Ok(ConfigKey::PrefetchCycleIntervalMs),
             "prefetch.calibration_aggressive_threshold" => {
@@ -273,7 +273,7 @@ impl ConfigKey {
             ConfigKey::PrefetchEnabled => "prefetch.enabled",
             ConfigKey::PrefetchStrategy => "prefetch.strategy",
             ConfigKey::PrefetchMode => "prefetch.mode",
-            ConfigKey::PrefetchUdpPort => "prefetch.udp_port",
+            ConfigKey::PrefetchWebApiPort => "prefetch.web_api_port",
             ConfigKey::PrefetchMaxTilesPerCycle => "prefetch.max_tiles_per_cycle",
             ConfigKey::PrefetchCycleIntervalMs => "prefetch.cycle_interval_ms",
             ConfigKey::PrefetchCalibrationAggressiveThreshold => {
@@ -406,7 +406,7 @@ impl ConfigKey {
             ConfigKey::PrefetchEnabled => config.prefetch.enabled.to_string(),
             ConfigKey::PrefetchStrategy => config.prefetch.strategy.clone(),
             ConfigKey::PrefetchMode => config.prefetch.mode.clone(),
-            ConfigKey::PrefetchUdpPort => config.prefetch.udp_port.to_string(),
+            ConfigKey::PrefetchWebApiPort => config.prefetch.web_api_port.to_string(),
             ConfigKey::PrefetchMaxTilesPerCycle => config.prefetch.max_tiles_per_cycle.to_string(),
             ConfigKey::PrefetchCycleIntervalMs => config.prefetch.cycle_interval_ms.to_string(),
             ConfigKey::PrefetchCalibrationAggressiveThreshold => {
@@ -598,8 +598,8 @@ impl ConfigKey {
             ConfigKey::PrefetchMode => {
                 config.prefetch.mode = value.to_lowercase();
             }
-            ConfigKey::PrefetchUdpPort => {
-                config.prefetch.udp_port = value.parse().unwrap();
+            ConfigKey::PrefetchWebApiPort => {
+                config.prefetch.web_api_port = value.parse().unwrap();
             }
             ConfigKey::PrefetchMaxTilesPerCycle => {
                 config.prefetch.max_tiles_per_cycle = value.parse().unwrap();
@@ -773,7 +773,7 @@ impl ConfigKey {
                 "opportunistic",
                 "disabled",
             ])),
-            ConfigKey::PrefetchUdpPort => Box::new(PositiveIntegerSpec),
+            ConfigKey::PrefetchWebApiPort => Box::new(IntegerRangeSpec::new(1024, 65535)),
             ConfigKey::PrefetchMaxTilesPerCycle => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCycleIntervalMs => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCalibrationAggressiveThreshold => Box::new(PositiveNumberSpec),
@@ -852,7 +852,7 @@ impl ConfigKey {
             ConfigKey::PrefetchEnabled,
             ConfigKey::PrefetchStrategy,
             ConfigKey::PrefetchMode,
-            ConfigKey::PrefetchUdpPort,
+            ConfigKey::PrefetchWebApiPort,
             ConfigKey::PrefetchMaxTilesPerCycle,
             ConfigKey::PrefetchCycleIntervalMs,
             ConfigKey::PrefetchCalibrationAggressiveThreshold,
