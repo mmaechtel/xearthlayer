@@ -499,13 +499,12 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
         }
         // Sliding prefetch box settings
         if let Some(v) = section.get("box_extent") {
-            config.prefetch.box_extent =
-                v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                    section: "prefetch".to_string(),
-                    key: "box_extent".to_string(),
-                    value: v.to_string(),
-                    reason: "must be a number between 7.0 and 15.0".to_string(),
-                })?;
+            config.prefetch.box_extent = v.parse().map_err(|_| ConfigFileError::InvalidValue {
+                section: "prefetch".to_string(),
+                key: "box_extent".to_string(),
+                value: v.to_string(),
+                reason: "must be a number between 7.0 and 15.0".to_string(),
+            })?;
         }
         if let Some(v) = section.get("box_max_bias") {
             config.prefetch.box_max_bias =
