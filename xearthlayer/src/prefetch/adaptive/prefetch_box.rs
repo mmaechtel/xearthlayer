@@ -218,10 +218,22 @@ mod tests {
         let (lat_min, lat_max, lon_min, lon_max) = pbox.bounds(48.0, 15.0, 0.0);
         let (ahead, behind, symmetric) = expected_cardinal();
 
-        assert!((lat_max - 48.0 - ahead).abs() < 0.01, "North should be {ahead}° ahead");
-        assert!((48.0 - lat_min - behind).abs() < 0.01, "South should be {behind}° behind");
-        assert!((lon_max - 15.0 - symmetric).abs() < 0.01, "East should be {symmetric}°");
-        assert!((15.0 - lon_min - symmetric).abs() < 0.01, "West should be {symmetric}°");
+        assert!(
+            (lat_max - 48.0 - ahead).abs() < 0.01,
+            "North should be {ahead}° ahead"
+        );
+        assert!(
+            (48.0 - lat_min - behind).abs() < 0.01,
+            "South should be {behind}° behind"
+        );
+        assert!(
+            (lon_max - 15.0 - symmetric).abs() < 0.01,
+            "East should be {symmetric}°"
+        );
+        assert!(
+            (15.0 - lon_min - symmetric).abs() < 0.01,
+            "West should be {symmetric}°"
+        );
     }
 
     #[test]
@@ -231,11 +243,20 @@ mod tests {
         let (ahead, _behind, symmetric) = expected_cardinal();
 
         // Lat: symmetric (cos(90°) ≈ 0)
-        assert!((lat_max - 48.0 - symmetric).abs() < 0.01, "Lat north should be symmetric");
-        assert!((48.0 - lat_min - symmetric).abs() < 0.01, "Lat south should be symmetric");
+        assert!(
+            (lat_max - 48.0 - symmetric).abs() < 0.01,
+            "Lat north should be symmetric"
+        );
+        assert!(
+            (48.0 - lat_min - symmetric).abs() < 0.01,
+            "Lat south should be symmetric"
+        );
 
         // Lon: fully biased east
-        assert!((lon_max - 15.0 - ahead).abs() < 0.01, "East should be {ahead}° ahead");
+        assert!(
+            (lon_max - 15.0 - ahead).abs() < 0.01,
+            "East should be {ahead}° ahead"
+        );
     }
 
     #[test]
@@ -244,8 +265,14 @@ mod tests {
         let (lat_min, lat_max, _, _) = pbox.bounds(48.0, 15.0, 180.0);
         let (ahead, behind, _symmetric) = expected_cardinal();
 
-        assert!((48.0 - lat_min - ahead).abs() < 0.01, "South should be {ahead}° ahead");
-        assert!((lat_max - 48.0 - behind).abs() < 0.01, "North should be {behind}° behind");
+        assert!(
+            (48.0 - lat_min - ahead).abs() < 0.01,
+            "South should be {ahead}° ahead"
+        );
+        assert!(
+            (lat_max - 48.0 - behind).abs() < 0.01,
+            "North should be {behind}° behind"
+        );
     }
 
     #[test]
@@ -254,8 +281,14 @@ mod tests {
         let (_, _, lon_min, lon_max) = pbox.bounds(48.0, 15.0, 270.0);
         let (ahead, behind, _symmetric) = expected_cardinal();
 
-        assert!((15.0 - lon_min - ahead).abs() < 0.01, "West should be {ahead}° ahead");
-        assert!((lon_max - 15.0 - behind).abs() < 0.01, "East should be {behind}° behind");
+        assert!(
+            (15.0 - lon_min - ahead).abs() < 0.01,
+            "West should be {ahead}° ahead"
+        );
+        assert!(
+            (lon_max - 15.0 - behind).abs() < 0.01,
+            "East should be {behind}° behind"
+        );
     }
 
     #[test]
@@ -272,7 +305,10 @@ mod tests {
         // Bias should be between symmetric and full bias
         let (ahead, _behind, symmetric) = expected_cardinal();
         assert!(lat_ahead > symmetric, "45° bias should exceed symmetric");
-        assert!(lat_ahead < ahead, "45° bias should be less than full cardinal");
+        assert!(
+            lat_ahead < ahead,
+            "45° bias should be less than full cardinal"
+        );
     }
 
     // ─── Total extent invariant ──────────────────────────────────────────
@@ -282,19 +318,25 @@ mod tests {
         use crate::config::defaults::DEFAULT_BOX_EXTENT;
         let pbox = PrefetchBox::default();
 
-        for track in [0.0, 30.0, 45.0, 60.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+        for track in [
+            0.0, 30.0, 45.0, 60.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0,
+        ] {
             let (lat_min, lat_max, lon_min, lon_max) = pbox.bounds(48.0, 15.0, track);
             let lat_extent = lat_max - lat_min;
             let lon_extent = lon_max - lon_min;
             assert!(
                 (lat_extent - DEFAULT_BOX_EXTENT).abs() < 0.01,
                 "Lat extent should be {} at track {}°, got {}",
-                DEFAULT_BOX_EXTENT, track, lat_extent
+                DEFAULT_BOX_EXTENT,
+                track,
+                lat_extent
             );
             assert!(
                 (lon_extent - DEFAULT_BOX_EXTENT).abs() < 0.01,
                 "Lon extent should be {} at track {}°, got {}",
-                DEFAULT_BOX_EXTENT, track, lon_extent
+                DEFAULT_BOX_EXTENT,
+                track,
+                lon_extent
             );
         }
     }
@@ -310,7 +352,10 @@ mod tests {
 
         let lat_extent = lat_max - lat_min;
         assert!((lat_extent - DEFAULT_BOX_EXTENT).abs() < 0.01);
-        assert!((lon_max - 134.0 - ahead).abs() < 0.01, "East should be {ahead}° ahead");
+        assert!(
+            (lon_max - 134.0 - ahead).abs() < 0.01,
+            "East should be {ahead}° ahead"
+        );
         assert!(lat_min < -24.0, "Min lat should be south of aircraft");
     }
 
@@ -340,12 +385,18 @@ mod tests {
         // Should include far east (ahead)
         let far_east_lon = (15.0 + ahead - 1.0).floor() as i32;
         let has_far_east = regions.iter().any(|r| r.lon == far_east_lon);
-        assert!(has_far_east, "Should include lon={far_east_lon} (near ahead edge)");
+        assert!(
+            has_far_east,
+            "Should include lon={far_east_lon} (near ahead edge)"
+        );
 
         // Should include near west (behind)
         let near_west_lon = (15.0 - behind + 0.1).floor() as i32;
         let has_near_west = regions.iter().any(|r| r.lon == near_west_lon);
-        assert!(has_near_west, "Should include lon={near_west_lon} (near behind edge)");
+        assert!(
+            has_near_west,
+            "Should include lon={near_west_lon} (near behind edge)"
+        );
     }
 
     // ─── GeoIndex filtering ──────────────────────────────────────────────
