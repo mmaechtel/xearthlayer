@@ -115,7 +115,9 @@ OUTDIR = Path(os.environ.get("SYSMON_OUTDIR", "/tmp/sysmon_out"))
 PROC_PATTERNS = [p.strip() for p in
                  os.environ.get("SYSMON_PROCS",
                                 "X-Plane,autoortho,qemu-system,"
-                                "xearthlayer").split(",")]
+                                "xearthlayer,gamescope,"
+                                "plasmashell,kwin_wayland,firefox,"
+                                "Discord,obs,easyeffects").split(",")]
 
 NUM_CPUS = os.cpu_count()
 CLK_TCK = os.sysconf("SC_CLK_TCK")
@@ -571,17 +573,19 @@ def read_proc_stats(pid):
         pass  # OK: io not readable for some processes (permission)
 
     rss_kb = 0
+    swap_kb = 0
     try:
         for line in read_file(f"/proc/{pid}/status").splitlines():
             if line.startswith("VmRSS:"):
                 rss_kb = int(line.split()[1])
-                break
+            elif line.startswith("VmSwap:"):
+                swap_kb = int(line.split()[1])
     except (FileNotFoundError, PermissionError):
         pass  # OK: process may have exited
 
     return {"utime": utime, "stime": stime, "num_threads": num_threads,
             "read_bytes": read_bytes, "write_bytes": write_bytes,
-            "rss_kb": rss_kb}
+            "rss_kb": rss_kb, "swap_kb": swap_kb}
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Stats — replaces 50+ individual accumulator lists
@@ -636,7 +640,7 @@ class CSVWriters:
             "timestamp,irq,desc,total_rate,"
             + ",".join(f"cpu{i}" for i in range(NUM_CPUS)))
         self.proc = self._open(outdir / "proc.csv",
-            "timestamp,pid,name,cpu_pct,rss_mb,"
+            "timestamp,pid,name,cpu_pct,rss_mb,swap_mb,"
             "io_read_mbs,io_write_mbs,threads")
         self.vmstat = self._open(outdir / "vmstat.csv",
             "timestamp,ctxt_s,pgfault_s,pgmajfault_s,"
@@ -729,10 +733,10 @@ class CSVWriters:
         self.freq.write(f"{ts:.3f},"
                         + ",".join(f"{f:.0f}" for f in freqs) + "\n")
 
-    def write_proc(self, ts, pid, name, cpu_pct, rss_mb, io_r, io_w, threads):
+    def write_proc(self, ts, pid, name, cpu_pct, rss_mb, swap_mb, io_r, io_w, threads):
         self.proc.write(
             f"{ts:.3f},{pid},{name},{cpu_pct:.1f},"
-            f"{rss_mb:.0f},{io_r:.2f},{io_w:.2f},{threads}\n")
+            f"{rss_mb:.0f},{swap_mb:.0f},{io_r:.2f},{io_w:.2f},{threads}\n")
 
 # ═══════════════════════════════════════════════════════════════════════
 #  collect — main sampling loop
@@ -965,6 +969,7 @@ def collect(writers, stats):
                             continue
 
                         rss_mb = pstats["rss_kb"] / 1024
+                        swap_mb = pstats["swap_kb"] / 1024
 
                         if pid in prev_proc:
                             pp = prev_proc[pid]
@@ -977,10 +982,12 @@ def collect(writers, stats):
                             io_w = d_wb / 1024 / 1024 / slow_dt
 
                             writers.write_proc(ts, pid, name, cpu_pct, rss_mb,
-                                               io_r, io_w, pstats["num_threads"])
+                                               swap_mb, io_r, io_w,
+                                               pstats["num_threads"])
 
                             stats.proc[name]["cpu"].append(cpu_pct)
                             stats.proc[name]["rss"].append(rss_mb)
+                            stats.proc[name]["swap"].append(swap_mb)
                             stats.proc[name]["io_r"].append(io_r)
                             stats.proc[name]["io_w"].append(io_w)
                             stats.proc[name]["threads"].append(pstats["num_threads"])
@@ -1084,15 +1091,17 @@ def _print_procs(stats, W):
     print(f"\n{'─' * W}")
     print("PER-PROCESS (avg / max / p95)")
     print(f"{'─' * W}")
-    print(f"  {'Process':<30} {'CPU%':>18} {'RSS MB':>18} "
+    print(f"  {'Process':<30} {'CPU%':>18} {'RSS MB':>18} {'Swap MB':>18} "
           f"{'IO Read MB/s':>18} {'IO Write MB/s':>18} {'Thr':>5}")
     for name in sorted(stats.proc.keys()):
         p = stats.proc[name]
         rss_s = fmt3(p["rss"]) if p["rss"] else "—"
+        swap_s = fmt3(p["swap"]) if p.get("swap") else "—"
         thr_s = f"{max(p['threads'])}" if p["threads"] else "—"
         print(f"  {name:<30} "
               f"{fmt3(p['cpu']):>18} "
               f"{rss_s:>18} "
+              f"{swap_s:>18} "
               f"{fmt3(p['io_r']):>18} "
               f"{fmt3(p['io_w']):>18} "
               f"{thr_s:>5}")
@@ -1431,7 +1440,10 @@ def parse_args():
                    help="output directory for CSV files (default: /tmp/sysmon_out)")
     p.add_argument("-p", "--procs", type=str,
                    default=os.environ.get("SYSMON_PROCS",
-                                          "X-Plane,autoortho,qemu-system,xearthlayer"),
+                                          "X-Plane,autoortho,qemu-system,"
+                                          "xearthlayer,gamescope,"
+                                          "plasmashell,kwin_wayland,firefox,"
+                                          "Discord,obs,easyeffects"),
                    metavar="PAT",
                    help="comma-separated process name patterns to track")
     p.add_argument("-l", "--xplane-log", type=Path, default=None,
