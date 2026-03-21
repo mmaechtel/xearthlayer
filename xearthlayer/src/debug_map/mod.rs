@@ -7,3 +7,8 @@
 //! # Usage
 //!
 //! Build with `--features debug-map`, then open `http://localhost:8087` in a browser.
+
+pub mod api;
+pub mod state;
+
+pub use state::DebugMapState;
