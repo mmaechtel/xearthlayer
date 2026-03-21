@@ -80,14 +80,14 @@ release-profiling: verify ## Build release version with profiling support
 	@echo "$(GREEN)Release build with profiling complete!$(NC)"
 
 .PHONY: debug-build
-debug-build: ## Build with debug map server (http://localhost:8087)
-	@echo "$(BLUE)Building with debug map...$(NC)"
-	$(CARGO) build --features debug-map $(CARGO_FLAGS)
+debug-build: ## Build with debug map + GPU encoding (http://localhost:8087)
+	@echo "$(BLUE)Building with debug map + GPU...$(NC)"
+	$(CARGO) build --features debug-map,gpu-encode $(CARGO_FLAGS)
 	@echo "$(GREEN)Debug map build complete!$(NC)"
 
 .PHONY: debug-run
 debug-run: ## Run with debug map server and debug logging
-	$(CARGO) run --features debug-map $(CARGO_FLAGS) -- run --debug
+	$(CARGO) run --features debug-map,gpu-encode $(CARGO_FLAGS) -- run --debug
 
 .PHONY: install-profiling
 install-profiling: release-profiling ## Install binary with profiling support to $(BINDIR)
