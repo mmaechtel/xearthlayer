@@ -1,0 +1,5 @@
+Mär 21 15:47:25.102837 simupc kernel: NVRM: API mismatch: the client 'com.vixalien.st' (pid 15107)
+                                       NVRM: has the version 580.126.16, but this kernel module has
+                                       NVRM: the version 580.142.  Please make sure that this
+                                       NVRM: kernel module and all NVIDIA driver components
+                                       NVRM: have the same version.
