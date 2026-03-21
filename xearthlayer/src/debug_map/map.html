@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XEarthLayer Debug Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  #map { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
+  #stats {
+    position: absolute; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(0,0,0,0.85); color: #fff; padding: 12px 16px;
+    border-radius: 8px; font-size: 12px; line-height: 1.6;
+    min-width: 220px; backdrop-filter: blur(4px);
+  }
+  #stats .label { color: #999; }
+  #stats .value { color: #4CAF50; font-weight: bold; }
+  #stats .warn { color: #FFC107; }
+  #stats .error { color: #f44336; }
+  #legend {
+    position: absolute; bottom: 30px; left: 10px; z-index: 1000;
+    background: rgba(0,0,0,0.85); color: #fff; padding: 10px 14px;
+    border-radius: 8px; font-size: 11px; line-height: 1.8;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="stats">Connecting...</div>
+<div id="legend">
+  <div class="legend-item"><span class="legend-swatch" style="background:#4CAF50"></span> Prefetched</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#FFC107"></span> In Progress</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#9E9E9E"></span> No Coverage</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#9C27B0"></span> Patched</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px solid #2196F3"></span> Retained</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px dashed #03A9F4"></span> Prefetch Box</div>
+</div>
+
+<script>
+const map = L.map('map').setView([0, 0], 3);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18
+}).addTo(map);
+
+let aircraftMarker = null;
+let headingLine = null;
+let prefetchBox = null;
+let regionLayers = L.layerGroup().addTo(map);
+let firstUpdate = true;
+let followAircraft = true;
+
+const REGION_COLORS = {
+  prefetched:  { color: '#4CAF50', fillColor: '#4CAF50', fillOpacity: 0.25, weight: 1 },
+  in_progress: { color: '#FFC107', fillColor: '#FFC107', fillOpacity: 0.35, weight: 1 },
+  no_coverage: { color: '#9E9E9E', fillColor: '#9E9E9E', fillOpacity: 0.15, weight: 1 },
+  patched:     { color: '#9C27B0', fillColor: '#9C27B0', fillOpacity: 0.3, weight: 1 },
+  retained:    { color: '#2196F3', fillColor: 'transparent', fillOpacity: 0, weight: 2 },
+};
+
+function updateStats(data) {
+  const el = document.getElementById('stats');
+  const s = data.stats;
+  const sim = data.sim_state;
+  const ac = data.aircraft;
+
+  // Build sim flags
+  const simParts = [];
+  if (sim.paused) simParts.push('PAUSED');
+  if (sim.scenery_loading) simParts.push('LOADING');
+  if (sim.replay) simParts.push('REPLAY');
+  if (sim.on_ground) simParts.push('GROUND');
+  const simText = simParts.length ? simParts.join(' | ') : 'NORMAL';
+
+  const prefetchedCount = data.regions.filter(r => r.state === 'prefetched').length;
+  const inProgressCount = data.regions.filter(r => r.state === 'in_progress').length;
+
+  // Use textContent for safe updates, build structure with DOM
+  el.textContent = '';
+
+  const lines = [];
+  lines.push(['Sim', simText]);
+  if (ac) {
+    lines.push(['Position', ac.latitude.toFixed(3) + '\u00B0, ' + ac.longitude.toFixed(3) + '\u00B0']);
+    lines.push(['Track', (ac.track || ac.heading).toFixed(1) + '\u00B0 @ ' + ac.ground_speed.toFixed(0) + 'kt']);
+    lines.push(['Altitude', ac.altitude.toFixed(0) + 'ft']);
+  } else {
+    lines.push(['Position', 'No data']);
+  }
+  lines.push(['Regions', data.regions.length + ' tracked']);
+  lines.push(['Prefetched', String(prefetchedCount)]);
+  lines.push(['In Progress', String(inProgressCount)]);
+  lines.push(['Tiles Submitted', String(s.tiles_submitted)]);
+  lines.push(['Mode', s.prefetch_mode]);
+
+  for (const [label, value] of lines) {
+    const div = document.createElement('div');
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'label';
+    labelSpan.textContent = label + ': ';
+    const valueSpan = document.createElement('span');
+    if (label === 'Prefetched') valueSpan.className = 'value';
+    else if (label === 'In Progress' && inProgressCount > 0) valueSpan.className = 'warn';
+    else if (label === 'Sim' && simParts.length > 0) {
+      if (sim.scenery_loading) valueSpan.className = 'error';
+      else valueSpan.className = 'warn';
+    }
+    valueSpan.textContent = value;
+    div.appendChild(labelSpan);
+    div.appendChild(valueSpan);
+    el.appendChild(div);
+  }
+}
+
+function updateMap(data) {
+  // Aircraft position
+  if (data.aircraft) {
+    const pos = [data.aircraft.latitude, data.aircraft.longitude];
+
+    if (!aircraftMarker) {
+      aircraftMarker = L.circleMarker(pos, {
+        radius: 8, fillColor: '#2196F3', fillOpacity: 1,
+        color: '#fff', weight: 2
+      }).addTo(map);
+    } else {
+      aircraftMarker.setLatLng(pos);
+    }
+
+    // Heading indicator line
+    const track = data.aircraft.track || data.aircraft.heading;
+    const dist = 0.3;
+    const rad = track * Math.PI / 180;
+    const endLat = data.aircraft.latitude + dist * Math.cos(rad);
+    const endLon = data.aircraft.longitude + dist * Math.sin(rad);
+
+    if (!headingLine) {
+      headingLine = L.polyline([pos, [endLat, endLon]], {
+        color: '#2196F3', weight: 3, opacity: 0.8
+      }).addTo(map);
+    } else {
+      headingLine.setLatLngs([pos, [endLat, endLon]]);
+    }
+
+    if (firstUpdate || followAircraft) {
+      map.setView(pos, 7);
+      firstUpdate = false;
+    }
+  }
+
+  // Prefetch box
+  if (data.prefetch_box) {
+    const b = data.prefetch_box;
+    const bounds = [[b.lat_min, b.lon_min], [b.lat_max, b.lon_max]];
+
+    if (!prefetchBox) {
+      prefetchBox = L.rectangle(bounds, {
+        color: '#03A9F4', weight: 2, dashArray: '8 4',
+        fillColor: '#03A9F4', fillOpacity: 0.05
+      }).addTo(map);
+    } else {
+      prefetchBox.setBounds(bounds);
+    }
+  }
+
+  // DSF regions
+  regionLayers.clearLayers();
+  for (const r of data.regions) {
+    const bounds = [[r.lat, r.lon], [r.lat + 1, r.lon + 1]];
+    const style = REGION_COLORS[r.state] || REGION_COLORS.no_coverage;
+    const rect = L.rectangle(bounds, style);
+    const sign = (n) => n >= 0 ? '+' + n : String(n);
+    rect.bindTooltip('DSF ' + sign(r.lat) + sign(r.lon) + ': ' + r.state);
+    regionLayers.addLayer(rect);
+  }
+
+  // Stats panel
+  updateStats(data);
+}
+
+async function poll() {
+  try {
+    const resp = await fetch('/api/state');
+    const data = await resp.json();
+    updateMap(data);
+  } catch (e) {
+    const el = document.getElementById('stats');
+    el.textContent = 'Connection lost';
+    el.style.color = '#f44336';
+  }
+}
+
+// Toggle follow mode on map drag
+map.on('dragstart', function() { followAircraft = false; });
+
+// Double-click to re-enable follow
+map.on('dblclick', function(e) {
+  followAircraft = true;
+  e.originalEvent.preventDefault();
+});
+
+setInterval(poll, 2000);
+poll();
+</script>
+</body>
+</html>

@@ -141,11 +141,8 @@ fn compute_prefetch_box(aircraft: &Option<AircraftInfo>) -> Option<BoxBounds> {
     let track = aircraft.track.unwrap_or(aircraft.heading) as f64;
 
     let pbox = PrefetchBox::new(DEFAULT_FORWARD_MARGIN, DEFAULT_BEHIND_MARGIN);
-    let (lat_min, lat_max, lon_min, lon_max) = pbox.bounds(
-        aircraft.latitude,
-        aircraft.longitude,
-        track,
-    );
+    let (lat_min, lat_max, lon_min, lon_max) =
+        pbox.bounds(aircraft.latitude, aircraft.longitude, track);
 
     Some(BoxBounds {
         lat_min,
@@ -181,7 +178,10 @@ fn collect_regions(state: &DebugMapState) -> Vec<RegionInfo> {
     // Patch coverage
     for region in geo_index.regions::<PatchCoverage>() {
         // Only add if not already covered by prefetch state
-        if !regions.iter().any(|r| r.lat == region.lat && r.lon == region.lon) {
+        if !regions
+            .iter()
+            .any(|r| r.lat == region.lat && r.lon == region.lon)
+        {
             regions.push(RegionInfo {
                 lat: region.lat,
                 lon: region.lon,
@@ -192,7 +192,10 @@ fn collect_regions(state: &DebugMapState) -> Vec<RegionInfo> {
 
     // Retained regions (only add if not already present)
     for region in geo_index.regions::<RetainedRegion>() {
-        if !regions.iter().any(|r| r.lat == region.lat && r.lon == region.lon) {
+        if !regions
+            .iter()
+            .any(|r| r.lat == region.lat && r.lon == region.lon)
+        {
             regions.push(RegionInfo {
                 lat: region.lat,
                 lon: region.lon,
