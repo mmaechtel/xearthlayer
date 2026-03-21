@@ -238,6 +238,59 @@ Readahead               = 256 KB
 irqbalance              = aktiv (seit Run W validiert)
 ```
 
+## Run AD — 0 Direct Reclaim: LFBO→EDWI Langflug (2026-03-21)
+
+**Route:** LFBO (Toulouse) → Nordfrankreich → Belgien → NL → EDWI (Wilhelmshaven), 150 Min, FL380→FL390
+**Aenderungen:** Branch `fix/proportional-prefetch-box` (box_extent 6,5°). XEL-RSS-Begrenzung NICHT umgesetzt.
+
+| Metrik | Run T | Run AC | **Run AD** | Delta AD vs AC |
+|--------|-------|--------|------------|----------------|
+| Main Thread Reclaim | **0** | 37.444 | **0** | -100% ✅✅✅ |
+| Max Reclaim-Latenz | — | 35,5 ms | **0 ms** | -100% ✅✅✅ |
+| allocstall Sum | ~1 | 33.502 | **71.630** | +114% ❌ (aber "weich") |
+| Erste Stalls (sustained) | — | Min 101 | **Min 83** | -18% ⚠️ |
+| FPS < 25 | 3,1% | — | **3,58%** | ≈ Run T |
+| Swap Peak | ja | 14.356 MB | **11.715 MB** | -18% ✅ |
+| XEL RSS Peak | — | 9.875 MB | **15.828 MB** | +60% ❌❌ |
+| Combined RSS Peak | ~36.800 MB | ~36.800 MB | **~37.146 MB** | ≈ |
+| Slow IO (>5ms) | 236 | 5.061 | **5.816** | ≈ |
+| Fence Events | — | — | **11.135** | NEU |
+| CB Trips | 0 | 0 | **0** | ✅ |
+
+**Ergebnis:** Qualitativer Durchbruch — **0 Direct Reclaim auf Main Thread** ueber 150 Min europaeischen Langflug (bpftrace bestaetigt). Die 71K allocstalls sind "weiche" Wartezeiten auf kswapd, keine synchronen Reclaim-Blockaden. FPS auf Run-T-Niveau (3,58% < 25). XEL RSS wuchs auf 15,8 GB (config: 2 GB) — weiterhin das primaere Speicherproblem.
+
+**Neue Erkenntnis — zram nicht noetig:** Run AD lief OHNE zram (nur NVMe-Swap) und erreichte 0 Direct Reclaim. In Run W (auch ohne zram, min_free_kbytes=66 MB) waren es 54.686 Events. **min_free_kbytes=3 GB ist der eigentliche Schutz**, zram war nur ein Workaround. Kann aus dem Tuning-Stack entfernt werden.
+
+**Aktion:** Zwei Aenderungen fuer Run AE:
+1. XEL Memory Cache 2 → 4 GB (`memory_size=4`)
+2. Watermark-Tuning korrigieren: `min_free_kbytes=1GB` + `watermark_scale_factor=500` (statt min_free_kbytes=3GB) — praeziseres Werkzeug, 2 GB weniger Emergency-Reserve-Verschwendung (Faktencheck: Kernel-Commit 795ae7a0 von Johannes Weiner)
+
+→ Details: `ANALYSE_RUN_AD_2026-03-21.md`
+
+---
+
+## Aktueller Tuning-Stack (validiert durch Run T + Y + Z + AD)
+
+```
+vm.min_free_kbytes      = 1048576    (1 GB) — Emergency Reserve (reduziert von 3 GB)
+vm.watermark_scale_factor = 500      (kswapd-Vorlauf ~4,8 GB — ersetzt uebergrosse min_free_kbytes)
+vm.swappiness           = 8
+vm.page_cluster         = 0
+vm.vfs_cache_pressure   = 100        (Default, seit Run AD bestaetigt)
+vm.dirty_background_ratio = 3
+vm.dirty_ratio          = 10
+zram                    = NICHT NOETIG (Run AD: 0 Direct Reclaim ohne zram)
+IO-Scheduler            = none (alle NVMe)
+WBT                     = 0
+Readahead               = 256 KB
+irqbalance              = aktiv
+XEL memory_size         = 4          (erhoht von 2 GB)
+```
+
 ## Naechster Schritt
 
-**Run AD:** Gleiche europaeische Route mit **XEL-RSS begrenzt**. Ziel: XEL RSS < 3 GB halten, Combined RSS < 30 GB. Dann 3GB min_free_kbytes erneut evaluieren.
+**Run AE:** Europaeische Route mit zwei Aenderungen:
+1. `memory_size = 4` (XEL Cache 2 → 4 GB) — weniger Encoding-Bursts, weniger Spitzen-RSS
+2. `min_free_kbytes = 1 GB` + `watermark_scale_factor = 500` (statt min_free_kbytes = 3 GB) — praeziseres kswapd-Tuning, 2 GB weniger Verschwendung (Kernel-Commit 795ae7a0)
+
+Zielmetriken: Direct Reclaim = 0, XEL RSS < 15 GB, wset_refault_anon < 30%, available_mb +2 GB vs Run AD.
