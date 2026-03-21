@@ -294,6 +294,26 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
         println!();
     }
 
+    // Start debug map server (only when compiled with --features debug-map)
+    #[cfg(feature = "debug-map")]
+    {
+        let debug_state = xearthlayer::debug_map::DebugMapState {
+            aircraft_position: orchestrator.aircraft_position(),
+            sim_state: orchestrator.sim_state(),
+            geo_index: orchestrator.geo_index(),
+            prefetch_status: orchestrator.prefetch_status(),
+        };
+        let debug_port = xearthlayer::debug_map::DEFAULT_DEBUG_MAP_PORT;
+        let debug_server = xearthlayer::debug_map::DebugMapServer::new(debug_state, debug_port);
+        let debug_cancellation = orchestrator.cancellation();
+        if let Some(handle) = orchestrator.runtime_handle() {
+            handle.spawn(async move {
+                debug_server.run(debug_cancellation).await;
+            });
+            println!("  \u{2713} Debug map: http://localhost:{}", debug_port);
+        }
+    }
+
     // Set up signal handler for graceful shutdown
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
