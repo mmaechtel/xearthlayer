@@ -217,7 +217,7 @@ verify: format-check lint test-strict ## Run all verification checks (format, li
 	@echo "$(GREEN)All verification checks passed!$(NC)"
 
 .PHONY: pre-commit
-pre-commit: format verify ## Run pre-commit checks (format + verify)
+pre-commit: verify ## Run pre-commit checks (format-check + lint + test)
 	@echo "$(GREEN)Pre-commit checks passed! Ready to commit.$(NC)"
 
 ##@ Documentation
