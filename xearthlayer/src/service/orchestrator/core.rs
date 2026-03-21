@@ -280,10 +280,10 @@ impl ServiceOrchestrator {
                     sim_state: self.sim_state(),
                     geo_index: self.geo_index(),
                     prefetch_status: self.prefetch_status(),
+                    tile_activity: crate::debug_map::TileActivityTracker::global().clone(),
                 };
                 let debug_port = crate::debug_map::DEFAULT_DEBUG_MAP_PORT;
-                let debug_server =
-                    crate::debug_map::DebugMapServer::new(debug_state, debug_port);
+                let debug_server = crate::debug_map::DebugMapServer::new(debug_state, debug_port);
                 let debug_cancellation = self.cancellation.clone();
                 handle.spawn(async move {
                     debug_server.run(debug_cancellation).await;

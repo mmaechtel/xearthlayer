@@ -11,6 +11,8 @@ use crate::aircraft_position::SharedAircraftPosition;
 use crate::geo_index::GeoIndex;
 use crate::prefetch::SharedPrefetchStatus;
 
+use super::activity::TileActivityTracker;
+
 /// Shared state for the debug map server.
 ///
 /// Passed to axum as application state. All fields are Arc-wrapped
@@ -21,4 +23,5 @@ pub struct DebugMapState {
     pub sim_state: SharedSimState,
     pub geo_index: Option<Arc<GeoIndex>>,
     pub prefetch_status: Arc<SharedPrefetchStatus>,
+    pub tile_activity: TileActivityTracker,
 }

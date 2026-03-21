@@ -546,6 +546,13 @@ where
                 client.memory_cache_hit(origin.is_fuse());
             }
 
+            #[cfg(feature = "debug-map")]
+            {
+                use crate::debug_map::activity::{TileActivityTracker, TileCacheResult, TileOrigin};
+                let dbg_origin = if origin.is_fuse() { TileOrigin::Fuse } else { TileOrigin::Prefetch };
+                TileActivityTracker::global().record(tile_lat, tile_lon, dbg_origin, TileCacheResult::CacheHit);
+            }
+
             if let Some(tx) = request.response_tx {
                 let _ = tx.send(DdsResponse::cache_hit(data, duration));
             }
@@ -657,6 +664,14 @@ where
                                             data_size = d.len(),
                                             "DDS request completed"
                                         );
+
+                                        #[cfg(feature = "debug-map")]
+                                        {
+                                            use crate::debug_map::activity::{TileActivityTracker, TileCacheResult, TileOrigin};
+                                            let dbg_origin = if origin.is_fuse() { TileOrigin::Fuse } else { TileOrigin::Prefetch };
+                                            TileActivityTracker::global().record(tile_lat, tile_lon, dbg_origin, TileCacheResult::Generated);
+                                        }
+
                                         d
                                     }
                                     None => {

@@ -55,23 +55,45 @@ pub struct BoxBounds {
     pub lon_max: f64,
 }
 
-/// A single DSF region with its current state.
+/// A single DSF region with its current state and activity.
 #[derive(Serialize)]
 pub struct RegionInfo {
     pub lat: i32,
     pub lon: i32,
     pub state: RegionState,
+    /// Number of tiles served from cache for FUSE requests.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fuse_hits: u32,
+    /// Number of tiles X-Plane had to wait for (FUSE cache misses).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fuse_misses: u32,
+    /// Number of tiles prefetched.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub prefetch_generated: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// Region state for map colour coding.
 #[derive(Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionState {
+    /// Prefetch submitted, awaiting completion.
     InProgress,
+    /// All tiles confirmed in cache via prefetch.
     Prefetched,
+    /// No scenery data exists for this region.
     NoCoverage,
+    /// In the retained window (tracked by SceneryWindow).
     Retained,
+    /// Owned by a scenery patch.
     Patched,
+    /// X-Plane loaded tiles on-demand (prefetch missed).
+    FuseLoaded,
+    /// Mix of prefetch and on-demand loading.
+    Mixed,
 }
 
 /// Pipeline statistics.
@@ -153,58 +175,103 @@ fn compute_prefetch_box(aircraft: &Option<AircraftInfo>) -> Option<BoxBounds> {
 }
 
 fn collect_regions(state: &DebugMapState) -> Vec<RegionInfo> {
-    let Some(ref geo_index) = state.geo_index else {
-        return Vec::new();
-    };
+    use std::collections::HashMap;
 
-    let mut regions = Vec::new();
+    // Start with tile activity — this is the ground truth of what's been loaded
+    let activity = state.tile_activity.snapshot();
+    let mut region_map: HashMap<(i32, i32), RegionInfo> = HashMap::new();
 
-    // Prefetch states (most informative — show these first)
-    for (region, prefetched) in geo_index.iter::<PrefetchedRegion>() {
-        let state = if prefetched.is_in_progress() {
-            RegionState::InProgress
-        } else if prefetched.is_prefetched() {
+    // Layer 1: Tile activity (FUSE + prefetch generation events)
+    for (region, act) in &activity {
+        let region_state = if act.fuse_generated > 0 && act.prefetch_generated > 0 {
+            RegionState::Mixed
+        } else if act.fuse_generated > 0 {
+            RegionState::FuseLoaded
+        } else if act.prefetch_generated > 0 {
             RegionState::Prefetched
+        } else if act.fuse_cache_hits > 0 || act.prefetch_cache_hits > 0 {
+            RegionState::Prefetched // all cache hits = was prefetched earlier
         } else {
-            RegionState::NoCoverage
+            continue;
         };
-        regions.push(RegionInfo {
-            lat: region.lat,
-            lon: region.lon,
-            state,
-        });
-    }
 
-    // Patch coverage
-    for region in geo_index.regions::<PatchCoverage>() {
-        // Only add if not already covered by prefetch state
-        if !regions
-            .iter()
-            .any(|r| r.lat == region.lat && r.lon == region.lon)
-        {
-            regions.push(RegionInfo {
+        region_map.insert(
+            (region.lat, region.lon),
+            RegionInfo {
                 lat: region.lat,
                 lon: region.lon,
-                state: RegionState::Patched,
-            });
+                state: region_state,
+                fuse_hits: act.fuse_cache_hits,
+                fuse_misses: act.fuse_generated,
+                prefetch_generated: act.prefetch_generated,
+            },
+        );
+    }
+
+    // Layer 2: GeoIndex prefetch state (overlay on top of activity)
+    if let Some(ref geo_index) = state.geo_index {
+        for (region, prefetched) in geo_index.iter::<PrefetchedRegion>() {
+            let key = (region.lat, region.lon);
+            if !region_map.contains_key(&key) {
+                let geo_state = if prefetched.is_in_progress() {
+                    RegionState::InProgress
+                } else if prefetched.is_prefetched() {
+                    RegionState::Prefetched
+                } else {
+                    RegionState::NoCoverage
+                };
+                region_map.insert(
+                    key,
+                    RegionInfo {
+                        lat: region.lat,
+                        lon: region.lon,
+                        state: geo_state,
+                        fuse_hits: 0,
+                        fuse_misses: 0,
+                        prefetch_generated: 0,
+                    },
+                );
+            }
+        }
+
+        // Layer 3: Patch coverage
+        for region in geo_index.regions::<PatchCoverage>() {
+            let key = (region.lat, region.lon);
+            if !region_map.contains_key(&key) {
+                region_map.insert(
+                    key,
+                    RegionInfo {
+                        lat: region.lat,
+                        lon: region.lon,
+                        state: RegionState::Patched,
+                        fuse_hits: 0,
+                        fuse_misses: 0,
+                        prefetch_generated: 0,
+                    },
+                );
+            }
+        }
+
+        // Layer 4: Retained regions
+        for region in geo_index.regions::<RetainedRegion>() {
+            let key = (region.lat, region.lon);
+            if !region_map.contains_key(&key) {
+                region_map.insert(
+                    key,
+                    RegionInfo {
+                        lat: region.lat,
+                        lon: region.lon,
+                        state: RegionState::Retained,
+                        fuse_hits: 0,
+                        fuse_misses: 0,
+                        prefetch_generated: 0,
+                    },
+                );
+            }
         }
     }
 
-    // Retained regions (only add if not already present)
-    for region in geo_index.regions::<RetainedRegion>() {
-        if !regions
-            .iter()
-            .any(|r| r.lat == region.lat && r.lon == region.lon)
-        {
-            regions.push(RegionInfo {
-                lat: region.lat,
-                lon: region.lon,
-                state: RegionState::Retained,
-            });
-        }
-    }
-
-    regions
+    region_map.into_values().collect()
 }
 
 fn collect_stats(state: &DebugMapState) -> StatsInfo {

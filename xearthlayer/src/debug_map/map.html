@@ -32,8 +32,10 @@
 <div id="map"></div>
 <div id="stats">Connecting...</div>
 <div id="legend">
-  <div class="legend-item"><span class="legend-swatch" style="background:#4CAF50"></span> Prefetched</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#4CAF50"></span> Prefetched (ready)</div>
   <div class="legend-item"><span class="legend-swatch" style="background:#FFC107"></span> In Progress</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#f44336"></span> FUSE loaded (X-Plane waited)</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#FF9800"></span> Mixed (prefetch + FUSE)</div>
   <div class="legend-item"><span class="legend-swatch" style="background:#9E9E9E"></span> No Coverage</div>
   <div class="legend-item"><span class="legend-swatch" style="background:#9C27B0"></span> Patched</div>
   <div class="legend-item"><span class="legend-swatch" style="background:transparent;border:2px solid #2196F3"></span> Retained</div>
@@ -60,6 +62,8 @@ const REGION_COLORS = {
   no_coverage: { color: '#9E9E9E', fillColor: '#9E9E9E', fillOpacity: 0.15, weight: 1 },
   patched:     { color: '#9C27B0', fillColor: '#9C27B0', fillOpacity: 0.3, weight: 1 },
   retained:    { color: '#2196F3', fillColor: 'transparent', fillOpacity: 0, weight: 2 },
+  fuse_loaded: { color: '#f44336', fillColor: '#f44336', fillOpacity: 0.35, weight: 1 },
+  mixed:       { color: '#FF9800', fillColor: '#FF9800', fillOpacity: 0.3, weight: 1 },
 };
 
 function updateStats(data) {
@@ -173,7 +177,12 @@ function updateMap(data) {
     const style = REGION_COLORS[r.state] || REGION_COLORS.no_coverage;
     const rect = L.rectangle(bounds, style);
     const sign = (n) => n >= 0 ? '+' + n : String(n);
-    rect.bindTooltip('DSF ' + sign(r.lat) + sign(r.lon) + ': ' + r.state);
+    let tip = 'DSF ' + sign(r.lat) + sign(r.lon) + ': ' + r.state;
+    if (r.fuse_hits || r.fuse_misses || r.prefetch_generated) {
+      tip += '\nFUSE hits: ' + (r.fuse_hits || 0) + ', misses: ' + (r.fuse_misses || 0);
+      tip += '\nPrefetch: ' + (r.prefetch_generated || 0);
+    }
+    rect.bindTooltip(tip);
     regionLayers.addLayer(rect);
   }
 
