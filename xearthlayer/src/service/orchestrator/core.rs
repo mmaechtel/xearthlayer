@@ -271,6 +271,26 @@ impl ServiceOrchestrator {
             }
         }
 
+        // Start debug map server (only when compiled with --features debug-map)
+        #[cfg(feature = "debug-map")]
+        {
+            if let Some(handle) = self.runtime_handle() {
+                let debug_state = crate::debug_map::DebugMapState {
+                    aircraft_position: self.aircraft_position(),
+                    sim_state: self.sim_state(),
+                    geo_index: self.geo_index(),
+                    prefetch_status: self.prefetch_status(),
+                };
+                let debug_port = crate::debug_map::DEFAULT_DEBUG_MAP_PORT;
+                let debug_server =
+                    crate::debug_map::DebugMapServer::new(debug_state, debug_port);
+                let debug_cancellation = self.cancellation.clone();
+                handle.spawn(async move {
+                    debug_server.run(debug_cancellation).await;
+                });
+            }
+        }
+
         // Signal completion
         if let Some(ref cb) = callback {
             cb(StartupProgress::Complete);
