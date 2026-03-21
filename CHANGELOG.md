@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-21
+
+> **Breaking**: Replaces XGPS2/ForeFlight UDP telemetry with X-Plane's built-in Web API. The `[online_network]` config section and `udp_port` setting are removed. X-Plane 12.1+ is required for position telemetry.
+
+### Added
+
+- **X-Plane Web API Telemetry** ([#79](https://github.com/samsoir/xearthlayer/issues/79)): Real-time position and sim state via X-Plane's built-in Web API
+  - `WebApiAdapter` — REST dataref lookup + WebSocket subscription at 10Hz
+  - `SimState` — direct sim state detection (paused, on_ground, scenery_loading, replay, sim_speed)
+  - Automatic reconnection with configurable interval
+  - `prefetch.web_api_port` config setting (default: 8086)
+
+- **Sliding Prefetch Box** ([#86](https://github.com/samsoir/xearthlayer/issues/86), [#98](https://github.com/samsoir/xearthlayer/issues/98)): Heading-biased prefetch region that slides with the aircraft
+  - `PrefetchBox` — 6.5° extent with proportional 80/20 heading bias
+  - Replaces boundary-monitor edge detection approach
+  - `box_extent` and `box_max_bias` config settings
+  - Retention tracking integrated with PrefetchBox bounds
+
+- **Debug Map** ([#97](https://github.com/samsoir/xearthlayer/issues/97)): Live browser-based map for prefetch observability (feature-gated behind `debug-map`)
+  - Leaflet.js map showing aircraft, prefetch box, DSF regions, and DDS tiles
+  - Colour-coded region states: green (prefetched), yellow (in progress), red (FUSE loaded), grey (no coverage), purple (patched)
+  - Per-tile activity tracking — FUSE on-demand vs prefetch origin
+  - Stats panel with sim state, position, and region counts
+  - `make debug-build` / `make debug-run` targets
+
+- **GPU Pipeline Overlap** ([#80](https://github.com/samsoir/xearthlayer/issues/80)): Pipelined GPU encoding for improved throughput
+  - While GPU compresses tile A, CPU uploads tile B
+  - Panic recovery via `catch_unwind`, `map_async` error propagation
+  - `device.on_uncaptured_error()` for device loss logging
+
+- **FOPEN_DIRECT_IO** ([#65](https://github.com/samsoir/xearthlayer/issues/65)): Return `FOPEN_DIRECT_IO` for virtual DDS files, bypassing kernel page cache for reduced memory pressure
+
+### Changed
+
+- **Prefetch box resized** from 4°×4° to 6.5°×6.5° to match X-Plane's observed ~6×6 DSF loading area ([#98](https://github.com/samsoir/xearthlayer/issues/98))
+- **Proportional heading bias** replaces binary forward/behind margins — smooth interpolation from 50/50 (perpendicular) to 80/20 (aligned) ([#98](https://github.com/samsoir/xearthlayer/issues/98))
+- **TUI queue display** now shows one row per DSF region with aggregate tile progress instead of individual tiles ([#104](https://github.com/samsoir/xearthlayer/issues/104))
+- **XEarthLayerService** consolidated to single `start()` constructor — removed 4 unused legacy constructors and private `build()` method ([#91](https://github.com/samsoir/xearthlayer/issues/91))
+- **mod.rs files** sanitized — implementations extracted to focused modules across 5 modules ([#95](https://github.com/samsoir/xearthlayer/issues/95))
+- **CI**: GitHub Actions upgraded to v5 for Node.js 24 compatibility ([#78](https://github.com/samsoir/xearthlayer/pull/82))
+
+### Fixed
+
+- **Prefetch executor flooding** — enforce `max_tiles_per_cycle` cap on sliding box strategy, preventing executor saturation on first cruise tick ([#87](https://github.com/samsoir/xearthlayer/pull/87)) — thanks [@mmaechtel](https://github.com/mmaechtel)
+- **FUSE shutdown hang** when GPU pipeline and FOPEN_DIRECT_IO are both enabled ([#90](https://github.com/samsoir/xearthlayer/issues/90))
+- **Pre-commit hook** now fails on formatting issues instead of silently fixing them ([#101](https://github.com/samsoir/xearthlayer/issues/101))
+- **version.json** atomic updates via GitHub Contents API, eliminating push race condition
+
+### Removed
+
+- **XGPS2/ForeFlight UDP telemetry** — replaced by X-Plane Web API ([#79](https://github.com/samsoir/xearthlayer/issues/79))
+- **Online network position sources** (VATSIM, IVAO, PilotEdge) — redundant with Web API ([#79](https://github.com/samsoir/xearthlayer/issues/79))
+- **Circuit breaker and FUSE load monitor** — replaced by SimState from Web API ([#79](https://github.com/samsoir/xearthlayer/issues/79))
+- **Boundary monitors** — replaced by sliding prefetch box ([#94](https://github.com/samsoir/xearthlayer/issues/94))
+- **Config keys**: `udp_port`, `online_network.*`, `circuit_breaker_*`, `trigger_distance`, `load_depth_lat`, `load_depth_lon`, `forward_margin`, `behind_margin` ([#79](https://github.com/samsoir/xearthlayer/issues/79), [#94](https://github.com/samsoir/xearthlayer/issues/94))
+- **Legacy service constructors**: `new()`, `with_disk_profile()`, `with_runtime()`, `with_cache_bridges()` ([#91](https://github.com/samsoir/xearthlayer/issues/91))
+
 ## [0.3.1] - 2026-03-13
 
 > **Note**: Major release featuring GPU-accelerated DDS encoding, a complete rewrite of the prefetch system to a boundary-driven model, and extensive stability and performance improvements across the pipeline.
@@ -834,6 +891,7 @@ Run `xearthlayer config upgrade` to automatically add new settings with defaults
 - Requires FUSE3 for filesystem mounting
 
 [Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.3.1...HEAD
+[0.4.0]: https://github.com/samsoir/xearthlayer/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/samsoir/xearthlayer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/samsoir/xearthlayer/compare/v0.2.12...v0.3.0
 [0.2.12]: https://github.com/samsoir/xearthlayer/compare/v0.2.10...v0.2.12
