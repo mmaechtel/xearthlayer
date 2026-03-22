@@ -287,10 +287,58 @@ irqbalance              = aktiv
 XEL memory_size         = 4          (erhoht von 2 GB)
 ```
 
+## Run AE — Watermark-Experiment gescheitert: LSZH→EHAM (2026-03-22)
+
+**Route:** LSZH (Zuerich) → EHAM (Amsterdam Schiphol), 120 Min, FL370
+**Aenderungen:** memory_size 2→4 GB, min_free_kbytes 3GB→1GB, watermark_scale_factor 125→500, kein zram
+
+| Metrik | Run T | Run AD | **Run AE** | Delta AE vs AD |
+|--------|-------|--------|------------|----------------|
+| Main Thread Reclaim | **0** | **0** | **10.057** | REGRESSION |
+| Max Reclaim-Latenz | — | 0 ms | **14,5 ms** | REGRESSION |
+| allocstall Sum | ~1 | 71.630 | **11.425** | -84% BESSER |
+| allocstall Samples >0 | 1 | viele | **3 (0,04%)** | BESSER |
+| FPS < 25 | 3,1% | 3,58% | **3,4%** | -5% ≈ |
+| XEL RSS Peak | — | 15.828 MB | **17.449 MB** | +10% ❌ |
+| Combined RSS Peak | — | ~37.146 MB | **~43.700 MB** | +18% ❌ |
+| Swap Peak | ja | 11.715 MB | **18.064 MB** | +54% ❌❌ |
+| wset_refault_anon | — | 44,8% | **87%** | +94% ❌❌ |
+| Slow IO (>5ms) | 236 | 5.816 | **5.511** | -5% ≈ |
+| Fence Events | — | 11.135 | **4.953** | -56% ✅ |
+| CB Trips | 0 | 0 | **0** | ✅ |
+
+**Ergebnis:** Watermark-Experiment gescheitert. min_free_kbytes=1GB + wsf=500 schuetzt NICHT so gut wie min_free_kbytes=3GB + wsf=125. Direct Reclaim kehrte auf Main Thread zurueck (10K Events, max 14,5 ms). Paradox: weniger allocstalls (-84%), aber wenn kswapd noetig wird, kommt er zu spaet → Direct Reclaim statt weicher Wartezeit.
+
+**Kernerkenntnisse:**
+- `min_free_kbytes=3GB` ist der unverzichtbare Schutz — wsf=500 kann ihn NICHT ersetzen
+- XEL 4-GB-Cache hat RSS nicht reduziert (17,4 vs 15,8 GB) — moeglicherweise routenabhaengig
+- Swap Thrash chronisch (87% Samples mit Anon-Refaults)
+- Approach-Stutter (EHAM) durch 1,4 Mio pgfaults/s Peaks
+
+**Aktion:** Watermarks zuruecksetzen auf Run-AD-Stack (min_free_kbytes=3GB, wsf=125). memory_size=4GB beibehalten fuer fairen Vergleich.
+
+→ Details: `ANALYSE_RUN_AE_2026-03-22.md`
+
+---
+
+## Aktueller Tuning-Stack (Run-AD-Stack bestaetigt, Run-AE-Experiment gescheitert)
+
+```
+vm.min_free_kbytes      = 3145728    (3 GB) — UNVERZICHTBAR, wsf=500 kein Ersatz
+vm.watermark_scale_factor = 125
+vm.swappiness           = 8
+vm.page_cluster         = 0
+vm.vfs_cache_pressure   = 100        (Default)
+vm.dirty_background_ratio = 3
+vm.dirty_ratio          = 10
+zram                    = NICHT NOETIG (Run AD: 0 Direct Reclaim ohne zram)
+IO-Scheduler            = none (alle NVMe)
+WBT                     = 0
+Readahead               = 256 KB
+irqbalance              = aktiv
+XEL memory_size         = 4          (beibehalten, fairer Vergleich steht aus)
+```
+
 ## Naechster Schritt
 
-**Run AE:** Europaeische Route mit zwei Aenderungen:
-1. `memory_size = 4` (XEL Cache 2 → 4 GB) — weniger Encoding-Bursts, weniger Spitzen-RSS
-2. `min_free_kbytes = 1 GB` + `watermark_scale_factor = 500` (statt min_free_kbytes = 3 GB) — praeziseres kswapd-Tuning, 2 GB weniger Verschwendung (Kernel-Commit 795ae7a0)
-
-Zielmetriken: Direct Reclaim = 0, XEL RSS < 15 GB, wset_refault_anon < 30%, available_mb +2 GB vs Run AD.
+**Run AF:** Gleiche Route (LSZH→EHAM oder aehnlich europaeisch), Run-AD-Stack (min_free_kbytes=3GB, wsf=125), memory_size=4GB beibehalten. Ziel: Bestaetigen dass nur die Watermark-Aenderung die Regression verursacht hat.
