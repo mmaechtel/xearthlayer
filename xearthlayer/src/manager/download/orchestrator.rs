@@ -82,9 +82,13 @@ impl MultiPartDownloader {
             })
             .collect();
 
-        let total_size: u64 = handles.into_iter().filter_map(|h| h.join().ok()).sum();
+        let sizes: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap_or(0)).collect();
 
-        state.total_size = total_size;
+        state.total_size = sizes.iter().sum();
+        state.part_sizes = sizes
+            .iter()
+            .map(|&s| if s > 0 { Some(s) } else { None })
+            .collect();
     }
 
     /// Download all parts of a package.
