@@ -77,8 +77,9 @@ impl Output for ConsoleOutput {
                 );
                 b.set_prefix(stage.name().to_string());
                 b.set_message(message.to_string());
-                b.tick();
+                b.enable_steady_tick(std::time::Duration::from_millis(100));
             } else {
+                b.disable_steady_tick();
                 b.set_style(
                     ProgressStyle::with_template(
                         "{spinner:.cyan} {prefix:.bold} [{bar:30.cyan/dim}] {percent:>3}% {msg}",
