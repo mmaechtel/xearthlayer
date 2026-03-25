@@ -18,6 +18,55 @@ use std::time::Duration;
 /// * `total_parts` - Total number of parts
 pub type MultiPartProgressCallback = Box<dyn Fn(u64, u64, usize, usize) + Send + Sync>;
 
+/// State of an individual download part.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
+pub enum PartState {
+    /// Waiting to start.
+    #[default]
+    Queued,
+    /// Actively downloading.
+    Downloading,
+    /// Download complete, checksum verified.
+    Done,
+    /// Download failed.
+    Failed { reason: String, attempt: u8 },
+    /// Retrying after failure.
+    Retrying { attempt: u8 },
+}
+
+/// Progress snapshot for a single download part.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
+pub struct PartProgress {
+    /// Zero-based index in the parts list.
+    pub index: usize,
+    /// Filename of this part.
+    pub filename: String,
+    /// Bytes downloaded so far.
+    pub bytes_downloaded: u64,
+    /// Total bytes for this part (None if unknown).
+    pub total_bytes: Option<u64>,
+    /// Current state of this part.
+    pub state: PartState,
+}
+
+/// Aggregate download progress snapshot with per-part detail.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
+pub struct DownloadProgress {
+    /// Per-part progress, ordered by part index.
+    pub parts: Vec<PartProgress>,
+    /// Total bytes downloaded across all parts.
+    pub total_bytes_downloaded: u64,
+    /// Total expected bytes (None if any part size is unknown).
+    pub total_bytes: Option<u64>,
+}
+
+/// Callback invoked with download progress snapshots.
+#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
+pub type DownloadProgressCallback = Box<dyn Fn(&DownloadProgress) + Send + Sync>;
+
 /// Shared progress counters for parallel downloads.
 ///
 /// This struct holds atomic counters that can be safely shared across
@@ -204,6 +253,38 @@ mod tests {
         assert!(!counters.is_done());
         counters.signal_done();
         assert!(counters.is_done());
+    }
+
+    #[test]
+    fn test_part_state_default_is_queued() {
+        let state = PartState::default();
+        assert_eq!(state, PartState::Queued);
+    }
+
+    #[test]
+    fn test_download_progress_total_bytes_none_when_any_unknown() {
+        let progress = DownloadProgress {
+            parts: vec![
+                PartProgress {
+                    index: 0,
+                    filename: "part.aa".to_string(),
+                    bytes_downloaded: 100,
+                    total_bytes: Some(200),
+                    state: PartState::Downloading,
+                },
+                PartProgress {
+                    index: 1,
+                    filename: "part.ab".to_string(),
+                    bytes_downloaded: 0,
+                    total_bytes: None,
+                    state: PartState::Queued,
+                },
+            ],
+            total_bytes_downloaded: 100,
+            total_bytes: None,
+        };
+        assert!(progress.total_bytes.is_none());
+        assert_eq!(progress.total_bytes_downloaded, 100);
     }
 
     #[test]

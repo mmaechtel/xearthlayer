@@ -59,5 +59,8 @@ mod strategy;
 
 // Public API - types used by installer and other modules
 pub use orchestrator::MultiPartDownloader;
-pub use progress::MultiPartProgressCallback;
+#[allow(unused_imports)] // New types used by CLI crate in upcoming tasks
+pub use progress::{
+    DownloadProgress, DownloadProgressCallback, MultiPartProgressCallback, PartProgress, PartState,
+};
 pub use state::DownloadState;

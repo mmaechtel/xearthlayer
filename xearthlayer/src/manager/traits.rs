@@ -38,20 +38,6 @@ pub trait LibraryClient: Send + Sync {
 /// Progress callback for download operations.
 pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
 
-/// Download progress information.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Will be used in Phase 6 implementation
-pub struct DownloadProgress {
-    /// Bytes downloaded so far.
-    pub downloaded: u64,
-    /// Total bytes to download (if known).
-    pub total: Option<u64>,
-    /// Current download speed in bytes per second.
-    pub speed: u64,
-    /// Estimated time remaining in seconds.
-    pub eta: Option<u64>,
-}
-
 /// Downloader for package archives.
 ///
 /// This trait abstracts archive downloading to enable testing and different
