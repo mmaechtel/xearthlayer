@@ -8,19 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Progress callback for multi-part downloads with real-time byte-level updates.
-///
-/// # Arguments
-///
-/// * `bytes_downloaded` - Total bytes downloaded across all parts
-/// * `total_bytes` - Total expected bytes (from HEAD requests)
-/// * `parts_completed` - Number of parts fully downloaded
-/// * `total_parts` - Total number of parts
-pub type MultiPartProgressCallback = Box<dyn Fn(u64, u64, usize, usize) + Send + Sync>;
-
 /// State of an individual download part.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
 pub enum PartState {
     /// Waiting to start.
     #[default]
@@ -37,7 +26,6 @@ pub enum PartState {
 
 /// Progress snapshot for a single download part.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
 pub struct PartProgress {
     /// Zero-based index in the parts list.
     pub index: usize,
@@ -53,7 +41,6 @@ pub struct PartProgress {
 
 /// Aggregate download progress snapshot with per-part detail.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
 pub struct DownloadProgress {
     /// Per-part progress, ordered by part index.
     pub parts: Vec<PartProgress>,
@@ -64,7 +51,6 @@ pub struct DownloadProgress {
 }
 
 /// Callback invoked with download progress snapshots.
-#[allow(dead_code)] // Used by CLI crate in Task 7+8 (indicatif progress bars)
 pub type DownloadProgressCallback = Box<dyn Fn(&DownloadProgress) + Send + Sync>;
 
 /// Shared progress counters for parallel downloads.
@@ -94,6 +80,7 @@ pub struct ProgressCounters {
 
 impl ProgressCounters {
     /// Create new progress counters for the given number of parts.
+    #[cfg(test)]
     pub fn new(num_parts: usize) -> Self {
         Self {
             part_progress: Arc::new((0..num_parts).map(|_| AtomicU64::new(0)).collect()),
@@ -108,7 +95,6 @@ impl ProgressCounters {
     }
 
     /// Create new progress counters with extended per-part metadata.
-    #[allow(dead_code)] // Used by rewritten ParallelStrategy in Task 7
     pub fn new_extended(
         num_parts: usize,
         filenames: Vec<String>,
@@ -130,6 +116,7 @@ impl ProgressCounters {
     }
 
     /// Get the total bytes downloaded across all parts.
+    #[cfg(test)]
     pub fn total_bytes(&self) -> u64 {
         self.part_progress
             .iter()
@@ -138,6 +125,7 @@ impl ProgressCounters {
     }
 
     /// Get the number of completed parts.
+    #[cfg(test)]
     pub fn completed_parts(&self) -> usize {
         self.parts_completed.load(Ordering::SeqCst)
     }
@@ -170,7 +158,6 @@ impl ProgressCounters {
     // --- Extended state tracking methods ---
 
     /// Set the state of a part (0=Queued, 1=Downloading, 2=Done, 3=Failed, 4=Retrying).
-    #[allow(dead_code)] // Used by rewritten ParallelStrategy in Task 7
     pub fn set_part_state(&self, index: usize, state: u8) {
         if index < self.part_states.len() {
             self.part_states[index].store(state, Ordering::SeqCst);
@@ -178,7 +165,7 @@ impl ProgressCounters {
     }
 
     /// Get the state of a part.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn part_state(&self, index: usize) -> u8 {
         if index < self.part_states.len() {
             self.part_states[index].load(Ordering::SeqCst)
@@ -188,7 +175,6 @@ impl ProgressCounters {
     }
 
     /// Set the error reason for a failed part.
-    #[allow(dead_code)]
     pub fn set_part_error(&self, index: usize, reason: String) {
         if index < self.part_errors.len() {
             *self.part_errors[index].lock().unwrap() = Some(reason);
@@ -196,7 +182,7 @@ impl ProgressCounters {
     }
 
     /// Get the error reason for a part (if any).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn part_error(&self, index: usize) -> Option<String> {
         if index < self.part_errors.len() {
             self.part_errors[index].lock().unwrap().clone()
@@ -206,7 +192,6 @@ impl ProgressCounters {
     }
 
     /// Set the retry attempt count for a part.
-    #[allow(dead_code)]
     pub fn set_part_attempt(&self, index: usize, attempt: u8) {
         if index < self.part_attempts.len() {
             self.part_attempts[index].store(attempt, Ordering::SeqCst);
@@ -214,7 +199,6 @@ impl ProgressCounters {
     }
 
     /// Build a `DownloadProgress` snapshot from the current counter state.
-    #[allow(dead_code)]
     pub fn build_snapshot(&self) -> DownloadProgress {
         let num_parts = self.part_progress.len();
         let mut parts = Vec::with_capacity(num_parts);
@@ -283,62 +267,7 @@ pub struct ProgressReporter {
 }
 
 impl ProgressReporter {
-    /// Start a new progress reporter.
-    ///
-    /// # Arguments
-    ///
-    /// * `counters` - Shared progress counters
-    /// * `total_size` - Total expected bytes (for percentage calculation)
-    /// * `total_parts` - Total number of parts
-    /// * `callback` - Function to call with progress updates
-    /// * `poll_interval` - How often to poll for updates
-    pub fn start(
-        counters: Arc<ProgressCounters>,
-        total_size: u64,
-        total_parts: usize,
-        callback: Arc<MultiPartProgressCallback>,
-        poll_interval: Duration,
-    ) -> Self {
-        let counters_clone = Arc::clone(&counters);
-
-        let handle = thread::spawn(move || {
-            while !counters_clone.is_done() {
-                let bytes = counters_clone.total_bytes();
-                let completed = counters_clone.completed_parts();
-                callback(bytes, total_size, completed, total_parts);
-                thread::sleep(poll_interval);
-            }
-
-            // Final report
-            let bytes = counters_clone.total_bytes();
-            let completed = counters_clone.completed_parts();
-            callback(bytes, total_size, completed, total_parts);
-        });
-
-        Self {
-            handle: Some(handle),
-            counters,
-        }
-    }
-
-    /// Start a reporter with default 100ms poll interval.
-    pub fn start_default(
-        counters: Arc<ProgressCounters>,
-        total_size: u64,
-        total_parts: usize,
-        callback: Arc<MultiPartProgressCallback>,
-    ) -> Self {
-        Self::start(
-            counters,
-            total_size,
-            total_parts,
-            callback,
-            Duration::from_millis(100),
-        )
-    }
-
-    /// Start a reporter that invokes the new `DownloadProgressCallback` with per-part snapshots.
-    #[allow(dead_code)] // Used by rewritten ParallelStrategy in Task 7
+    /// Start a reporter that invokes the `DownloadProgressCallback` with per-part snapshots.
     pub fn start_detailed(
         counters: Arc<ProgressCounters>,
         callback: Arc<DownloadProgressCallback>,
@@ -363,7 +292,7 @@ impl ProgressReporter {
     }
 
     /// Stop the reporter and wait for it to finish.
-    #[allow(dead_code)] // Used in tests; also available for explicit shutdown
+    #[cfg(test)]
     pub fn stop(mut self) {
         self.counters.signal_done();
         if let Some(handle) = self.handle.take() {
@@ -534,22 +463,19 @@ mod tests {
     fn test_progress_reporter_lifecycle() {
         use std::sync::atomic::AtomicUsize;
 
-        let counters = Arc::new(ProgressCounters::new(2));
+        let counters = Arc::new(ProgressCounters::new_extended(
+            2,
+            vec!["a.aa".into(), "a.ab".into()],
+            vec![Some(500), Some(500)],
+        ));
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = Arc::clone(&call_count);
 
-        let callback: MultiPartProgressCallback =
-            Box::new(move |_bytes, _total, _completed, _parts| {
-                call_count_clone.fetch_add(1, Ordering::SeqCst);
-            });
+        let callback: DownloadProgressCallback = Box::new(move |_progress: &DownloadProgress| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
-        let reporter = ProgressReporter::start(
-            Arc::clone(&counters),
-            1000,
-            2,
-            Arc::new(callback),
-            Duration::from_millis(10),
-        );
+        let reporter = ProgressReporter::start_detailed(Arc::clone(&counters), Arc::new(callback));
 
         // Let it run a bit
         thread::sleep(Duration::from_millis(50));

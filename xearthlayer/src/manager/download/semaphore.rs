@@ -6,7 +6,6 @@
 use std::sync::{Condvar, Mutex};
 
 /// A counting semaphore that limits concurrent access to a resource.
-#[allow(dead_code)] // Used by rewritten ParallelStrategy in Task 7
 ///
 /// Threads acquire permits before proceeding. When all permits are held,
 /// subsequent acquire calls block until a permit is released (via RAII drop).
@@ -16,12 +15,10 @@ pub struct CountingSemaphore {
 }
 
 /// RAII guard that releases a semaphore permit when dropped.
-#[allow(dead_code)]
 pub struct SemaphorePermit<'a> {
     semaphore: &'a CountingSemaphore,
 }
 
-#[allow(dead_code)] // Used by rewritten ParallelStrategy in Task 7
 impl CountingSemaphore {
     /// Create a new semaphore with the given number of permits.
     pub fn new(permits: usize) -> Self {

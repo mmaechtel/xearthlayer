@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::http::HttpDownloader;
-use super::progress::MultiPartProgressCallback;
+use super::progress::DownloadProgressCallback;
 use super::state::DownloadState;
 use super::strategy::{DownloadStrategy, ParallelStrategy, SequentialStrategy};
 use crate::manager::error::{ManagerError, ManagerResult};
@@ -98,17 +98,17 @@ impl MultiPartDownloader {
     pub fn download_all(
         &self,
         state: &mut DownloadState,
-        on_progress: Option<MultiPartProgressCallback>,
+        on_progress: Option<DownloadProgressCallback>,
     ) -> ManagerResult<()> {
         let on_progress = on_progress.map(Arc::new);
 
         // Choose strategy based on parallel downloads setting
         if self.parallel_downloads <= 1 {
             let strategy = SequentialStrategy::new();
-            strategy.execute(state, &self.downloader, on_progress)?;
+            strategy.execute(state, on_progress)?;
         } else {
             let strategy = ParallelStrategy::new(self.parallel_downloads, self.downloader.timeout);
-            strategy.execute(state, &self.downloader, on_progress)?;
+            strategy.execute(state, on_progress)?;
         }
 
         // Check for failures

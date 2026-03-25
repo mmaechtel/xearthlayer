@@ -45,8 +45,8 @@
 //! downloader.query_sizes(&mut state);
 //!
 //! // Download with progress callback
-//! downloader.download_all(&mut state, Some(Box::new(|bytes, total, parts, total_parts| {
-//!     println!("Downloaded {} of {} bytes", bytes, total);
+//! downloader.download_all(&mut state, Some(Box::new(|progress| {
+//!     println!("Downloaded {} bytes", progress.total_bytes_downloaded);
 //! })))?;
 //! ```
 
@@ -61,8 +61,5 @@ mod strategy;
 
 // Public API - types used by installer and other modules
 pub use orchestrator::MultiPartDownloader;
-#[allow(unused_imports)] // New types used by CLI crate in upcoming tasks
-pub use progress::{
-    DownloadProgress, DownloadProgressCallback, MultiPartProgressCallback, PartProgress, PartState,
-};
+pub use progress::{DownloadProgress, DownloadProgressCallback, PartState};
 pub use state::DownloadState;

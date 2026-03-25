@@ -54,7 +54,7 @@ mod updates;
 pub use cache::{CacheStats, CachedLibraryClient};
 pub use client::HttpLibraryClient;
 pub use config::ManagerConfig;
-pub use download::{DownloadState, MultiPartDownloader, MultiPartProgressCallback};
+pub use download::{DownloadProgressCallback, DownloadState, MultiPartDownloader};
 pub use error::{ManagerError, ManagerResult};
 pub use extractor::{check_required_tools, ShellExtractor};
 pub use installer::{InstallProgressCallback, InstallResult, InstallStage, PackageInstaller};
