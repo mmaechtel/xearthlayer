@@ -54,6 +54,7 @@ mod checksum;
 mod http;
 mod orchestrator;
 mod progress;
+pub(crate) mod retry;
 pub(crate) mod semaphore;
 mod state;
 mod strategy;
