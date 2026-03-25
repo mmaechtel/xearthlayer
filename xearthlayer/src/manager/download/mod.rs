@@ -45,8 +45,8 @@
 //! downloader.query_sizes(&mut state);
 //!
 //! // Download with progress callback
-//! downloader.download_all(&mut state, Some(Box::new(|bytes, total, parts, total_parts| {
-//!     println!("Downloaded {} of {} bytes", bytes, total);
+//! downloader.download_all(&mut state, Some(Box::new(|progress| {
+//!     println!("Downloaded {} bytes", progress.total_bytes_downloaded);
 //! })))?;
 //! ```
 
@@ -54,10 +54,12 @@ mod checksum;
 mod http;
 mod orchestrator;
 mod progress;
+pub(crate) mod retry;
+pub(crate) mod semaphore;
 mod state;
 mod strategy;
 
 // Public API - types used by installer and other modules
 pub use orchestrator::MultiPartDownloader;
-pub use progress::MultiPartProgressCallback;
+pub use progress::{DownloadProgress, DownloadProgressCallback, PartState};
 pub use state::DownloadState;

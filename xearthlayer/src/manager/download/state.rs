@@ -24,6 +24,8 @@ pub struct DownloadState {
     pub destinations: Vec<PathBuf>,
     /// Parts that failed to download (by index).
     pub failed: Vec<usize>,
+    /// Per-part sizes from HEAD requests. None = unknown (server returned 0).
+    pub part_sizes: Vec<Option<u64>>,
 }
 
 impl DownloadState {
@@ -39,6 +41,7 @@ impl DownloadState {
             checksums,
             destinations,
             failed: Vec::new(),
+            part_sizes: vec![None; total_parts],
         }
     }
 
