@@ -260,6 +260,11 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                 config.packages.temp_dir = Some(expand_tilde(v));
             }
         }
+        if let Some(v) = section.get("concurrent_downloads") {
+            if let Ok(n) = v.trim().parse::<usize>() {
+                config.packages.concurrent_downloads = n.clamp(1, 10);
+            }
+        }
     }
 
     // [logging] section

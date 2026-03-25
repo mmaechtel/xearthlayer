@@ -70,6 +70,7 @@ pub enum ConfigKey {
     PackagesCustomSceneryPath,
     PackagesAutoInstallOverlays,
     PackagesTempDir,
+    PackagesConcurrentDownloads,
 
     // Logging settings
     LoggingFile,
@@ -170,6 +171,7 @@ impl FromStr for ConfigKey {
             "packages.custom_scenery_path" => Ok(ConfigKey::PackagesCustomSceneryPath),
             "packages.auto_install_overlays" => Ok(ConfigKey::PackagesAutoInstallOverlays),
             "packages.temp_dir" => Ok(ConfigKey::PackagesTempDir),
+            "packages.concurrent_downloads" => Ok(ConfigKey::PackagesConcurrentDownloads),
 
             "logging.file" => Ok(ConfigKey::LoggingFile),
 
@@ -267,6 +269,7 @@ impl ConfigKey {
             ConfigKey::PackagesCustomSceneryPath => "packages.custom_scenery_path",
             ConfigKey::PackagesAutoInstallOverlays => "packages.auto_install_overlays",
             ConfigKey::PackagesTempDir => "packages.temp_dir",
+            ConfigKey::PackagesConcurrentDownloads => "packages.concurrent_downloads",
             ConfigKey::LoggingFile => "logging.file",
             ConfigKey::PrefetchEnabled => "prefetch.enabled",
             ConfigKey::PrefetchStrategy => "prefetch.strategy",
@@ -399,6 +402,9 @@ impl ConfigKey {
                 .as_ref()
                 .map(|p| path_to_display(p))
                 .unwrap_or_default(),
+            ConfigKey::PackagesConcurrentDownloads => {
+                config.packages.concurrent_downloads.to_string()
+            }
             ConfigKey::LoggingFile => path_to_display(&config.logging.file),
             ConfigKey::PrefetchEnabled => config.prefetch.enabled.to_string(),
             ConfigKey::PrefetchStrategy => config.prefetch.strategy.clone(),
@@ -581,6 +587,9 @@ impl ConfigKey {
             ConfigKey::PackagesTempDir => {
                 config.packages.temp_dir = optional_path(value);
             }
+            ConfigKey::PackagesConcurrentDownloads => {
+                config.packages.concurrent_downloads = value.parse().unwrap();
+            }
             ConfigKey::LoggingFile => {
                 config.logging.file = expand_tilde(value);
             }
@@ -757,6 +766,7 @@ impl ConfigKey {
             ConfigKey::PackagesCustomSceneryPath => Box::new(OptionalPathSpec),
             ConfigKey::PackagesAutoInstallOverlays => Box::new(BooleanSpec),
             ConfigKey::PackagesTempDir => Box::new(OptionalPathSpec),
+            ConfigKey::PackagesConcurrentDownloads => Box::new(IntegerRangeSpec::new(1, 10)),
             ConfigKey::LoggingFile => Box::new(PathSpec),
             ConfigKey::PrefetchEnabled => Box::new(BooleanSpec),
             ConfigKey::PrefetchStrategy => Box::new(OneOfSpec::new(&["auto", "adaptive"])),

@@ -344,6 +344,7 @@ impl Default for ConfigFile {
                 custom_scenery_path: None,
                 auto_install_overlays: false,
                 temp_dir: None,
+                concurrent_downloads: 5,
             },
             logging: LoggingSettings {
                 file: config_dir.join("xearthlayer.log"),

@@ -149,6 +149,8 @@ pub struct PackagesSettings {
     pub auto_install_overlays: bool,
     /// Temporary directory for downloads (default: system temp dir).
     pub temp_dir: Option<PathBuf>,
+    /// Number of concurrent part downloads (1-10, default: 5).
+    pub concurrent_downloads: usize,
 }
 
 /// Logging configuration.
