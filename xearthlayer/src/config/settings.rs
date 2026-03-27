@@ -147,7 +147,7 @@ pub struct PackagesSettings {
     pub custom_scenery_path: Option<PathBuf>,
     /// Automatically install overlay packages when installing ortho for same region.
     pub auto_install_overlays: bool,
-    /// Temporary directory for downloads (default: system temp dir).
+    /// Temporary directory for downloads (default: ~/.xearthlayer/tmp).
     pub temp_dir: Option<PathBuf>,
     /// Number of concurrent part downloads (1-10, default: 5).
     pub concurrent_downloads: usize,

@@ -147,7 +147,7 @@ install_location = {}
 custom_scenery_path = {}
 ; Automatically install overlay packages when installing ortho for same region
 auto_install_overlays = {}
-; Temporary directory for package downloads (default: system temp dir)
+; Temporary directory for package downloads (default: ~/.xearthlayer/tmp)
 ; Large packages are downloaded here before extraction
 temp_dir = {}
 ; Number of concurrent part downloads (1-10, default: 5)

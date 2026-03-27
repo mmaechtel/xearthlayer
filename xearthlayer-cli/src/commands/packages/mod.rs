@@ -28,7 +28,6 @@ pub use handlers::{
 pub use services::{ConsoleInteraction, ConsoleOutput, DefaultPackageManagerService};
 pub use traits::CommandHandler;
 
-use std::env;
 use std::path::PathBuf;
 
 use args::{CheckArgs, InfoArgs, InstallArgs, ListArgs, RemoveArgs, UpdateArgs};
@@ -77,13 +76,15 @@ fn default_custom_scenery_dir(config: &ConfigFile) -> Option<PathBuf> {
 /// Get the default temporary directory.
 ///
 /// Uses the config file's packages.temp_dir if available, otherwise falls back to
-/// system temp directory.
+/// `~/.xearthlayer/tmp`. This avoids using the system temp directory which on many
+/// Linux distributions is a tmpfs (RAM-backed), causing OOM when downloading large
+/// scenery packages.
 fn default_temp_dir(config: &ConfigFile) -> PathBuf {
     config
         .packages
         .temp_dir
         .clone()
-        .unwrap_or_else(|| env::temp_dir().join("xearthlayer"))
+        .unwrap_or_else(|| xearthlayer::config::config_directory().join("tmp"))
 }
 
 /// Get the default library URL from config.
