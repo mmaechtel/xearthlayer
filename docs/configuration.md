@@ -493,7 +493,7 @@ Controls package manager behavior.
 | `install_location` | path | `~/.xearthlayer/packages` | Directory for storing installed packages |
 | `custom_scenery_path` | path | (auto-detect) | X-Plane Custom Scenery directory for overlay symlinks |
 | `auto_install_overlays` | bool | `false` | Automatically install matching overlay when installing ortho |
-| `temp_dir` | path | system temp | Temporary directory for package downloads |
+| `temp_dir` | path | `~/.xearthlayer/tmp` | Temporary directory for package downloads |
 | `concurrent_downloads` | Integer | `5` | Number of concurrent part downloads (1-10) |
 
 **Example:**
@@ -508,7 +508,7 @@ temp_dir = ~/Downloads/xearthlayer-temp
 
 **Notes:**
 - The default `library_url` points to the official XEarthLayer package library; override only if using a custom package source
-- The `temp_dir` is used for downloading archives before extraction; files are cleaned up after installation
+- The `temp_dir` is used for downloading archives before extraction; files are cleaned up after installation. The default avoids the system temp directory which is often RAM-backed (tmpfs) on Linux
 - When `auto_install_overlays` is enabled, installing an ortho package will automatically install the matching overlay package for the same region (if available)
 - If `custom_scenery_path` is not set, it falls back to `[xplane] scenery_dir` or auto-detects from X-Plane installation
 
