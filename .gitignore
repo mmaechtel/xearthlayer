@@ -54,3 +54,6 @@ notes*
 
 .gemini/
 gha-creds-*.json
+
+# Git worktrees
+.worktrees/
