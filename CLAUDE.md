@@ -49,6 +49,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
      - `SoftwareCompressor` — Pure-Rust fallback
      - `IspcCompressor` — SIMD-optimized via Intel ISPC (default)
      - `GpuEncoderChannel` — Channel-based GPU encoding (optional `gpu-encode` feature)
+   - `MipmapStream` — Memory-efficient iterator yielding one mipmap level at a time (no clones)
    - GPU encoding architecture: `mpsc` channel → dedicated pipeline worker → `GpuBlockCompressor`
    - `WgpuCompressor` wraps `block_compression` crate (ISPC kernels ported to WGSL compute shaders)
    - Pipeline overlap: while GPU compresses tile A, CPU uploads tile B; adaptive depth (1 or 2)
