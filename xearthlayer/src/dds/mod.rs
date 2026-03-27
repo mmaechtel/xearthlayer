@@ -82,4 +82,4 @@ pub use gpu_channel::create_gpu_encoder_channel;
 pub use types::{DdsError, DdsFormat, DdsHeader};
 
 // Re-export for advanced usage
-pub use mipmap::MipmapGenerator;
+pub use mipmap::{MipmapGenerator, MipmapStream};
