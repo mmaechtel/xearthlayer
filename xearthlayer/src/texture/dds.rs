@@ -30,6 +30,8 @@ pub struct DdsTextureEncoder {
     format: DdsFormat,
     mipmap_count: usize,
     compressor: Arc<dyn ImageCompressor>,
+    #[cfg(feature = "gpu-encode")]
+    mipmap_compressor: Option<Arc<dyn crate::dds::MipmapCompressor>>,
 }
 
 impl Clone for DdsTextureEncoder {
@@ -38,17 +40,29 @@ impl Clone for DdsTextureEncoder {
             format: self.format,
             mipmap_count: self.mipmap_count,
             compressor: Arc::clone(&self.compressor),
+            #[cfg(feature = "gpu-encode")]
+            mipmap_compressor: self.mipmap_compressor.as_ref().map(Arc::clone),
         }
     }
 }
 
 impl std::fmt::Debug for DdsTextureEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DdsTextureEncoder")
-            .field("format", &self.format)
-            .field("mipmap_count", &self.mipmap_count)
-            .field("compressor", &self.compressor.name())
-            .finish()
+        let mut s = f.debug_struct("DdsTextureEncoder");
+        s.field("format", &self.format)
+            .field("mipmap_count", &self.mipmap_count);
+
+        #[cfg(feature = "gpu-encode")]
+        if let Some(ref mc) = self.mipmap_compressor {
+            s.field("compressor", &mc.name());
+        } else {
+            s.field("compressor", &self.compressor.name());
+        }
+
+        #[cfg(not(feature = "gpu-encode"))]
+        s.field("compressor", &self.compressor.name());
+
+        s.finish()
     }
 }
 
@@ -65,6 +79,8 @@ impl DdsTextureEncoder {
             format,
             mipmap_count: 5,
             compressor: default_compressor(),
+            #[cfg(feature = "gpu-encode")]
+            mipmap_compressor: None,
         }
     }
 
@@ -89,13 +105,26 @@ impl DdsTextureEncoder {
         self
     }
 
-    /// Set the block compressor backend.
+    /// Set the image compressor backend (ISPC, Software).
     ///
     /// # Arguments
     ///
-    /// * `compressor` - A shared block compressor implementation
+    /// * `compressor` - A shared image compressor implementation
     pub fn with_compressor(mut self, compressor: Arc<dyn ImageCompressor>) -> Self {
         self.compressor = compressor;
+        self
+    }
+
+    /// Use a mipmap compressor backend (GPU pipeline).
+    ///
+    /// When set, the encoder delegates the full mipmap chain to this backend
+    /// instead of using the image compressor per level.
+    #[cfg(feature = "gpu-encode")]
+    pub fn with_mipmap_compressor(
+        mut self,
+        compressor: Arc<dyn crate::dds::MipmapCompressor>,
+    ) -> Self {
+        self.mipmap_compressor = Some(compressor);
         self
     }
 
@@ -149,9 +178,20 @@ impl DdsTextureEncoder {
 
 impl TextureEncoder for DdsTextureEncoder {
     fn encode(&self, image: RgbaImage) -> Result<Vec<u8>, TextureError> {
-        let encoder = DdsEncoder::new(self.format)
-            .with_mipmap_count(self.mipmap_count)
-            .with_compressor(Arc::clone(&self.compressor));
+        let mut encoder = DdsEncoder::new(self.format).with_mipmap_count(self.mipmap_count);
+
+        #[cfg(feature = "gpu-encode")]
+        if let Some(ref mc) = self.mipmap_compressor {
+            encoder = encoder.with_mipmap_compressor(Arc::clone(mc));
+        } else {
+            encoder = encoder.with_compressor(Arc::clone(&self.compressor));
+        }
+
+        #[cfg(not(feature = "gpu-encode"))]
+        {
+            encoder = encoder.with_compressor(Arc::clone(&self.compressor));
+        }
+
         encoder.encode(image).map_err(TextureError::from)
     }
 
