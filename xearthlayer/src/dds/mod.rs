@@ -49,10 +49,14 @@
 //! levels significantly faster than the pure-Rust fallback, using AVX2/SSE4
 //! SIMD instructions to process multiple blocks simultaneously.
 //!
-//! A [`ImageCompressor`] trait allows swapping backends:
+//! Two compressor traits serve different backend models:
+//!
+//! [`ImageCompressor`] — single-level compression (caller manages mipmap iteration):
 //! - [`IspcCompressor`] — SIMD-optimized (default, recommended)
 //! - [`SoftwareCompressor`] — Pure-Rust fallback
-//! - [`GpuEncoderChannel`] — GPU compute via `wgpu` (`gpu-encode` feature)
+//!
+//! [`MipmapCompressor`] — full-pipeline compression (`gpu-encode` feature):
+//! - [`GpuEncoderChannel`] — Worker-side mipmap streaming via GPU compute
 //!
 //! # Compatibility
 //!

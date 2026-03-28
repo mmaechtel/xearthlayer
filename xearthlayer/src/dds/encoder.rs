@@ -591,4 +591,53 @@ mod tests {
         // Verify our mock data follows the header
         assert_eq!(&result[128..], &mock_data[..]);
     }
+
+    #[cfg(feature = "gpu-encode")]
+    #[test]
+    fn test_mipmap_compressor_output_matches_image_compressor() {
+        use crate::dds::compressor::{ImageCompressor, MipmapCompressor, SoftwareCompressor};
+        use crate::dds::mipmap::MipmapStream;
+
+        /// MipmapCompressor that uses SoftwareCompressor internally,
+        /// matching the ImageCompressor path's compression output.
+        struct SoftwareMipmapCompressor;
+
+        impl MipmapCompressor for SoftwareMipmapCompressor {
+            fn compress_mipmap_chain(
+                &self,
+                image: RgbaImage,
+                format: DdsFormat,
+                mipmap_count: usize,
+            ) -> Result<Vec<u8>, DdsError> {
+                let sw = SoftwareCompressor;
+                let mut output = Vec::new();
+                for level in MipmapStream::new(image, mipmap_count) {
+                    let compressed = sw.compress(&level, format)?;
+                    output.extend_from_slice(&compressed);
+                }
+                Ok(output)
+            }
+
+            fn name(&self) -> &str {
+                "software-mipmap"
+            }
+        }
+
+        let image = RgbaImage::new(256, 256);
+
+        // ImageCompressor path (fused MipmapStream loop)
+        let image_encoder = DdsEncoder::new(DdsFormat::BC1)
+            .with_mipmap_count(5)
+            .with_compressor(Arc::new(SoftwareCompressor));
+        let image_result = image_encoder.encode(image.clone()).unwrap();
+
+        // MipmapCompressor path (backend-owned pipeline)
+        let mipmap_encoder = DdsEncoder::new(DdsFormat::BC1)
+            .with_mipmap_count(5)
+            .with_mipmap_compressor(Arc::new(SoftwareMipmapCompressor));
+        let mipmap_result = mipmap_encoder.encode(image).unwrap();
+
+        // Byte-for-byte parity
+        assert_eq!(image_result, mipmap_result);
+    }
 }

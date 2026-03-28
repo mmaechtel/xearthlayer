@@ -56,8 +56,9 @@ impl MipmapGenerator {
 
     /// Count the total number of mipmap levels from full size down to 1×1.
     ///
-    /// Equivalent to `floor(log2(max(width, height))) + 1`, computed by
-    /// halving until both dimensions reach 1.
+    /// Equivalent to `floor(log2(min(width, height))) + 1`, computed by
+    /// halving until either dimension reaches 1. Matches the behavior of
+    /// `generate_chain()` which stops when `width <= 1 || height <= 1`.
     pub fn full_chain_count(width: u32, height: u32) -> usize {
         let mut count = 1usize;
         let mut w = width;
@@ -428,6 +429,37 @@ mod tests {
         let stream = MipmapStream::new(image, 0);
         let levels: Vec<RgbaImage> = stream.collect();
         assert_eq!(levels.len(), 0);
+    }
+
+    #[test]
+    fn test_full_chain_count_square() {
+        // 4096×4096: 4096→2048→1024→512→256→128→64→32→16→8→4→2→1 = 13 levels
+        assert_eq!(MipmapGenerator::full_chain_count(4096, 4096), 13);
+    }
+
+    #[test]
+    fn test_full_chain_count_small() {
+        // 4×4: 4→2→1 = 3 levels
+        assert_eq!(MipmapGenerator::full_chain_count(4, 4), 3);
+    }
+
+    #[test]
+    fn test_full_chain_count_1x1() {
+        // Already at minimum
+        assert_eq!(MipmapGenerator::full_chain_count(1, 1), 1);
+    }
+
+    #[test]
+    fn test_full_chain_count_256() {
+        // 256→128→64→32→16→8→4→2→1 = 9 levels
+        assert_eq!(MipmapGenerator::full_chain_count(256, 256), 9);
+    }
+
+    #[test]
+    fn test_full_chain_count_matches_generate_chain() {
+        let source = RgbaImage::new(256, 256);
+        let chain = MipmapGenerator::generate_chain(&source);
+        assert_eq!(MipmapGenerator::full_chain_count(256, 256), chain.len(),);
     }
 
     #[test]

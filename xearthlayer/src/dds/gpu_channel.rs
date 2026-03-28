@@ -363,7 +363,7 @@ mod inner {
         })
     }
 
-    /// Create a [`GpuEncoderChannel`] with a pipeline overlap worker.
+    /// Create a [`GpuEncoderChannel`] with a full-tile streaming worker.
     ///
     /// Initializes GPU resources and spawns the worker thread. Returns the
     /// channel handle and worker `JoinHandle`.
@@ -678,7 +678,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Pipeline overlap tests (require GPU hardware)
+    // Full-tile GPU pipeline tests (require GPU hardware)
     // =========================================================================
 
     /// Helper to create GPU resources for pipeline tests.
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(data.len(), 8);
     }
 
-    /// Multiple sequential requests exercise the pipeline overlap path.
+    /// Multiple sequential requests exercise the full-tile streaming path.
     #[tokio::test]
     #[ignore] // Requires GPU hardware
     async fn test_pipeline_sequential_requests() {

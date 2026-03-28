@@ -109,17 +109,14 @@ The GPU worker loop changes to process full tiles:
 Pre-allocate GPU resources for the largest level (level 0) and reuse for
 smaller levels:
 
-- **Input texture**: Allocate 4096×4096 once. Smaller levels write a smaller extent
-  via `queue.write_texture()`.
-- **Output buffer**: Allocate for level 0 compressed size. Smaller levels use a
-  subrange.
+- **Input texture**: Created per mipmap level (wgpu textures are immutable in size).
+  This is unavoidable but the cost is minimal compared to the eliminated clones.
+- **Output buffer**: Allocate for level 0 compressed size, reuse for smaller levels.
 - **Readback buffer**: Allocate once at level 0 size, reuse with unmap/remap cycle.
 
-This eliminates per-level GPU allocation overhead (texture create, buffer create,
-driver bookkeeping) — 5 allocations per resource type reduced to 1.
-
-GPU memory stays constant at ~83 MB (texture + output + readback for 4096×4096)
-regardless of mipmap count, but without allocation churn.
+Output and readback buffers are reused across all mipmap levels within a tile,
+reducing GPU allocation overhead from 5 buffer pairs to 1. Input textures are
+created per level due to wgpu's immutable texture sizing.
 
 ## Memory Impact
 

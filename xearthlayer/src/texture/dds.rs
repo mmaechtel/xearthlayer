@@ -29,7 +29,13 @@ use std::sync::Arc;
 pub struct DdsTextureEncoder {
     format: DdsFormat,
     mipmap_count: usize,
+    /// Image compressor for per-level encoding (ISPC, Software).
+    /// Also used as fallback for `encode_with_mipmaps()` when pre-generated
+    /// mipmap chains are supplied directly. Always initialized to the default
+    /// compressor even when `mipmap_compressor` is set.
     compressor: Arc<dyn ImageCompressor>,
+    /// When set, `encode()` delegates the full mipmap chain to this backend
+    /// instead of iterating levels via `MipmapStream` + `compressor`.
     #[cfg(feature = "gpu-encode")]
     mipmap_compressor: Option<Arc<dyn crate::dds::MipmapCompressor>>,
 }
