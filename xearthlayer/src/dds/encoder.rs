@@ -1,10 +1,13 @@
 //! DDS encoder - main API for encoding images to DDS format.
 //!
-//! The encoder delegates block compression to a [`ImageCompressor`] backend,
-//! handling mipmap generation and DDS header assembly itself. This separation
-//! allows swapping compression backends (ISPC SIMD, GPU compute, pure Rust)
-//! without changing the encoding pipeline.
+//! The encoder delegates compression to a backend via [`CompressorBackend`]:
+//! - [`ImageCompressor`] backends (ISPC, Software) compress one level at a time;
+//!   the encoder manages mipmap iteration via [`MipmapStream`].
+//! - [`MipmapCompressor`] backends (GPU channel) own the full mipmap pipeline;
+//!   the encoder only handles DDS header assembly.
 
+#[cfg(feature = "gpu-encode")]
+use crate::dds::compressor::MipmapCompressor;
 use crate::dds::compressor::{default_compressor, ImageCompressor};
 use crate::dds::mipmap::{MipmapGenerator, MipmapStream};
 use crate::dds::types::{DdsError, DdsFormat, DdsHeader};
@@ -12,12 +15,21 @@ use image::RgbaImage;
 use std::sync::Arc;
 use tracing::debug;
 
+/// Backend for compressing image data.
+enum CompressorBackend {
+    /// Single-level compressor — encoder manages mipmap iteration.
+    Image(Arc<dyn ImageCompressor>),
+    /// Full-pipeline compressor — backend owns mipmap iteration.
+    #[cfg(feature = "gpu-encode")]
+    Mipmap(Arc<dyn MipmapCompressor>),
+}
+
 /// DDS encoder configuration.
 pub struct DdsEncoder {
     format: DdsFormat,
     generate_mipmaps: bool,
     mipmap_count: Option<usize>,
-    compressor: Arc<dyn ImageCompressor>,
+    backend: CompressorBackend,
 }
 
 impl DdsEncoder {
@@ -30,11 +42,13 @@ impl DdsEncoder {
             format,
             generate_mipmaps: true,
             mipmap_count: None,
-            compressor: default_compressor(),
+            backend: CompressorBackend::Image(default_compressor()),
         }
     }
 
-    /// Use a specific block compressor backend.
+    /// Use a specific image compressor backend (ISPC, Software).
+    ///
+    /// The encoder manages mipmap iteration internally via [`MipmapStream`].
     ///
     /// # Example
     ///
@@ -46,7 +60,18 @@ impl DdsEncoder {
     ///     .with_compressor(Arc::new(SoftwareCompressor));
     /// ```
     pub fn with_compressor(mut self, compressor: Arc<dyn ImageCompressor>) -> Self {
-        self.compressor = compressor;
+        self.backend = CompressorBackend::Image(compressor);
+        self
+    }
+
+    /// Use a mipmap compressor backend that owns the full pipeline.
+    ///
+    /// The backend receives the source image and returns compressed data
+    /// for all mipmap levels. This avoids per-level channel round-trips
+    /// for GPU-based compression.
+    #[cfg(feature = "gpu-encode")]
+    pub fn with_mipmap_compressor(mut self, compressor: Arc<dyn MipmapCompressor>) -> Self {
+        self.backend = CompressorBackend::Mipmap(compressor);
         self
     }
 
@@ -88,11 +113,24 @@ impl DdsEncoder {
             return Err(DdsError::InvalidDimensions(width, height));
         }
 
-        if self.generate_mipmaps {
-            let count = self.resolve_mipmap_count(width, height);
-            self.encode_mipmap_stream(image, width, height, count)
-        } else {
-            self.encode_single_level(image, width, height)
+        match &self.backend {
+            #[cfg(feature = "gpu-encode")]
+            CompressorBackend::Mipmap(compressor) => {
+                let count = if self.generate_mipmaps {
+                    self.resolve_mipmap_count(width, height)
+                } else {
+                    1
+                };
+                self.encode_with_mipmap_compressor(compressor, image, width, height, count)
+            }
+            CompressorBackend::Image(_) => {
+                if self.generate_mipmaps {
+                    let count = self.resolve_mipmap_count(width, height);
+                    self.encode_mipmap_stream(image, width, height, count)
+                } else {
+                    self.encode_single_level(image, width, height)
+                }
+            }
         }
     }
 
@@ -217,9 +255,52 @@ impl DdsEncoder {
             .unwrap_or_else(|| MipmapGenerator::full_chain_count(width, height))
     }
 
+    /// Delegate compression to a MipmapCompressor backend.
+    ///
+    /// The backend owns mipmap generation and compression. This method
+    /// only handles DDS header assembly.
+    #[cfg(feature = "gpu-encode")]
+    fn encode_with_mipmap_compressor(
+        &self,
+        compressor: &Arc<dyn MipmapCompressor>,
+        image: RgbaImage,
+        width: u32,
+        height: u32,
+        count: usize,
+    ) -> Result<Vec<u8>, DdsError> {
+        debug!(
+            width,
+            height,
+            mipmap_count = count,
+            format = ?self.format,
+            backend = compressor.name(),
+            "Delegating mipmap chain to MipmapCompressor"
+        );
+
+        let compressed = compressor.compress_mipmap_chain(image, self.format, count)?;
+
+        let header = DdsHeader::new(width, height, count as u32, self.format);
+        let mut output = header.to_bytes();
+        output.extend_from_slice(&compressed);
+
+        debug!(
+            total_dds_bytes = output.len(),
+            compressed_bytes = compressed.len(),
+            "MipmapCompressor encode complete"
+        );
+
+        Ok(output)
+    }
+
     /// Compress a single image to BC1/BC3 format using the configured compressor.
     fn compress_image(&self, image: &RgbaImage) -> Result<Vec<u8>, DdsError> {
-        self.compressor.compress(image, self.format)
+        match &self.backend {
+            CompressorBackend::Image(compressor) => compressor.compress(image, self.format),
+            #[cfg(feature = "gpu-encode")]
+            CompressorBackend::Mipmap(_) => {
+                unreachable!("compress_image called with MipmapCompressor backend")
+            }
+        }
     }
 }
 
@@ -457,5 +538,57 @@ mod tests {
         // Fused pipeline should produce identical bytes
         let result = encoder.encode(image).unwrap();
         assert_eq!(result, expected);
+    }
+
+    #[cfg(feature = "gpu-encode")]
+    #[test]
+    fn test_encode_dispatches_to_mipmap_compressor() {
+        use crate::dds::compressor::MipmapCompressor;
+
+        struct CapturingMipmapCompressor {
+            expected_bc1_data: Vec<u8>,
+        }
+
+        impl MipmapCompressor for CapturingMipmapCompressor {
+            fn compress_mipmap_chain(
+                &self,
+                image: RgbaImage,
+                format: DdsFormat,
+                mipmap_count: usize,
+            ) -> Result<Vec<u8>, DdsError> {
+                assert_eq!(image.dimensions(), (256, 256));
+                assert_eq!(format, DdsFormat::BC1);
+                assert_eq!(mipmap_count, 5);
+                Ok(self.expected_bc1_data.clone())
+            }
+
+            fn name(&self) -> &str {
+                "capturing-mock"
+            }
+        }
+
+        // Compute expected compressed size: 5 levels of BC1 from 256×256
+        // 256: 64×64×8=32768, 128: 32×32×8=8192, 64: 16×16×8=2048,
+        // 32: 8×8×8=512, 16: 4×4×8=128
+        let data_size = 32768 + 8192 + 2048 + 512 + 128;
+        let mock_data = vec![0xAA; data_size];
+
+        let compressor = CapturingMipmapCompressor {
+            expected_bc1_data: mock_data.clone(),
+        };
+
+        let encoder = DdsEncoder::new(DdsFormat::BC1)
+            .with_mipmap_count(5)
+            .with_mipmap_compressor(Arc::new(compressor));
+
+        let image = RgbaImage::new(256, 256);
+        let result = encoder.encode(image).unwrap();
+
+        // Should be DDS header (128) + mock data
+        assert_eq!(result.len(), 128 + data_size);
+        // Verify header magic
+        assert_eq!(&result[0..4], b"DDS ");
+        // Verify our mock data follows the header
+        assert_eq!(&result[128..], &mock_data[..]);
     }
 }
