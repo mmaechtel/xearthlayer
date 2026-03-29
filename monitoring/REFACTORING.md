@@ -21,10 +21,9 @@ Das ist kein Bug, sondern Linux-Konvention — aber undokumentiert im Code.
 ist irrefuehrend.
 **Fix:** Umbenennen → `svc_time_ms` oder `await_ms`. 5 Min.
 
-### 3. MemAvailable in mem.csv aufnehmen
-**Was:** `MemAvailable` wird aus `/proc/meminfo` gelesen, aber nicht geschrieben.
-Ist die vom Kernel empfohlene Metrik fuer "wie viel RAM ist wirklich frei".
-**Fix:** Spalte ergaenzen. 5 Min.
+### ~~3. MemAvailable in mem.csv aufnehmen~~ (ENTFAELLT)
+Spalte `available_mb` existiert bereits als 4. Spalte in mem.csv.
+Refactoring-Vorschlag war falsch — beim Review des Codes uebersehen.
 
 ### 4. Subprocess-Cleanup bei Signal (echter Bug)
 **Was:** Ctrl+C in sysmon.py → Signal-Handler raised KeyboardInterrupt →
@@ -143,13 +142,29 @@ statt Nice-Values gesetzt (wirkungslos).
 
 ---
 
+## Doku-Abweichungen (FEATURES.md / README.md vs. Code)
+
+### D1. proc.csv: Spalte `swap_mb` fehlt in FEATURES.md
+Code schreibt 8 Spalten: `pid,name,cpu_pct,rss_mb,swap_mb,io_read_mbs,io_write_mbs,threads`.
+FEATURES.md listet nur 7 (ohne `swap_mb`).
+
+### D2. xplane_telemetry.py: 3 stumme Datarefs undokumentiert
+Code abonniert 13 Datarefs, schreibt aber nur 12 in die CSV. Drei werden
+abonniert aber ignoriert: `framerate_period_s` (Idx 2), `tas_ms` (Idx 9),
+`sim_speed` (Idx 12). Entweder in CSV aufnehmen oder Subscriptions entfernen.
+
+### D3. cgwatcher `--once` Modus fehlt im README
+FEATURES.md dokumentiert `--once`, README.md erwaehnt es nicht.
+
+---
+
 ## Zusammenfassung
 
 | # | Aenderung | Skript | Aufwand | Typ |
 |---|-----------|--------|---------|-----|
 | 1 | Kommentar CPU%-Berechnung | sysmon | 2 Min | Doku |
 | 2 | IO-Spalte umbenennen | sysmon | 5 Min | Doku |
-| 3 | MemAvailable Spalte | sysmon | 5 Min | Feature |
+| ~~3~~ | ~~MemAvailable Spalte~~ | ~~sysmon~~ | — | Existiert bereits |
 | 4 | Subprocess-Cleanup | sysmon | 30 Min | **Bugfix** |
 | 5 | Komma-Escaping proc.csv | sysmon | 5 Min | Robustheit |
 | 6 | Config-Dataclass | sysmon | 20 Min | Wartbarkeit |
