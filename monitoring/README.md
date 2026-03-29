@@ -1,5 +1,31 @@
 # XoL Monitoring Suite
 
+## TL;DR
+
+```bash
+# Terminal 1 — als User (startet automatisch xplane_telemetry.py):
+python3 monitoring/sysmon.py -d 5400 --xplane -o /tmp/sysmon_run_XX
+
+# Terminal 2 — als Root (Kernel-Tracepoints, optional):
+sudo bash monitoring/sysmon_trace.sh -o /tmp/sysmon_run_XX
+sudo dmesg | tee /tmp/sysmon_run_XX/dmesg_pre.log > /dev/null
+```
+
+| Script | Braucht sudo | Aufgabe |
+|--------|-------------|---------|
+| `sysmon.py` | Nein | CPU, RAM, Disk IO, GPU, Per-Process (200ms/1s Sampling) |
+| `xplane_telemetry.py` | Nein | FPS, CPU/GPU Frame Time via UDP (5 Hz, von sysmon gestartet) |
+| `sysmon_trace.sh` | Ja | Direct Reclaim, Slow IO, DMA Fences via bpftrace |
+| `post_crash.sh` | Ja | GPU/Kernel-Diagnostik nach Crash |
+| `cgwatcher.py` | Nein* | CPU-Prioritaeten fuer konkurrierende Prozesse |
+
+\* cgwatcher braucht sudo nur fuer Cgroup-Enforcement, nice-Werte gehen ohne.
+
+Daten landen in `/tmp` (RAM, kein Disk-I/O). Nach dem Flug ins Repo kopieren:
+`cp -a /tmp/sysmon_run_XX monitoring/run_XX`
+
+---
+
 ## The Problem
 
 X-Plane 12 with ortho scenery streaming consumes enormous amounts of RAM,
@@ -155,7 +181,7 @@ and pass it via `--xplane-log` or `SYSMON_XPLANE_LOG`.
 - [ANALYSIS_RULES.txt](ANALYSIS_RULES.txt) — structured analysis framework
   for AI-assisted or manual post-flight analysis
 - `python3 sysmon.py --help` — all command-line options
-- `python3 cgroups/cgwatcher.py --help` — CPU priority manager
+- `python3 cgroups/cgwatcher.py --help` — CPU priority manager (supports `--daemon`, `--once`)
 
 ## Directory Layout
 
