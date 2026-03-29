@@ -209,23 +209,39 @@ Pruefen welche Dateien vorhanden sind. Erwartete Dateien:
 - **Wenn --xplane:** xplane_telemetry.csv (FPS, CPU/GPU Time, Position, 5 Hz), xplane_telemetry.log
 - **Wenn X-Plane lief:** xplane_events.csv
 - **Wenn Sidecar lief:** trace_reclaim.log, trace_io_slow.log, trace_fence.log
+- **Application Logs (Phase 2.3):** xearthlayer.log, xplane_log.txt
 - **Crash-Diagnostik:** dmesg_pre.log, dmesg_post.log, gpu_events.log
 
 Fehlende Dateien notieren aber nicht als Fehler werten.
 
-### 2.3 Application Logs identifizieren
+### 2.3 Application Logs einsammeln und ins Run-Verzeichnis kopieren
 
-XEarthLayer-Log suchen:
+Die Application Logs liegen ausserhalb von `/tmp` und muessen aktiv eingesammelt werden, damit das Run-Verzeichnis alle Daten fuer die Analyse enthaelt.
 
+**XEarthLayer-Log:**
+
+```bash
+# XEL-Log kopieren (enthaelt moeglicherweise mehrere Sessions — wird spaeter zeitlich gefiltert)
+cp ~/.xearthlayer/xearthlayer.log "$RUN_DIR"/xearthlayer.log 2>/dev/null && \
+  echo "XEL-Log: $(wc -l < "$RUN_DIR"/xearthlayer.log) Zeilen kopiert" || \
+  echo "WARNUNG: Kein XEL-Log gefunden"
 ```
-Glob: ~/.xearthlayer/xearthlayer.log
+
+**X-Plane Log — die RICHTIGE Log finden:**
+
+1. Pruefe `~/X-Plane-12/Log.txt` — ist der Zeitstempel innerhalb des Monitoring-Fensters?
+2. Falls Log.txt neuer als die CSV-Dateien (andere Session): Suche in `~/X-Plane-12/Output/Log Archive/` nach der passenden archivierten Log
+3. Fallback-Pfade: `~/X-Plane-12-Native/Log.txt`, `~/.local/share/X-Plane-12/Log.txt`
+
+```bash
+# X-Plane Log kopieren (Pfad je nach Ergebnis der Suche oben anpassen)
+XPLANE_LOG="$HOME/X-Plane-12/Log.txt"
+cp "$XPLANE_LOG" "$RUN_DIR"/xplane_log.txt 2>/dev/null && \
+  echo "X-Plane Log: $(wc -l < "$RUN_DIR"/xplane_log.txt) Zeilen kopiert" || \
+  echo "WARNUNG: Kein X-Plane Log gefunden (pruefe Log Archive)"
 ```
 
-X-Plane Log suchen — die RICHTIGE Log finden:
-
-1. Pruefe ob `xplane_events.csv` existiert (sysmon.py hat Log bereits korreliert)
-2. Falls nicht: Pruefe `~/X-Plane-12/Log.txt` — ist der Zeitstempel innerhalb des Monitoring-Fensters?
-3. Falls Log.txt neuer als die CSV-Dateien: Suche in `~/X-Plane-12/Output/Log Archive/` nach der passenden archivierten Log
+**Hinweis:** `xplane_events.csv` (von sysmon.py erzeugt) ist bereits im Run-Verzeichnis. Die vollstaendige X-Plane Log liefert aber zusaetzlichen Kontext (Vulkan-Errors, Plugin-Meldungen), der in `xplane_events.csv` nicht enthalten ist.
 
 ### 2.4 Session-Metadaten bestimmen
 
@@ -429,8 +445,8 @@ Monitoring-Analysen werden NICHT automatisch committed. Der User entscheidet ob 
 
 - **sysmon.py laeuft als User:** Kein sudo noetig. Wird direkt gestartet.
 - **sysmon_trace.sh braucht sudo:** Wird NICHT automatisch gestartet. Der Befehl wird dem User angezeigt.
-- **XEL-Log wird NICHT rotiert:** `~/.xearthlayer/xearthlayer.log` enthaelt moeglicherweise mehrere Sessions. Nur Events innerhalb des Monitoring-Zeitfensters auswerten.
-- **X-Plane Log Archive:** Falls `Log.txt` neuer als die CSV-Dateien ist, die archivierte Log aus `~/X-Plane-12/Output/Log Archive/` verwenden.
+- **Application Logs werden in Phase 2.3 kopiert:** XEL-Log und X-Plane Log werden ins Run-Verzeichnis kopiert, damit alle Daten beisammen sind. XEL-Log enthaelt moeglicherweise mehrere Sessions — nur Events innerhalb des Monitoring-Zeitfensters auswerten.
+- **X-Plane Log Archive:** Falls `Log.txt` neuer als die CSV-Dateien ist (andere Session), die archivierte Log aus `~/X-Plane-12/Output/Log Archive/` verwenden und stattdessen diese kopieren.
 - **Grosse CSV-Dateien:** Nicht komplett in den Kontext laden. Gezielt Zeitfenster und Schluessel-Spalten lesen.
 - **ANALYSIS_RULES.txt ist bindend:** Alle Schwellwerte, Korrelationsketten und Known Signatures aus diesem Dokument verwenden. Keine eigenen Schwellwerte erfinden.
 - **Vergleich mit frueheren Runs:** `monitoring/ANALYSE_HISTORY.md` und vorhandene `ANALYSE_RUN_*.md` laden fuer Kontext.
