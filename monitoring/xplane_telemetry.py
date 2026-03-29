@@ -30,23 +30,24 @@ from pathlib import Path
 DATAREFS = [
     (0,  "sim/operation/misc/frame_rate_period",         "frame_time_s"),
     (1,  "sim/time/gpu_time_per_frame_sec_approx",       "gpu_time_s"),
-    (2,  "sim/time/framerate_period",                    "framerate_period_s"),
-    (3,  "sim/flightmodel/position/latitude",            "lat"),
-    (4,  "sim/flightmodel/position/longitude",           "lon"),
-    (5,  "sim/flightmodel/position/elevation",           "elev_m"),
-    (6,  "sim/flightmodel/position/y_agl",               "agl_m"),
-    (7,  "sim/flightmodel/position/groundspeed",         "gs_ms"),
-    (8,  "sim/flightmodel/position/indicated_airspeed",  "ias_ms"),
-    (9,  "sim/flightmodel/position/true_airspeed",       "tas_ms"),
-    (10, "sim/time/total_running_time_sec",              "sim_time_s"),
-    (11, "sim/time/paused",                              "paused"),
-    (12, "sim/time/sim_speed",                           "sim_speed"),
+    (2,  "sim/flightmodel/position/latitude",            "lat"),
+    (3,  "sim/flightmodel/position/longitude",           "lon"),
+    (4,  "sim/flightmodel/position/elevation",           "elev_m"),
+    (5,  "sim/flightmodel/position/y_agl",               "agl_m"),
+    (6,  "sim/flightmodel/position/groundspeed",         "gs_ms"),
+    (7,  "sim/flightmodel/position/indicated_airspeed",  "ias_ms"),
+    (8,  "sim/time/total_running_time_sec",              "sim_time_s"),
+    (9,  "sim/time/paused",                              "paused"),
+    (10, "sim/time/sim_speed",                           "sim_speed"),
 ]
+
+# Unit conversion constants
+MPS_TO_KNOTS = 1.94384  # meters/second → knots
 
 CSV_COLUMNS = [
     "timestamp", "rel_s", "fps", "frame_time_ms", "cpu_time_ms", "gpu_time_ms",
     "lat", "lon", "elev_m", "agl_m", "gs_kts", "ias_kts",
-    "sim_time_s", "paused",
+    "sim_time_s", "paused", "sim_speed",
 ]
 
 XP_HOST = "127.0.0.1"
@@ -154,22 +155,23 @@ class XPlaneUDP:
         gpu_time = self.values.get(1, 0)
         fps = (1.0 / frame_time) if frame_time > 0.001 else 0
         cpu_time = max(0, frame_time - gpu_time)
-        gs_kts = self.values.get(7, 0) * 1.94384
-        ias_kts = self.values.get(8, 0) * 1.94384
+        gs_kts = self.values.get(6, 0) * MPS_TO_KNOTS
+        ias_kts = self.values.get(7, 0) * MPS_TO_KNOTS
 
         return {
             "fps": f"{fps:.1f}",
             "frame_time_ms": f"{frame_time * 1000:.2f}",
             "cpu_time_ms": f"{cpu_time * 1000:.2f}",
             "gpu_time_ms": f"{gpu_time * 1000:.2f}",
-            "lat": f"{self.values.get(3, 0):.6f}",
-            "lon": f"{self.values.get(4, 0):.6f}",
-            "elev_m": f"{self.values.get(5, 0):.1f}",
-            "agl_m": f"{self.values.get(6, 0):.1f}",
+            "lat": f"{self.values.get(2, 0):.6f}",
+            "lon": f"{self.values.get(3, 0):.6f}",
+            "elev_m": f"{self.values.get(4, 0):.1f}",
+            "agl_m": f"{self.values.get(5, 0):.1f}",
             "gs_kts": f"{gs_kts:.1f}",
             "ias_kts": f"{ias_kts:.1f}",
-            "sim_time_s": f"{self.values.get(10, 0):.1f}",
-            "paused": str(int(self.values.get(11, 0))),
+            "sim_time_s": f"{self.values.get(8, 0):.1f}",
+            "paused": str(int(self.values.get(9, 0))),
+            "sim_speed": f"{self.values.get(10, 1.0):.0f}",
         }
 
     def close(self):
@@ -236,10 +238,11 @@ def main():
                 if now - last_print >= 10:
                     f.flush()
                     last_print = now
+                    speed_info = f"  {row['sim_speed']}x" if row['sim_speed'] != "1" else ""
                     print(f"[{elapsed:7.1f}s] FPS={row['fps']}  "
                           f"CPU={row['cpu_time_ms']}ms  GPU={row['gpu_time_ms']}ms  "
-                          f"Lat={row['lat']}  GS={row['gs_kts']}kts  "
-                          f"({samples} samples)")
+                          f"Lat={row['lat']}  GS={row['gs_kts']}kts"
+                          f"{speed_info}  ({samples} samples)")
 
             except socket.timeout:
                 consecutive_timeouts += 1

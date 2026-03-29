@@ -155,7 +155,7 @@ and pass it via `--xplane-log` or `SYSMON_XPLANE_LOG`.
 - [ANALYSIS_RULES.txt](ANALYSIS_RULES.txt) — structured analysis framework
   for AI-assisted or manual post-flight analysis
 - `python3 sysmon.py --help` — all command-line options
-- `python3 cgroups/cgwatcher.py --help` — CPU priority manager
+- `python3 cgroups/cgwatcher.py --help` — CPU priority manager (supports `--daemon`, `--once`)
 
 ## Directory Layout
 
