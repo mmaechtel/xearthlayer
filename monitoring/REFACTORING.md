@@ -97,9 +97,9 @@ ein Dataref nicht existiert (alte X-Plane-Version), nie waehrend eines Flugs.
 haengt der Subprocess ewig. sysmon.py erkennt das nicht.
 **Fix:** Max 60 Retries (~5 Min). Danach Exit mit Fehlercode. 15 Min.
 
-### 9. Benannte Konstanten
-**Was:** `* 1.94384` (m/s→knots), `* 3.28084` (m→ft) sind Magic Numbers.
-**Fix:** `MPS_TO_KNOTS = 1.94384`, `M_TO_FT = 3.28084`. 5 Min.
+### ~~9. Benannte Konstanten~~ (ERLEDIGT)
+`MPS_TO_KNOTS` extrahiert in D2-Fix. `M_TO_FT` kommt im Code nicht vor
+(war Phantom aus der initialen Analyse).
 
 ### Bewusst NICHT machen
 
@@ -107,8 +107,8 @@ haengt der Subprocess ewig. sysmon.py erkennt das nicht.
   Das ist kein "Sturm". X-Plane verarbeitet UDP robust.
 - **Socket Context Manager:** Python's GC schliesst Sockets beim Prozess-Exit.
   Aendert nichts am Verhalten.
-- **Dataref-Liste aus Config laden:** 13 Datarefs, stabil seit X-Plane 12.0.
-  Config-Datei dafuer ist Indirection ohne Nutzen.
+- **Dataref-Liste aus Config laden:** 11 Datarefs (2 Duplikate entfernt in D2),
+  stabil seit X-Plane 12.0. Config-Datei dafuer ist Indirection ohne Nutzen.
 - **CPU-Time Ableitung "fragil":** `frame_time - gpu_time` ist die einzige
   Moeglichkeit. `gpu_time > frame_time` kommt in der Praxis nicht vor.
 
@@ -142,19 +142,17 @@ statt Nice-Values gesetzt (wirkungslos).
 
 ---
 
-## Doku-Abweichungen (FEATURES.md / README.md vs. Code)
+## Doku-Abweichungen (FEATURES.md / README.md vs. Code) — ALLE ERLEDIGT
 
-### D1. proc.csv: Spalte `swap_mb` fehlt in FEATURES.md
-Code schreibt 8 Spalten: `pid,name,cpu_pct,rss_mb,swap_mb,io_read_mbs,io_write_mbs,threads`.
-FEATURES.md listet nur 7 (ohne `swap_mb`).
+### ~~D1. proc.csv: Spalte `swap_mb` fehlt in FEATURES.md~~ ✓
+Gefixt: `swap_mb` in FEATURES.md ergaenzt.
 
-### D2. xplane_telemetry.py: 3 stumme Datarefs undokumentiert
-Code abonniert 13 Datarefs, schreibt aber nur 12 in die CSV. Drei werden
-abonniert aber ignoriert: `framerate_period_s` (Idx 2), `tas_ms` (Idx 9),
-`sim_speed` (Idx 12). Entweder in CSV aufnehmen oder Subscriptions entfernen.
+### ~~D2. xplane_telemetry.py: stumme Datarefs~~ ✓
+Gefixt: `framerate_period_s` und `tas_ms` entfernt (Duplikat/kein Analysewert).
+`sim_speed` in CSV aufgenommen (erkennt Zeitraffer). 11 statt 13 Datarefs.
 
-### D3. cgwatcher `--once` Modus fehlt im README
-FEATURES.md dokumentiert `--once`, README.md erwaehnt es nicht.
+### ~~D3. cgwatcher `--once` fehlt im README~~ ✓
+Gefixt: `--once` in README.md erwaehnt.
 
 ---
 
@@ -165,12 +163,13 @@ FEATURES.md dokumentiert `--once`, README.md erwaehnt es nicht.
 | 1 | Kommentar CPU%-Berechnung | sysmon | 2 Min | Doku |
 | 2 | IO-Spalte umbenennen | sysmon | 5 Min | Doku |
 | ~~3~~ | ~~MemAvailable Spalte~~ | ~~sysmon~~ | — | Existiert bereits |
+| | **D1-D3 erledigt:** swap_mb Doku, sim_speed CSV, --once Doku | | | |
 | 4 | Subprocess-Cleanup | sysmon | 30 Min | **Bugfix** |
 | 5 | Komma-Escaping proc.csv | sysmon | 5 Min | Robustheit |
 | 6 | Config-Dataclass | sysmon | 20 Min | Wartbarkeit |
 | 7 | NaN-Count loggen | telemetry | 5 Min | Transparenz |
 | 8 | Retry-Limit X-Plane | telemetry | 15 Min | **Bugfix** |
-| 9 | Benannte Konstanten | telemetry | 5 Min | Lesbarkeit |
+| ~~9~~ | ~~Benannte Konstanten~~ | ~~telemetry~~ | — | Erledigt (D2) |
 | 10 | --daemon entfernen | cgwatcher | 20 Min | **Bugfix** |
 | 11 | Scheduler-Warning | cgwatcher | 2 Min | Transparenz |
 | | **Gesamt** | | **~2h** | |
