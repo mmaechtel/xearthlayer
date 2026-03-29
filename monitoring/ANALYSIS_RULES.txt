@@ -303,48 +303,17 @@ Analysis steps:
 
 --- 2e. Interrupts (irq.csv) ---
 
-Key metrics:
-
-  Total interrupt rate per IRQ source
-    Look for the top 5–10 sources by total count.
-    Typical: NVMe MSI-X, GPU, network, timer.
-
-  Per-CPU distribution
-    NVMe and GPU interrupts should be distributed or pinned.
-    If one CPU handles disproportionate interrupt load and that CPU
-    is also an X-Plane core → interrupt affinity problem.
-
-  Interrupt storms
-    Sudden rate spikes (> 10x normal) correlating with IO storms.
-
-Analysis steps:
-  - Identify if interrupt handling is concentrated on X-Plane cores
-  - Check for NVMe interrupt imbalance across RAID0 members
-  - Correlate interrupt spikes with IO and reclaim events
+Quick check: Is interrupt handling concentrated on X-Plane cores?
+If yes → see Known Signatures → "Interrupt Imbalance" (Section 5).
+If not → move on.  Interrupt analysis is rarely the root cause.
 
 --- 2f. PSI (psi.csv) ---
 
-Key metrics:
-
-  mem_some10 / mem_full10
-    Healthy:  0.00%
-    Warning:  some > 1%
-    Critical: full > 0% (ALL tasks stalled on memory)
-
-  io_some10 / io_full10
-    Healthy:  0.00%
-    Warning:  some > 1%
-    Critical: full > 0%
-
-  cpu_some10
-    Healthy:  < 5%
-    Warning:  > 10% (CPU contention)
-
-Note: PSI measures cgroup-wide stalls.  Individual thread stalls
-(like Direct Reclaim on X-Plane main thread) may NOT show up in PSI
-if other threads in the system are running fine.  PSI = 0 does NOT
-mean no stalls occurred.  Always check vmstat allocstall_s as the
-primary stutter indicator.
+Check if mem_full10 or io_full10 > 0%.  If yes, correlate with vmstat.
+If all zero → skip.  PSI measures cgroup-wide stalls and misses
+individual thread stalls (e.g. Direct Reclaim on X-Plane main thread).
+PSI = 0 does NOT mean no stalls.  Always use vmstat allocstall_s as
+the primary stutter indicator.
 
 --- 2g. XEarthLayer Log (~/.xearthlayer/xearthlayer.log) ---
 
@@ -626,8 +595,8 @@ PHASE 4 — TEMPORAL PATTERN ANALYSIS
 
 Goal: Identify when problems occur and whether they resolve.
 
-1. Divide the session into the three phases (from Phase 1).
-   Report per-phase statistics for key metrics:
+1. Using the phase boundaries from Phase 1, compute per-phase
+   statistics for key metrics:
    - allocstall_s: count of non-zero samples per phase
    - pgscan_direct_s: avg per phase
    - swap_used_mb: start/end per phase
@@ -655,6 +624,11 @@ PHASE 5 — COMPARISON (IF PRIOR RUNS EXIST)
 ------------------------------------------------------------------------
 
 When analyzing a run after tuning changes, compare against the baseline.
+
+IMPORTANT: Only compare runs with similar flight profiles (same route,
+similar weather, same concurrent workload).  Route changes, different
+weather, or different background load invalidate most comparisons
+except thermal and hardware metrics.
 
 Comparison table format:
 

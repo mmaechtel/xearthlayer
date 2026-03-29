@@ -237,6 +237,10 @@ Analog in `write_io()` und FEATURES.md aktualisieren.
 `avg_r_lat_ms`. Muessen ebenfalls angepasst werden, sonst brechen kuenftige
 Analysen. Aeltere Run-Daten (run_AA etc.) behalten die alten Spaltennamen.
 
+**TODO (C2-Abhängigkeit):** Bei Umsetzung von C2 MUSS ANALYSIS_RULES.txt
+Zeile ~277 (`avg_r_lat_ms` / `avg_w_lat_ms`) auf `r_await_ms` / `w_await_ms`
+umbenannt werden. Gleichzeitig mit der CSV-Header-Änderung durchführen!
+
 ### C3. Komma-Escaping in Prozessnamen (#5)
 
 In `write_proc()`:
