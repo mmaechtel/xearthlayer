@@ -76,60 +76,60 @@ pub struct EncoderComponents {
 /// - `"software"` — Pure-Rust fallback
 /// - `"gpu"` — GPU compute via wgpu (requires `gpu-encode` feature)
 pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, ServiceError> {
-    use crate::dds::{BlockCompressor, IspcCompressor, SoftwareCompressor};
+    use crate::dds::{IspcCompressor, SoftwareCompressor};
 
-    type GpuHandles = (
-        Option<tokio::task::JoinHandle<()>>,
-        Option<tokio_util::sync::CancellationToken>,
-    );
+    match config.texture().compressor() {
+        #[cfg(feature = "gpu-encode")]
+        "gpu" => {
+            use crate::dds::gpu_channel::create_gpu_encoder_channel;
 
-    let (compressor, (gpu_worker_handle, gpu_shutdown)): (Arc<dyn BlockCompressor>, GpuHandles) =
-        match config.texture().compressor() {
-            "software" => (Arc::new(SoftwareCompressor), (None, None)),
-            "ispc" => (Arc::new(IspcCompressor), (None, None)),
-            #[cfg(feature = "gpu-encode")]
-            "gpu" => {
-                use crate::dds::gpu_channel::create_gpu_encoder_channel;
+            let shutdown_token = tokio_util::sync::CancellationToken::new();
+            let (channel, worker_handle) =
+                create_gpu_encoder_channel(config.texture().gpu_device(), shutdown_token.clone())
+                    .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {e}")))?;
 
-                let shutdown_token = tokio_util::sync::CancellationToken::new();
-                let (channel, worker_handle) = create_gpu_encoder_channel(
-                    config.texture().gpu_device(),
-                    shutdown_token.clone(),
-                )
-                .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {e}")))?;
+            tracing::info!("GPU pipeline encoder created with dedicated worker");
 
-                tracing::info!("GPU pipeline encoder created with dedicated worker");
-                (
-                    Arc::new(channel) as Arc<dyn BlockCompressor>,
-                    (Some(worker_handle), Some(shutdown_token)),
-                )
-            }
-            #[cfg(not(feature = "gpu-encode"))]
-            "gpu" => {
-                return Err(ServiceError::ConfigError(
-                    "GPU compression requires the `gpu-encode` feature. \
-                     Rebuild with `cargo build --features gpu-encode` \
-                     or set texture.compressor = ispc"
-                        .to_string(),
-                ));
-            }
-            other => {
-                return Err(ServiceError::ConfigError(format!(
-                    "Unknown texture compressor '{}'. Valid options: software, ispc, gpu",
-                    other
-                )));
-            }
-        };
+            Ok(EncoderComponents {
+                encoder: Arc::new(
+                    DdsTextureEncoder::new(config.texture().format())
+                        .with_mipmap_count(config.texture().mipmap_count())
+                        .with_mipmap_compressor(Arc::new(channel)),
+                ),
+                gpu_worker_handle: Some(worker_handle),
+                gpu_shutdown: Some(shutdown_token),
+            })
+        }
+        #[cfg(not(feature = "gpu-encode"))]
+        "gpu" => Err(ServiceError::ConfigError(
+            "GPU compression requires the `gpu-encode` feature. \
+             Rebuild with `cargo build --features gpu-encode` \
+             or set texture.compressor = ispc"
+                .to_string(),
+        )),
+        compressor_name => {
+            let compressor: Arc<dyn crate::dds::ImageCompressor> = match compressor_name {
+                "software" => Arc::new(SoftwareCompressor),
+                "ispc" => Arc::new(IspcCompressor),
+                other => {
+                    return Err(ServiceError::ConfigError(format!(
+                        "Unknown texture compressor '{}'. Valid options: software, ispc, gpu",
+                        other
+                    )));
+                }
+            };
 
-    Ok(EncoderComponents {
-        encoder: Arc::new(
-            DdsTextureEncoder::new(config.texture().format())
-                .with_mipmap_count(config.texture().mipmap_count())
-                .with_compressor(compressor),
-        ),
-        gpu_worker_handle,
-        gpu_shutdown,
-    })
+            Ok(EncoderComponents {
+                encoder: Arc::new(
+                    DdsTextureEncoder::new(config.texture().format())
+                        .with_mipmap_count(config.texture().mipmap_count())
+                        .with_compressor(compressor),
+                ),
+                gpu_worker_handle: None,
+                gpu_shutdown: None,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

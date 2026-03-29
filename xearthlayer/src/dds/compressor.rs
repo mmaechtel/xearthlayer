@@ -1,6 +1,6 @@
 //! Block compressor trait and implementations for DDS texture encoding.
 //!
-//! This module provides the [`BlockCompressor`] trait that abstracts BCn block
+//! This module provides the [`ImageCompressor`] trait that abstracts BCn block
 //! compression, allowing different backends to be swapped in without changing
 //! the DDS encoding pipeline.
 //!
@@ -31,7 +31,7 @@ use std::sync::Arc;
 ///
 /// Implementations must be `Send + Sync` for use in the concurrent tile
 /// generation pipeline.
-pub trait BlockCompressor: Send + Sync {
+pub trait ImageCompressor: Send + Sync {
     /// Compress an RGBA image to BCn block format.
     ///
     /// # Arguments
@@ -43,6 +43,44 @@ pub trait BlockCompressor: Send + Sync {
     ///
     /// Compressed block data (without DDS header).
     fn compress(&self, image: &RgbaImage, format: DdsFormat) -> Result<Vec<u8>, DdsError>;
+
+    /// Human-readable name for logging and diagnostics.
+    fn name(&self) -> &str;
+}
+
+// =============================================================================
+// Mipmap compressor trait (GPU pipeline)
+// =============================================================================
+
+/// Trait for compressing an entire mipmap chain from a source image.
+///
+/// Unlike [`ImageCompressor`] which compresses a single level (caller manages
+/// mipmap iteration), `MipmapCompressor` owns the full pipeline: it receives
+/// the source image, generates mipmap levels internally, and returns all
+/// compressed levels concatenated.
+///
+/// This is designed for backends like GPU compute where owning the iteration
+/// reduces cross-thread round-trips and enables buffer reuse.
+///
+/// # Returns
+///
+/// Concatenated compressed data for all mipmap levels (without DDS header).
+/// Level 0 (full resolution) first, then each successively halved level.
+#[cfg(feature = "gpu-encode")]
+pub trait MipmapCompressor: Send + Sync {
+    /// Compress a full mipmap chain from the source image.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Source RGBA image (ownership transferred, no clones)
+    /// * `format` - Target compression format (BC1 or BC3)
+    /// * `mipmap_count` - Number of mipmap levels to generate (including original)
+    fn compress_mipmap_chain(
+        &self,
+        image: RgbaImage,
+        format: DdsFormat,
+        mipmap_count: usize,
+    ) -> Result<Vec<u8>, DdsError>;
 
     /// Human-readable name for logging and diagnostics.
     fn name(&self) -> &str;
@@ -62,7 +100,7 @@ pub trait BlockCompressor: Send + Sync {
 /// aarch64), and Windows (x86_64) — no ISPC compiler needed at build time.
 pub struct IspcCompressor;
 
-impl BlockCompressor for IspcCompressor {
+impl ImageCompressor for IspcCompressor {
     fn compress(&self, image: &RgbaImage, format: DdsFormat) -> Result<Vec<u8>, DdsError> {
         let width = image.width();
         let height = image.height();
@@ -105,7 +143,7 @@ impl BlockCompressor for IspcCompressor {
 /// available, and for testing/comparison purposes.
 pub struct SoftwareCompressor;
 
-impl BlockCompressor for SoftwareCompressor {
+impl ImageCompressor for SoftwareCompressor {
     fn compress(&self, image: &RgbaImage, format: DdsFormat) -> Result<Vec<u8>, DdsError> {
         let width = image.width();
         let height = image.height();
@@ -171,7 +209,7 @@ fn extract_block(image: &RgbaImage, block_x: u32, block_y: u32) -> [[u8; 4]; 16]
 /// Returns the ISPC compressor, which uses SIMD-optimized encoding.
 /// In the future, this may auto-detect GPU availability and return
 /// a wgpu-based compressor when a suitable GPU is present.
-pub fn default_compressor() -> Arc<dyn BlockCompressor> {
+pub fn default_compressor() -> Arc<dyn ImageCompressor> {
     Arc::new(IspcCompressor)
 }
 
@@ -334,7 +372,7 @@ mod gpu {
         )))
     }
 
-    impl BlockCompressor for WgpuCompressor {
+    impl ImageCompressor for WgpuCompressor {
         fn compress(&self, image: &RgbaImage, format: DdsFormat) -> Result<Vec<u8>, DdsError> {
             let width = image.width();
             let height = image.height();
@@ -695,5 +733,46 @@ mod gpu_tests {
             Ok((_, _, _, name)) => assert!(!name.is_empty()),
             Err(_) => {} // No GPU available, that's fine
         }
+    }
+
+    // =========================================================================
+    // MipmapCompressor trait tests
+    // =========================================================================
+
+    struct MockMipmapCompressor;
+
+    impl MipmapCompressor for MockMipmapCompressor {
+        fn compress_mipmap_chain(
+            &self,
+            _image: RgbaImage,
+            _format: DdsFormat,
+            _mipmap_count: usize,
+        ) -> Result<Vec<u8>, DdsError> {
+            Ok(vec![0xAA, 0xBB])
+        }
+
+        fn name(&self) -> &str {
+            "mock-mipmap"
+        }
+    }
+
+    #[test]
+    fn test_mipmap_compressor_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<MockMipmapCompressor>();
+    }
+
+    #[test]
+    fn test_mipmap_compressor_returns_data() {
+        let compressor = MockMipmapCompressor;
+        let image = RgbaImage::new(256, 256);
+        let result = compressor.compress_mipmap_chain(image, DdsFormat::BC1, 5);
+        assert_eq!(result.unwrap(), vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn test_mipmap_compressor_name() {
+        let compressor = MockMipmapCompressor;
+        assert_eq!(compressor.name(), "mock-mipmap");
     }
 }

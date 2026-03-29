@@ -34,7 +34,7 @@ impl<E> TextureEncoderAdapter<E> {
 }
 
 impl<E: TextureEncoder + 'static> TextureEncoderAsync for TextureEncoderAdapter<E> {
-    fn encode(&self, image: &image::RgbaImage) -> Result<Vec<u8>, TextureEncodeError> {
+    fn encode(&self, image: image::RgbaImage) -> Result<Vec<u8>, TextureEncodeError> {
         self.encoder.encode(image).map_err(map_texture_error)
     }
 
@@ -74,7 +74,7 @@ mod tests {
     }
 
     impl TextureEncoder for MockTextureEncoder {
-        fn encode(&self, _image: &image::RgbaImage) -> Result<Vec<u8>, TextureError> {
+        fn encode(&self, _image: image::RgbaImage) -> Result<Vec<u8>, TextureError> {
             if self.should_fail {
                 Err(TextureError::EncodingFailed("mock failure".to_string()))
             } else {
@@ -101,7 +101,7 @@ mod tests {
         let adapter = TextureEncoderAdapter::new(encoder);
 
         let image = image::RgbaImage::new(4, 4);
-        let result = TextureEncoderAsync::encode(&adapter, &image);
+        let result = TextureEncoderAsync::encode(&adapter, image);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), vec![0xDD, 0x53]);
@@ -113,7 +113,7 @@ mod tests {
         let adapter = TextureEncoderAdapter::new(encoder);
 
         let image = image::RgbaImage::new(4, 4);
-        let result = TextureEncoderAsync::encode(&adapter, &image);
+        let result = TextureEncoderAsync::encode(&adapter, image);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("mock failure"));

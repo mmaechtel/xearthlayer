@@ -1,7 +1,8 @@
-//! GPU encoder channel types for mpsc-based GPU compression.
+//! GPU encoder channel for mpsc-based GPU compression.
 //!
 //! Provides the message types and channel handle for submitting
-//! single mip-level images to a dedicated GPU worker thread.
+//! full tile requests to a dedicated GPU worker thread. The worker
+//! owns mipmap iteration internally, reducing cross-thread round-trips.
 
 #[cfg(feature = "gpu-encode")]
 mod inner {
@@ -9,7 +10,7 @@ mod inner {
     use image::RgbaImage;
     use tokio::sync::{mpsc, oneshot};
 
-    use crate::dds::compressor::BlockCompressor;
+    use crate::dds::compressor::MipmapCompressor;
     use crate::dds::{DdsError, DdsFormat};
 
     /// Bounded channel capacity for GPU encode requests.
@@ -17,19 +18,21 @@ mod inner {
 
     /// Message sent from callers to the GPU worker for compression.
     pub struct GpuEncodeRequest {
-        /// A single mip-level RGBA image to compress.
+        /// Source RGBA image (moved, not cloned).
         pub image: RgbaImage,
         /// The target block compression format.
         pub format: DdsFormat,
+        /// Number of mipmap levels to generate (including original).
+        pub mipmap_count: usize,
         /// One-shot channel for returning the compressed data (or error).
         pub response: oneshot::Sender<Result<Vec<u8>, DdsError>>,
     }
 
     /// Sender-side handle for submitting GPU encode requests.
     ///
-    /// Implements [`BlockCompressor`] so it can be used as a drop-in replacement
-    /// for direct compressors. Requests are forwarded to the GPU worker via an
-    /// mpsc channel; the caller blocks until the worker responds via oneshot.
+    /// Implements [`MipmapCompressor`] — receives the full source image and
+    /// returns compressed data for all mipmap levels. The GPU worker owns
+    /// the mipmap iteration internally, eliminating per-level channel round-trips.
     pub struct GpuEncoderChannel {
         sender: Option<mpsc::Sender<GpuEncodeRequest>>,
     }
@@ -61,21 +64,22 @@ mod inner {
         }
     }
 
-    impl BlockCompressor for GpuEncoderChannel {
-        /// Note: The image is cloned to transfer ownership through the channel.
-        /// For 4096×4096 RGBA images this is ~64MB per mip level. This is an
-        /// inherent cost of the `BlockCompressor` trait contract (which takes
-        /// `&RgbaImage`). Future `TextureEncoder`-level integration could avoid
-        /// this by transferring ownership directly.
-        fn compress(&self, image: &RgbaImage, format: DdsFormat) -> Result<Vec<u8>, DdsError> {
+    impl MipmapCompressor for GpuEncoderChannel {
+        fn compress_mipmap_chain(
+            &self,
+            image: RgbaImage,
+            format: DdsFormat,
+            mipmap_count: usize,
+        ) -> Result<Vec<u8>, DdsError> {
             let sender = self.sender.as_ref().ok_or_else(|| {
                 DdsError::CompressionFailed("GPU worker has been shut down".to_string())
             })?;
 
             let (resp_tx, resp_rx) = oneshot::channel();
             let request = GpuEncodeRequest {
-                image: image.clone(),
+                image, // moved, zero clones
                 format,
+                mipmap_count,
                 response: resp_tx,
             };
 
@@ -94,19 +98,8 @@ mod inner {
     }
 
     // =========================================================================
-    // Pipeline overlap internals
+    // Full-tile processing internals
     // =========================================================================
-
-    /// Tracks a GPU submission whose results have not yet been read back.
-    struct InFlightRequest {
-        readback_buffer: wgpu::Buffer,
-        output_size: u64,
-        submission_index: wgpu::SubmissionIndex,
-        response: oneshot::Sender<Result<Vec<u8>, DdsError>>,
-        /// Receives the result of `map_async` — `Ok(())` on success, or
-        /// `Err(BufferAsyncError)` if the device was lost / mapping failed.
-        map_result_rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
-    }
 
     /// Convert a [`DdsFormat`] to the corresponding `block_compression` variant
     /// and compressed block size in bytes.
@@ -117,178 +110,172 @@ mod inner {
         }
     }
 
-    /// Upload an image to the GPU, run a compression compute pass, and submit.
+    /// Compressed output size in bytes for a given image at the specified format.
+    fn compressed_size(width: u32, height: u32, block_size: u32) -> u64 {
+        let blocks_wide = width.div_ceil(4);
+        let blocks_high = height.div_ceil(4);
+        (blocks_wide * blocks_high * block_size) as u64
+    }
+
+    /// Process a full tile: generate mipmaps, compress each level on GPU,
+    /// return concatenated compressed output.
     ///
-    /// Returns an [`InFlightRequest`] whose readback buffer will contain the
-    /// compressed data once `device.poll(Wait)` completes.
-    fn upload_and_submit(
+    /// The worker owns the mipmap iteration via [`MipmapStream`]. GPU output
+    /// and readback buffers are pre-allocated for level 0 (largest) and reused
+    /// for smaller levels.
+    fn process_tile(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         compressor: &mut GpuBlockCompressor,
-        request: GpuEncodeRequest,
-    ) -> InFlightRequest {
-        let width = request.image.width();
-        let height = request.image.height();
-        let (variant, block_size) = format_params(request.format);
-        let blocks_wide = width.div_ceil(4);
-        let blocks_high = height.div_ceil(4);
-        let output_size = (blocks_wide * blocks_high * block_size) as u64;
+        image: RgbaImage,
+        format: DdsFormat,
+        mipmap_count: usize,
+    ) -> Result<Vec<u8>, DdsError> {
+        let width = image.width();
+        let height = image.height();
+        let (variant, block_size) = format_params(format);
 
-        // Create GPU texture and upload pixel data
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pipeline-input"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        // Pre-allocate output and readback buffers for level 0 (largest).
+        // Smaller levels reuse the same buffers.
+        let max_output_size = compressed_size(width, height, block_size);
 
-        let bytes_per_row = width * 4;
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            request.image.as_raw(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create output + readback buffers
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pipeline-output"),
-            size: output_size,
+            label: Some("tile-output"),
+            size: max_output_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pipeline-readback"),
-            size: output_size,
+            label: Some("tile-readback"),
+            size: max_output_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        // Run compression compute pass
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pipeline-compress"),
-        });
+        let stream = crate::dds::mipmap::MipmapStream::new(image, mipmap_count);
+        let mut result = Vec::new();
 
-        compressor.add_compression_task(
-            variant,
-            &texture_view,
-            width,
-            height,
-            &output_buffer,
-            None,
-            None,
-        );
+        for (level_idx, level) in stream.enumerate() {
+            let lw = level.width();
+            let lh = level.height();
+            let level_output_size = compressed_size(lw, lh, block_size);
 
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("pipeline-compute"),
-                timestamp_writes: None,
+            // Create texture for this level (textures are immutable in size)
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tile-input"),
+                size: wgpu::Extent3d {
+                    width: lw,
+                    height: lh,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
             });
-            compressor.compress(&mut pass);
-        }
 
-        // Copy compressed output to readback buffer
-        encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback_buffer, 0, output_size);
+            // Upload pixel data
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                level.as_raw(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(lw * 4),
+                    rows_per_image: Some(lh),
+                },
+                wgpu::Extent3d {
+                    width: lw,
+                    height: lh,
+                    depth_or_array_layers: 1,
+                },
+            );
 
-        // Submit — non-blocking, GPU starts executing immediately
-        let submission_index = queue.submit(std::iter::once(encoder.finish()));
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        tracing::trace!(
-            width,
-            height,
-            output_size,
-            "GPU pipeline: buffers created, compute pass submitted"
-        );
+            // Dispatch compute pass
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tile-compress"),
+            });
 
-        // Initiate async buffer mapping (will be ready after device.poll).
-        // Use a channel to propagate mapping errors instead of silently
-        // ignoring them — accessing an unmapped buffer causes SIGBUS.
-        let buffer_slice = readback_buffer.slice(..);
-        let (map_tx, map_rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = map_tx.send(result);
-        });
+            compressor.add_compression_task(
+                variant,
+                &texture_view,
+                lw,
+                lh,
+                &output_buffer,
+                None,
+                None,
+            );
 
-        InFlightRequest {
-            readback_buffer,
-            output_size,
-            submission_index,
-            response: request.response,
-            map_result_rx: map_rx,
-        }
-    }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("tile-compute"),
+                    timestamp_writes: None,
+                });
+                compressor.compress(&mut pass);
+            }
 
-    /// Wait for a specific GPU submission to complete and send the result.
-    fn complete_readback(device: &wgpu::Device, in_flight: InFlightRequest) {
-        let result = (|| -> Result<Vec<u8>, DdsError> {
+            encoder.copy_buffer_to_buffer(
+                &output_buffer,
+                0,
+                &readback_buffer,
+                0,
+                level_output_size,
+            );
+
+            let sub_idx = queue.submit(std::iter::once(encoder.finish()));
+
+            // Map readback buffer and wait for completion
+            let buffer_slice = readback_buffer.slice(..level_output_size);
+            let (map_tx, map_rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = map_tx.send(r);
+            });
+
             device
                 .poll(wgpu::PollType::Wait {
-                    submission_index: Some(in_flight.submission_index),
+                    submission_index: Some(sub_idx),
                     timeout: Some(std::time::Duration::from_secs(10)),
                 })
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "GPU pipeline: device.poll failed (possible device loss)");
-                    DdsError::CompressionFailed(format!("GPU poll failed: {e}"))
-                })?;
+                .map_err(|e| DdsError::CompressionFailed(format!("GPU poll failed: {e}")))?;
 
-            // Check that buffer mapping succeeded (callback fired during poll).
-            // wgpu guarantees map_async callback fires during poll(), so recv()
-            // cannot deadlock here — the sender always sends before poll returns.
-            in_flight
-                .map_result_rx
+            map_rx
                 .recv()
-                .map_err(|_| {
-                    DdsError::CompressionFailed("GPU map_async callback never fired".to_string())
-                })?
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "GPU pipeline: buffer mapping failed");
-                    DdsError::CompressionFailed(format!("GPU buffer mapping failed: {e}"))
-                })?;
+                .map_err(|_| DdsError::CompressionFailed("map_async callback never fired".into()))?
+                .map_err(|e| DdsError::CompressionFailed(format!("buffer mapping failed: {e}")))?;
 
-            let buffer_slice = in_flight.readback_buffer.slice(..in_flight.output_size);
             let data = buffer_slice.get_mapped_range();
-            let result = data.to_vec();
+            result.extend_from_slice(&data);
             drop(data);
-            in_flight.readback_buffer.unmap();
+            readback_buffer.unmap();
 
-            tracing::trace!(bytes = result.len(), "GPU pipeline: readback complete");
+            tracing::debug!(
+                level = level_idx,
+                width = lw,
+                height = lh,
+                compressed_bytes = level_output_size,
+                "GPU compressed mipmap level"
+            );
 
-            Ok(result)
-        })();
+            // `level` dropped here — CPU memory reclaimed before next downsample
+        }
 
-        // Send response; ignore error if caller dropped their receiver
-        let _ = in_flight.response.send(result);
+        Ok(result)
     }
 
     /// Spawn the GPU pipeline worker on a dedicated OS thread.
     ///
-    /// The worker receives compression requests via the channel and processes
-    /// them using pipeline overlap: while the GPU compresses tile A, the CPU
-    /// uploads tile B's data. This keeps the GPU constantly busy.
+    /// The worker receives full tile requests via the channel, generates
+    /// mipmaps internally, and compresses each level on the GPU. One message
+    /// in, one result out — no per-level channel round-trips.
     ///
     /// Returns a `JoinHandle` that resolves when the channel is closed or
     /// the shutdown token is cancelled.
@@ -302,20 +289,12 @@ mod inner {
         // Use spawn_blocking for a long-lived dedicated thread.
         // GpuBlockCompressor is !Send, so it must stay on one thread.
         tokio::task::spawn_blocking(move || {
-            let mut in_flight: Option<InFlightRequest> = None;
-
             loop {
-                // Check shutdown before blocking on the channel.
-                // This allows the worker to exit promptly when the service
-                // is shutting down, even if senders haven't all been dropped.
                 if shutdown.is_cancelled() {
                     tracing::info!("GPU pipeline worker: shutdown signal received");
                     break;
                 }
 
-                // Use try_recv in a loop with short sleeps to remain responsive
-                // to shutdown. blocking_recv() would block indefinitely since
-                // spawn_blocking threads are not cancelled by runtime shutdown.
                 let request = match rx.try_recv() {
                     Ok(req) => req,
                     Err(mpsc::error::TryRecvError::Empty) => {
@@ -324,83 +303,67 @@ mod inner {
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
                 };
-                let has_more = CHANNEL_CAPACITY - rx.capacity() > 0;
 
-                // Wrap GPU work in catch_unwind so panics don't silently kill
-                // the worker thread (callers would hang forever on blocking_recv).
-                // AssertUnwindSafe is sound because we break on panic and never
-                // reuse potentially corrupted GPU state.
+                let response = request.response;
+
+                tracing::debug!(
+                    format = ?request.format,
+                    width = request.image.width(),
+                    height = request.image.height(),
+                    mipmap_count = request.mipmap_count,
+                    "GPU pipeline: processing full tile"
+                );
+
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    tracing::trace!(
-                        format = ?request.format,
-                        width = request.image.width(),
-                        height = request.image.height(),
-                        pipeline_depth = if in_flight.is_some() { 2 } else { 1 },
-                        has_more,
-                        "GPU pipeline: uploading + submitting"
-                    );
-
-                    // Upload and submit the new request (non-blocking GPU submit)
-                    let new_in_flight =
-                        upload_and_submit(&device, &queue, &mut compressor, request);
-
-                    // Complete the previous in-flight request (GPU already has new work queued)
-                    if let Some(prev) = in_flight.take() {
-                        complete_readback(&device, prev);
-                    }
-
-                    // If no more requests are queued, complete this one immediately.
-                    // Otherwise, defer readback to overlap with the next upload.
-                    if !has_more {
-                        complete_readback(&device, new_in_flight);
-                        in_flight = None;
-                    } else {
-                        in_flight = Some(new_in_flight);
-                    }
+                    process_tile(
+                        &device,
+                        &queue,
+                        &mut compressor,
+                        request.image,
+                        request.format,
+                        request.mipmap_count,
+                    )
                 }));
 
-                if let Err(panic_info) = result {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "unknown panic".to_string()
-                    };
+                match result {
+                    Ok(tile_result) => {
+                        let _ = response.send(tile_result);
+                    }
+                    Err(panic_info) => {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
 
-                    tracing::error!(error = %msg, "GPU pipeline worker panicked, shutting down");
+                        tracing::error!(
+                            error = %msg,
+                            "GPU pipeline worker panicked, shutting down"
+                        );
 
-                    // The current request's response_tx was moved into the closure
-                    // and dropped on panic — caller gets RecvError which maps to
-                    // "GPU worker dropped response channel". Handle any in-flight
-                    // request from the previous iteration:
-                    if let Some(prev) = in_flight.take() {
-                        let _ = prev.response.send(Err(DdsError::CompressionFailed(format!(
+                        let _ = response.send(Err(DdsError::CompressionFailed(format!(
                             "GPU worker panicked: {msg}"
                         ))));
-                    }
 
-                    // Drain remaining queued requests so callers don't hang
-                    while let Ok(req) = rx.try_recv() {
-                        let _ = req.response.send(Err(DdsError::CompressionFailed(
-                            "GPU worker terminated after panic".to_string(),
-                        )));
-                    }
+                        // Drain remaining queued requests
+                        while let Ok(req) = rx.try_recv() {
+                            let _ = req.response.send(Err(DdsError::CompressionFailed(
+                                "GPU worker terminated after panic".to_string(),
+                            )));
+                        }
 
-                    break;
+                        break;
+                    }
                 }
             }
 
-            // Drain any remaining in-flight request
-            if let Some(prev) = in_flight {
-                complete_readback(&device, prev);
-            }
-
-            tracing::info!("GPU pipeline worker shutting down (channel closed)");
+            tracing::info!("GPU pipeline worker shutting down");
         })
     }
 
-    /// Create a [`GpuEncoderChannel`] with a pipeline overlap worker.
+    /// Create a [`GpuEncoderChannel`] with a full-tile streaming worker.
     ///
     /// Initializes GPU resources and spawns the worker thread. Returns the
     /// channel handle and worker `JoinHandle`.
@@ -430,8 +393,8 @@ pub use inner::*;
 #[cfg(feature = "gpu-encode")]
 mod tests {
     use super::*;
-    use crate::dds::compressor::BlockCompressor;
-    use crate::dds::{DdsError, DdsFormat, SoftwareCompressor};
+    use crate::dds::compressor::{ImageCompressor, MipmapCompressor};
+    use crate::dds::{DdsError, DdsFormat, MipmapStream, SoftwareCompressor};
     use image::RgbaImage;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
@@ -465,6 +428,7 @@ mod tests {
         let request = GpuEncodeRequest {
             image,
             format: DdsFormat::BC1,
+            mipmap_count: 1,
             response: resp_tx,
         };
 
@@ -486,7 +450,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Task 2: BlockCompressor for GpuEncoderChannel
+    // Task 2: MipmapCompressor for GpuEncoderChannel
     // =========================================================================
 
     #[test]
@@ -496,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_compressor_name() {
+    fn test_mipmap_compressor_name() {
         let (tx, _rx) = mpsc::channel::<GpuEncodeRequest>(CHANNEL_CAPACITY);
         let channel = GpuEncoderChannel::new(tx);
         assert_eq!(channel.name(), "gpu-channel");
@@ -511,15 +475,24 @@ mod tests {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let compressor = SoftwareCompressor;
-                let result = compressor.compress(&req.image, req.format);
+                let result: Result<Vec<u8>, crate::dds::DdsError> = MipmapStream::new(
+                    req.image,
+                    req.mipmap_count,
+                )
+                .try_fold(Vec::new(), |mut acc, level| {
+                    compressor.compress(&level, req.format).map(|data| {
+                        acc.extend_from_slice(&data);
+                        acc
+                    })
+                });
                 let _ = req.response.send(result);
             }
         });
 
-        // Call compress from spawn_blocking (it uses blocking_send/blocking_recv)
+        // Call compress_mipmap_chain from spawn_blocking (it uses blocking_send/blocking_recv)
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .expect("spawn_blocking should not panic");
@@ -538,7 +511,7 @@ mod tests {
 
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .expect("spawn_blocking should not panic");
@@ -564,7 +537,16 @@ mod tests {
             let mut rx = rx;
             while let Some(req) = rx.recv().await {
                 let compressor = SoftwareCompressor;
-                let result = compressor.compress(&req.image, req.format);
+                let result: Result<Vec<u8>, crate::dds::DdsError> = MipmapStream::new(
+                    req.image,
+                    req.mipmap_count,
+                )
+                .try_fold(Vec::new(), |mut acc, level| {
+                    compressor.compress(&level, req.format).map(|data| {
+                        acc.extend_from_slice(&data);
+                        acc
+                    })
+                });
                 let _ = req.response.send(result);
             }
         })
@@ -582,7 +564,7 @@ mod tests {
 
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .expect("spawn_blocking should not panic");
@@ -601,7 +583,7 @@ mod tests {
             let ch = Arc::clone(&channel);
             let result = tokio::task::spawn_blocking(move || {
                 let image = RgbaImage::new(4, 4);
-                ch.compress(&image, DdsFormat::BC1)
+                ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
             })
             .await
             .expect("spawn_blocking should not panic");
@@ -622,7 +604,7 @@ mod tests {
             let ch = Arc::clone(&channel);
             handles.push(tokio::task::spawn_blocking(move || {
                 let image = RgbaImage::new(4, 4);
-                ch.compress(&image, DdsFormat::BC1)
+                ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
             }));
         }
 
@@ -658,7 +640,7 @@ mod tests {
         let ch = Arc::clone(&channel);
         let bc1_result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            ch.compress(&image, DdsFormat::BC1)
+            ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .unwrap();
@@ -668,7 +650,7 @@ mod tests {
         let ch = Arc::clone(&channel);
         let bc3_result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            ch.compress(&image, DdsFormat::BC3)
+            ch.compress_mipmap_chain(image, DdsFormat::BC3, 1)
         })
         .await
         .unwrap();
@@ -696,7 +678,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Pipeline overlap tests (require GPU hardware)
+    // Full-tile GPU pipeline tests (require GPU hardware)
     // =========================================================================
 
     /// Helper to create GPU resources for pipeline tests.
@@ -733,7 +715,7 @@ mod tests {
         let channel = GpuEncoderChannel::new(tx);
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .unwrap();
@@ -743,7 +725,7 @@ mod tests {
         assert_eq!(data.len(), 8);
     }
 
-    /// Multiple sequential requests exercise the pipeline overlap path.
+    /// Multiple sequential requests exercise the full-tile streaming path.
     #[tokio::test]
     #[ignore] // Requires GPU hardware
     async fn test_pipeline_sequential_requests() {
@@ -767,7 +749,7 @@ mod tests {
             let ch = Arc::clone(&channel);
             let result = tokio::task::spawn_blocking(move || {
                 let image = RgbaImage::new(4, 4);
-                ch.compress(&image, DdsFormat::BC1)
+                ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
             })
             .await
             .unwrap();
@@ -802,7 +784,7 @@ mod tests {
             let ch = Arc::clone(&channel);
             handles.push(tokio::task::spawn_blocking(move || {
                 let image = RgbaImage::new(4, 4);
-                ch.compress(&image, DdsFormat::BC1)
+                ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
             }));
         }
 
@@ -837,7 +819,7 @@ mod tests {
         let ch = Arc::clone(&channel);
         let bc1 = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            ch.compress(&image, DdsFormat::BC1)
+            ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .unwrap();
@@ -847,7 +829,7 @@ mod tests {
         let ch = Arc::clone(&channel);
         let bc3 = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            ch.compress(&image, DdsFormat::BC3)
+            ch.compress_mipmap_chain(image, DdsFormat::BC3, 1)
         })
         .await
         .unwrap();
@@ -899,7 +881,7 @@ mod tests {
 
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .expect("spawn_blocking should not panic");
@@ -928,7 +910,7 @@ mod tests {
 
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4, 4);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .expect("spawn_blocking should not panic");
@@ -961,7 +943,7 @@ mod tests {
         let channel = GpuEncoderChannel::new(tx);
         let result = tokio::task::spawn_blocking(move || {
             let image = RgbaImage::new(4096, 4096);
-            channel.compress(&image, DdsFormat::BC1)
+            channel.compress_mipmap_chain(image, DdsFormat::BC1, 1)
         })
         .await
         .unwrap();

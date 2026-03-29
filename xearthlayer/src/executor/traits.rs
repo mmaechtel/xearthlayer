@@ -125,7 +125,7 @@ pub trait TextureEncoderAsync: Send + Sync + 'static {
     ///
     /// This is expected to be CPU-intensive and should be called via
     /// `BlockingExecutor::execute_blocking`.
-    fn encode(&self, image: &image::RgbaImage) -> Result<Vec<u8>, TextureEncodeError>;
+    fn encode(&self, image: image::RgbaImage) -> Result<Vec<u8>, TextureEncodeError>;
 
     /// Returns the expected DDS file size for given dimensions.
     ///

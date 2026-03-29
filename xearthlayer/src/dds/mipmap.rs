@@ -54,10 +54,27 @@ impl MipmapGenerator {
         mipmaps
     }
 
+    /// Count the total number of mipmap levels from full size down to 1×1.
+    ///
+    /// Equivalent to `floor(log2(min(width, height))) + 1`, computed by
+    /// halving until either dimension reaches 1. Matches the behavior of
+    /// `generate_chain()` which stops when `width <= 1 || height <= 1`.
+    pub fn full_chain_count(width: u32, height: u32) -> usize {
+        let mut count = 1usize;
+        let mut w = width;
+        let mut h = height;
+        while w > 1 && h > 1 {
+            w /= 2;
+            h /= 2;
+            count += 1;
+        }
+        count
+    }
+
     /// Downsample image by 2× using box filter (simple average).
     ///
     /// Each output pixel is the average of a 2×2 block of input pixels.
-    fn downsample_box_2x(source: &RgbaImage) -> RgbaImage {
+    pub(crate) fn downsample_box_2x(source: &RgbaImage) -> RgbaImage {
         let new_width = source.width() / 2;
         let new_height = source.height() / 2;
 
@@ -83,6 +100,77 @@ impl MipmapGenerator {
         }
 
         output
+    }
+}
+
+/// Streaming mipmap generator that yields one level at a time.
+///
+/// Takes ownership of the source image and produces mipmap levels
+/// incrementally. Each call to `next()` returns the next downsampled
+/// level. The previous level is consumed during downsampling, so only
+/// one uncompressed level is held in memory at a time.
+///
+/// # Memory
+///
+/// Peak memory is the size of the current level plus the downsampled
+/// output — roughly 1.25× the current level, not the entire chain.
+pub struct MipmapStream {
+    /// The next image to yield (or downsample from).
+    current: Option<RgbaImage>,
+    /// Number of levels remaining to yield.
+    remaining: usize,
+    /// Whether the first (original) image has been yielded.
+    yielded_first: bool,
+}
+
+impl MipmapStream {
+    /// Create a new mipmap stream from an owned source image.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Source image (ownership transferred, no clone)
+    /// * `count` - Total number of mipmap levels to yield (including the original)
+    pub fn new(image: RgbaImage, count: usize) -> Self {
+        Self {
+            current: if count > 0 { Some(image) } else { None },
+            remaining: count,
+            yielded_first: false,
+        }
+    }
+}
+
+impl Iterator for MipmapStream {
+    type Item = RgbaImage;
+
+    fn next(&mut self) -> Option<RgbaImage> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let current = self.current.take()?;
+
+        if !self.yielded_first {
+            // First call: yield the original image (moved, not cloned)
+            self.yielded_first = true;
+            self.remaining -= 1;
+
+            // Prepare next level if we need more
+            if self.remaining > 0 && current.width() > 1 && current.height() > 1 {
+                self.current = Some(MipmapGenerator::downsample_box_2x(&current));
+            }
+
+            return Some(current);
+        }
+
+        // Subsequent calls: yield the pre-computed downsample
+        self.remaining -= 1;
+
+        // Prepare the next level if we need more
+        if self.remaining > 0 && current.width() > 1 && current.height() > 1 {
+            self.current = Some(MipmapGenerator::downsample_box_2x(&current));
+        }
+
+        Some(current)
     }
 }
 
@@ -262,6 +350,116 @@ mod tests {
             "Final mipmap should have mid-range color, got {}",
             final_pixel[0]
         );
+    }
+
+    #[test]
+    fn test_mipmap_stream_yields_correct_count() {
+        let image = RgbaImage::new(256, 256);
+        let stream = MipmapStream::new(image, 5);
+        let levels: Vec<RgbaImage> = stream.collect();
+        assert_eq!(levels.len(), 5);
+    }
+
+    #[test]
+    fn test_mipmap_stream_dimensions_halve_each_level() {
+        let image = RgbaImage::new(256, 256);
+        let stream = MipmapStream::new(image, 5);
+        let levels: Vec<RgbaImage> = stream.collect();
+
+        assert_eq!(levels[0].dimensions(), (256, 256));
+        assert_eq!(levels[1].dimensions(), (128, 128));
+        assert_eq!(levels[2].dimensions(), (64, 64));
+        assert_eq!(levels[3].dimensions(), (32, 32));
+        assert_eq!(levels[4].dimensions(), (16, 16));
+    }
+
+    #[test]
+    fn test_mipmap_stream_first_yield_matches_source_dimensions() {
+        let image = RgbaImage::new(4096, 4096);
+        let mut stream = MipmapStream::new(image, 3);
+        let first = stream.next().unwrap();
+        assert_eq!(first.dimensions(), (4096, 4096));
+    }
+
+    #[test]
+    fn test_mipmap_stream_terminates_early_at_1x1() {
+        let image = RgbaImage::new(4, 4);
+        // Request 10 levels but only 3 are possible (4 -> 2 -> 1)
+        let stream = MipmapStream::new(image, 10);
+        let levels: Vec<RgbaImage> = stream.collect();
+
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0].dimensions(), (4, 4));
+        assert_eq!(levels[1].dimensions(), (2, 2));
+        assert_eq!(levels[2].dimensions(), (1, 1));
+    }
+
+    #[test]
+    fn test_mipmap_stream_single_level() {
+        let image = RgbaImage::new(256, 256);
+        let stream = MipmapStream::new(image, 1);
+        let levels: Vec<RgbaImage> = stream.collect();
+
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0].dimensions(), (256, 256));
+    }
+
+    #[test]
+    fn test_mipmap_stream_preserves_pixel_data() {
+        let mut image = RgbaImage::new(4, 4);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgba([255, 0, 0, 255]);
+        }
+
+        let mut stream = MipmapStream::new(image, 2);
+        let first = stream.next().unwrap();
+
+        // First level should have the same pixel data as the source
+        for pixel in first.pixels() {
+            assert_eq!(pixel[0], 255);
+            assert_eq!(pixel[1], 0);
+            assert_eq!(pixel[2], 0);
+            assert_eq!(pixel[3], 255);
+        }
+    }
+
+    #[test]
+    fn test_mipmap_stream_zero_count_yields_nothing() {
+        let image = RgbaImage::new(256, 256);
+        let stream = MipmapStream::new(image, 0);
+        let levels: Vec<RgbaImage> = stream.collect();
+        assert_eq!(levels.len(), 0);
+    }
+
+    #[test]
+    fn test_full_chain_count_square() {
+        // 4096×4096: 4096→2048→1024→512→256→128→64→32→16→8→4→2→1 = 13 levels
+        assert_eq!(MipmapGenerator::full_chain_count(4096, 4096), 13);
+    }
+
+    #[test]
+    fn test_full_chain_count_small() {
+        // 4×4: 4→2→1 = 3 levels
+        assert_eq!(MipmapGenerator::full_chain_count(4, 4), 3);
+    }
+
+    #[test]
+    fn test_full_chain_count_1x1() {
+        // Already at minimum
+        assert_eq!(MipmapGenerator::full_chain_count(1, 1), 1);
+    }
+
+    #[test]
+    fn test_full_chain_count_256() {
+        // 256→128→64→32→16→8→4→2→1 = 9 levels
+        assert_eq!(MipmapGenerator::full_chain_count(256, 256), 9);
+    }
+
+    #[test]
+    fn test_full_chain_count_matches_generate_chain() {
+        let source = RgbaImage::new(256, 256);
+        let chain = MipmapGenerator::generate_chain(&source);
+        assert_eq!(MipmapGenerator::full_chain_count(256, 256), chain.len(),);
     }
 
     #[test]

@@ -19,7 +19,7 @@ mod gpu_stress {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use xearthlayer::dds::gpu_channel::*;
-    use xearthlayer::dds::{BlockCompressor, DdsFormat};
+    use xearthlayer::dds::{DdsFormat, MipmapCompressor};
 
     /// Read current process RSS from /proc/self/status (Linux only).
     fn rss_mb() -> f64 {
@@ -94,7 +94,7 @@ mod gpu_stress {
                     let t = Instant::now();
                     let result = {
                         let image = RgbaImage::new(size, size);
-                        ch.compress(&image, DdsFormat::BC1)
+                        ch.compress_mipmap_chain(image, DdsFormat::BC1, 1)
                     };
                     (result, t.elapsed())
                 }));

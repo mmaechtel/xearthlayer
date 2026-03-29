@@ -21,7 +21,7 @@
 //!
 //! // Encode to BC1 with mipmaps
 //! let encoder = DdsEncoder::new(DdsFormat::BC1);
-//! let dds_data = encoder.encode(&image).unwrap();
+//! let dds_data = encoder.encode(image).unwrap();
 //!
 //! // Save to file
 //! std::fs::write("output.dds", dds_data).unwrap();
@@ -49,10 +49,14 @@
 //! levels significantly faster than the pure-Rust fallback, using AVX2/SSE4
 //! SIMD instructions to process multiple blocks simultaneously.
 //!
-//! A [`BlockCompressor`] trait allows swapping backends:
+//! Two compressor traits serve different backend models:
+//!
+//! [`ImageCompressor`] — single-level compression (caller manages mipmap iteration):
 //! - [`IspcCompressor`] — SIMD-optimized (default, recommended)
 //! - [`SoftwareCompressor`] — Pure-Rust fallback
-//! - [`GpuEncoderChannel`] — GPU compute via `wgpu` (`gpu-encode` feature)
+//!
+//! [`MipmapCompressor`] — full-pipeline compression (`gpu-encode` feature):
+//! - [`GpuEncoderChannel`] — Worker-side mipmap streaming via GPU compute
 //!
 //! # Compatibility
 //!
@@ -74,12 +78,14 @@ mod types;
 
 // Public API
 #[cfg(feature = "gpu-encode")]
-pub use compressor::{create_gpu_resources, create_wgpu_compressor, WgpuCompressor};
-pub use compressor::{default_compressor, BlockCompressor, IspcCompressor, SoftwareCompressor};
+pub use compressor::{
+    create_gpu_resources, create_wgpu_compressor, MipmapCompressor, WgpuCompressor,
+};
+pub use compressor::{default_compressor, ImageCompressor, IspcCompressor, SoftwareCompressor};
 pub use encoder::DdsEncoder;
 #[cfg(feature = "gpu-encode")]
 pub use gpu_channel::create_gpu_encoder_channel;
 pub use types::{DdsError, DdsFormat, DdsHeader};
 
 // Re-export for advanced usage
-pub use mipmap::MipmapGenerator;
+pub use mipmap::{MipmapGenerator, MipmapStream};
