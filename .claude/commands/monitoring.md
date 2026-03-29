@@ -269,7 +269,7 @@ Die CSV-Dateien sind potentiell gross (90-Min-Session = ~25.000 Zeilen in cpu.cs
 - **Uebersicht:** Erste und letzte 50 Zeilen jeder CSV lesen fuer Start/End-Zustand
 - **Schluessel-Metriken:** vmstat.csv komplett lesen (1s-Resolution, ~5.400 Zeilen fuer 90 Min — handhabbar)
 - **Gezielte Tiefe:** Nur die Zeitfenster detailliert lesen in denen allocstall_s > 0 oder andere Anomalien auftreten
-- **XEL-Log:** Nach Event-Typ filtern statt komplett lesen (Log kann 28.000+ Zeilen haben)
+- **XEL-Log:** Zuerst auf Monitoring-Zeitfenster einschraenken, dann nach Event-Typ filtern (Log kann 28.000+ Zeilen ueber mehrere Sessions enthalten)
 
 ### 3.2 Analyse-Phasen ausfuehren
 
@@ -282,6 +282,8 @@ Gemaess ANALYSIS_RULES.txt Sections 1-5:
 5. **Comparison** — Falls fruehere Runs vorhanden (ANALYSE_HISTORY.md laden)
 
 ### 3.3 XEL-Log Korrelation
+
+**WICHTIG:** `xearthlayer.log` enthaelt moeglicherweise MEHRERE Sessions. Zuerst das Monitoring-Zeitfenster bestimmen (Start/End-Timestamp aus cpu.csv) und NUR Events innerhalb dieses Fensters auswerten. XEL-Timestamps sind UTC (YYYY-MM-DD HH:MM:SSZ), CSV-Timestamps sind Unix Epoch — Konvertierung beachten.
 
 Aus dem XEL-Log die performance-relevanten Events extrahieren und mit den System-Metriken korrelieren:
 
