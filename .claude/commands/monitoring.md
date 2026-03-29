@@ -55,12 +55,14 @@ Falls `$ARGUMENTS` eine Zahl enthaelt: Dauer = Argument in Minuten, Sidecar = Ja
 
 ### 1.2 Run-Verzeichnis vorbereiten
 
-Run-Verzeichnis direkt im Repository anlegen (nicht unter `/tmp/`):
+Waehrend des Flugs werden alle Daten nach `/tmp` geschrieben (tmpfs = RAM-backed, kein Disk-I/O, minimale Systembelastung). Erst bei der Auswertung (Phase 2) werden die Daten ins Repository kopiert.
 
 ```bash
-RUN_DIR="monitoring/run_<LABEL>"
-mkdir -p "$RUN_DIR"
+TMP_DIR="/tmp/sysmon_run_<LABEL>"
+mkdir -p "$TMP_DIR"
 ```
+
+Das Repo-Verzeichnis wird erst in Phase 2 angelegt.
 
 ### 1.3 sudo-Befehle ausgeben
 
@@ -71,10 +73,12 @@ mkdir -p "$RUN_DIR"
 SUDO-BEFEHLE (bitte im separaten Terminal ausfuehren)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-sudo bash monitoring/sysmon_trace.sh -o <RUN_DIR>
-sudo dmesg | tee <RUN_DIR>/dmesg_pre.log > /dev/null
+sudo bash monitoring/sysmon_trace.sh -o <TMP_DIR>
+sudo dmesg | tee <TMP_DIR>/dmesg_pre.log > /dev/null
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Alle Daten landen in /tmp (RAM) — kein Disk-I/O waehrend des Flugs.
 ```
 
 ### 1.4 Nicht-sudo-Skripte selber starten
@@ -82,7 +86,7 @@ sudo dmesg | tee <RUN_DIR>/dmesg_pre.log > /dev/null
 sysmon.py im Hintergrund starten (IMMER mit `--xplane` fuer FPS/CPU/GPU-Telemetrie):
 
 ```bash
-python3 monitoring/sysmon.py -d <SEKUNDEN> --xplane -o "$RUN_DIR" &
+python3 monitoring/sysmon.py -d <SEKUNDEN> --xplane -o "$TMP_DIR" &
 ```
 
 Direkt mit `run_in_background=true` ausfuehren — kein nohup noetig.
@@ -96,21 +100,21 @@ Direkt mit `run_in_background=true` ausfuehren — kein nohup noetig.
 ps aux | grep -E 'sysmon\.py|xplane_telemetry|bpftrace' | grep -v grep
 
 # CSVs wachsen?
-ls -la "$RUN_DIR"/*.csv
+ls -la "$TMP_DIR"/*.csv
 
 # bpftrace-Traces vorhanden? (falls Sidecar gestartet)
-ls -la "$RUN_DIR"/trace_*.log
+ls -la "$TMP_DIR"/trace_*.log
 
 # dmesg_pre.log nicht leer?
-wc -c "$RUN_DIR/dmesg_pre.log"
+wc -c "$TMP_DIR/dmesg_pre.log"
 ```
 
 **Bei Problemen sofort melden!** Haeufige Fehler:
 - `xplane_telemetry.csv` leer/nur Header → X-Plane UDP-Port nicht offen (Settings > Network > Accept incoming connections)
 - `proc.csv` zeigt kein X-Plane → X-Plane noch nicht gestartet (OK, kommt spaeter)
 - `trace_reclaim.log` leer → User hat Sidecar noch nicht gestartet (Erinnerung ausgeben)
-- `dmesg_pre.log` 0 Bytes → Ownership-Problem (sudo hat Verzeichnis als root angelegt → `sudo chown -R $USER <RUN_DIR>`)
-- Run-Verzeichnis gehoert root → Sidecar vor sysmon gestartet. Fix: `sudo chown -R $USER <RUN_DIR>`
+- `dmesg_pre.log` 0 Bytes → Ownership-Problem (sudo hat Verzeichnis als root angelegt → `sudo chown -R $USER <TMP_DIR>`)
+- /tmp-Verzeichnis gehoert root → Sidecar vor sysmon gestartet. Fix: `sudo chown -R $USER <TMP_DIR>`
 
 ### 1.6 Status-Meldung
 
@@ -122,7 +126,7 @@ MONITORING LAEUFT
   sysmon.py:  PID <PID>, Dauer <N> Min
   Telemetrie: xplane_telemetry.py (5 Hz UDP)
   Sidecar:    <Ja/Nein> (3 bpftrace-Tracer)
-  Output:     <RUN_DIR>
+  Output:     <TMP_DIR> (tmpfs/RAM)
 
   Guten Flug!
 
@@ -140,7 +144,7 @@ Nach dem Start einen Loop-Check einrichten: Alle 20 Minuten automatisch pruefen 
 ps aux | grep -E 'sysmon\.py|xplane_telemetry|bpftrace' | grep -v grep | wc -l
 
 # 2. CSVs wachsen noch? (Dateiaenderung < 60s alt?)
-find "$RUN_DIR" -name "*.csv" -mmin -1 | wc -l
+find "$TMP_DIR" -name "*.csv" -mmin -1 | wc -l
 ```
 
 **Ausfuehrung:** Den `/loop`-Skill mit 20-Minuten-Intervall verwenden. Falls `/loop` nicht verfuegbar, manuell mit `run_in_background` und `sleep 1200` zwischen Checks.
@@ -169,7 +173,30 @@ In beiden Faellen: Dem User mitteilen dass er `sysmon_trace.sh` im anderen Termi
 
 ## Phase 2 — Daten einsammeln
 
-### 2.1 Run-Verzeichnis pruefen
+### 2.1 Daten von /tmp ins Repository kopieren
+
+Nach dem Flug die gesammelten Daten von tmpfs ins Repo-Verzeichnis kopieren. Ab hier wird nur noch aus dem Repo-Verzeichnis gelesen.
+
+```bash
+RUN_DIR="monitoring/run_<LABEL>"
+mkdir -p "$RUN_DIR"
+cp -a "$TMP_DIR"/* "$RUN_DIR"/
+```
+
+Anschliessend pruefen ob die Kopie vollstaendig ist:
+
+```bash
+echo "tmp:  $(ls "$TMP_DIR" | wc -l) Dateien, $(du -sh "$TMP_DIR" | cut -f1)"
+echo "repo: $(ls "$RUN_DIR" | wc -l) Dateien, $(du -sh "$RUN_DIR" | cut -f1)"
+```
+
+Falls Trace-Logs root gehoeren (vom sudo-Sidecar), Ownership korrigieren:
+
+```bash
+sudo chown -R $USER "$RUN_DIR"/trace_*.log "$RUN_DIR"/dmesg_*.log 2>/dev/null
+```
+
+### 2.2 Run-Verzeichnis pruefen
 
 ```
 Glob: <RUN_DIR>/*.csv
@@ -186,7 +213,7 @@ Pruefen welche Dateien vorhanden sind. Erwartete Dateien:
 
 Fehlende Dateien notieren aber nicht als Fehler werten.
 
-### 2.2 Application Logs identifizieren
+### 2.3 Application Logs identifizieren
 
 XEarthLayer-Log suchen:
 
@@ -200,7 +227,7 @@ X-Plane Log suchen — die RICHTIGE Log finden:
 2. Falls nicht: Pruefe `~/X-Plane-12/Log.txt` — ist der Zeitstempel innerhalb des Monitoring-Fensters?
 3. Falls Log.txt neuer als die CSV-Dateien: Suche in `~/X-Plane-12/Output/Log Archive/` nach der passenden archivierten Log
 
-### 2.3 Session-Metadaten bestimmen
+### 2.4 Session-Metadaten bestimmen
 
 Aus den CSV-Dateien extrahieren:
 
@@ -345,7 +372,7 @@ Gemaess ANALYSIS_RULES.txt Section 4:
 
 ### 4.3 Run-Daten pruefen
 
-Run-Daten liegen bereits im Repository (seit Phase 1.2 direkt unter `monitoring/run_<LABEL>/` angelegt). Pruefen ob alle erwarteten Dateien vorhanden und nicht leer sind.
+Run-Daten liegen im Repository (seit Phase 2.1 von `/tmp` kopiert nach `monitoring/run_<LABEL>/`). Pruefen ob alle erwarteten Dateien vorhanden und nicht leer sind.
 
 ### 4.4 ANALYSE_HISTORY.md aktualisieren
 
@@ -407,5 +434,6 @@ Monitoring-Analysen werden NICHT automatisch committed. Der User entscheidet ob 
 - **Grosse CSV-Dateien:** Nicht komplett in den Kontext laden. Gezielt Zeitfenster und Schluessel-Spalten lesen.
 - **ANALYSIS_RULES.txt ist bindend:** Alle Schwellwerte, Korrelationsketten und Known Signatures aus diesem Dokument verwenden. Keine eigenen Schwellwerte erfinden.
 - **Vergleich mit frueheren Runs:** `monitoring/ANALYSE_HISTORY.md` und vorhandene `ANALYSE_RUN_*.md` laden fuer Kontext.
-- **Run-Verzeichnisse:** Werden direkt unter `monitoring/run_<label>/` angelegt (kein /tmp/ mehr).
+- **Zwei-Phasen-Speicherung:** Waehrend des Flugs schreiben alle Tools nach `/tmp` (tmpfs, RAM-backed, kein Disk-I/O). Erst nach dem Flug (Phase 2.1) werden die Daten ins Repo kopiert (`monitoring/run_<label>/`). Das minimiert Systembelastung waehrend der Messung.
+- **/tmp RAM-Verbrauch:** ~70-100 MB fuer 3h Session (8 Cores), ~120-150 MB bei 16 Cores. Vernachlaessigbar gegenueber X-Plane (16-32 GB).
 - **Watchdog:** Alle 20 Min pruefen ob sysmon.py + bpftrace noch laufen. Bei Ausfall: sysmon neu starten, User fuer bpftrace informieren.
