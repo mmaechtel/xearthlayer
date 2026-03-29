@@ -212,7 +212,6 @@ impl PackageManagerService for DefaultPackageManagerService {
         )
         .unwrap()
         .progress_chars("##-");
-        let done_style = ProgressStyle::with_template("  {prefix:.green} {msg:.green}").unwrap();
         let fail_style = ProgressStyle::with_template("  {prefix:.red} {msg:.red}").unwrap();
         let retry_style = ProgressStyle::with_template("  {prefix:.yellow} {msg:.yellow}").unwrap();
 
@@ -242,7 +241,6 @@ impl PackageManagerService for DefaultPackageManagerService {
         let bars = Arc::new(bars);
         let footer = Arc::new(footer);
         let part_style = Arc::new(part_style);
-        let done_style_arc = Arc::new(done_style);
         let fail_style_arc = Arc::new(fail_style);
         let retry_style_arc = Arc::new(retry_style);
 
@@ -250,7 +248,6 @@ impl PackageManagerService for DefaultPackageManagerService {
             let bars = Arc::clone(&bars);
             let footer = Arc::clone(&footer);
             let part_style = Arc::clone(&part_style);
-            let done_style = Arc::clone(&done_style_arc);
             let fail_style = Arc::clone(&fail_style_arc);
             let retry_style = Arc::clone(&retry_style_arc);
             move |progress: &DownloadProgress| {
@@ -273,8 +270,8 @@ impl PackageManagerService for DefaultPackageManagerService {
                             bar.set_position(part.bytes_downloaded);
                         }
                         PartState::Done => {
-                            bar.set_style((*done_style).clone());
-                            bar.finish_with_message("[done]");
+                            // Clear completed bars so the list scrolls naturally
+                            bar.finish_and_clear();
                         }
                         PartState::Failed { reason, .. } => {
                             bar.set_style((*fail_style).clone());
