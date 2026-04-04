@@ -279,7 +279,12 @@ where
                 let dds_disk = Arc::clone(&self.dds_disk_cache);
                 let tile_for_disk = self.tile;
                 let dds_data_for_disk = dds_data.clone();
+                let dds_bytes = dds_data_for_disk.len() as u64;
+                let metrics_for_dds = metrics.clone();
                 tokio::spawn(async move {
+                    metrics_for_dds.disk_write_started();
+                    let write_start = Instant::now();
+
                     dds_disk
                         .put(
                             tile_for_disk.row,
@@ -288,6 +293,9 @@ where
                             dds_data_for_disk,
                         )
                         .await;
+
+                    let duration_us = write_start.elapsed().as_micros() as u64;
+                    metrics_for_dds.disk_write_completed(dds_bytes, duration_us);
 
                     debug!(
                         tile = ?tile_for_disk,
