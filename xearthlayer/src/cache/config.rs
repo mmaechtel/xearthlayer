@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ServiceCacheConfig::default();
-        assert_eq!(config.max_size_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(config.max_size_bytes, DEFAULT_MEMORY_CACHE_SIZE as u64);
         assert!(matches!(
             config.provider,
             ProviderConfig::Memory { ttl: None }
