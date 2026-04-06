@@ -175,12 +175,6 @@ file = {}
 ; Enable predictive tile prefetching based on X-Plane telemetry (default: true)
 ; Requires X-Plane to send ForeFlight data: Settings > Network > Send to ForeFlight
 enabled = {}
-; Prefetch strategy (default: auto)
-;   auto         - Uses heading-aware with graceful degradation to radial
-;   adaptive     - Self-calibrating DSF-aligned prefetch (recommended)
-; Legacy strategies (radial, heading-aware, tile-based) are deprecated
-; and will automatically use adaptive instead.
-strategy = {}
 ; Adaptive prefetch mode (default: auto)
 ;   auto         - Select mode based on throughput calibration (recommended)
 ;   aggressive   - Position-based triggers (fast connections)
@@ -198,7 +192,7 @@ max_tiles_per_cycle = {}
 ; Higher values reduce prefetch aggressiveness
 cycle_interval_ms = {}
 
-; Adaptive prefetch calibration (for strategy = adaptive)
+; Adaptive prefetch calibration
 ; Minimum throughput for aggressive mode (tiles/sec, default: 30)
 ; Systems exceeding this use position-based prefetch triggers
 calibration_aggressive_threshold = {}
@@ -328,7 +322,6 @@ congestion_threshold = {}
         config.packages.concurrent_downloads,
         path_to_string(&config.logging.file),
         config.prefetch.enabled,
-        config.prefetch.strategy,
         config.prefetch.mode,
         config.prefetch.web_api_port,
         config.prefetch.max_tiles_per_cycle,

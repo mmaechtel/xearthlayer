@@ -178,11 +178,6 @@ pub struct LoggingSettings {
 pub struct PrefetchSettings {
     /// Enable predictive tile prefetching based on X-Plane telemetry
     pub enabled: bool,
-    /// Prefetch strategy: "auto" or "adaptive" (both use adaptive prefetch)
-    ///
-    /// The adaptive prefetch system automatically selects the best strategy
-    /// based on flight phase (ground/cruise) and system throughput.
-    pub strategy: String,
     /// Adaptive prefetch mode: "auto", "aggressive", "opportunistic", or "disabled"
     ///
     /// - "auto": Select mode based on calibration results (recommended)

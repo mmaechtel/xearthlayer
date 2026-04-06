@@ -362,7 +362,6 @@ The system uses flight phase detection and performance calibration:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable/disable predictive tile prefetching |
-| `strategy` | string | `auto` | Strategy selection: `auto` (recommended) or `adaptive` |
 | `mode` | string | `auto` | Mode selection: `auto`, `aggressive`, `opportunistic`, `disabled` |
 | `web_api_port` | integer | `8086` | X-Plane Web API port for telemetry and sim state (1024-65535) |
 | `max_tiles_per_cycle` | integer | `200` | Maximum tiles to submit per prefetch cycle |
@@ -395,7 +394,6 @@ The system uses flight phase detection and performance calibration:
 ```ini
 [prefetch]
 enabled = true
-strategy = auto
 mode = auto                    ; Let calibration determine mode
 ; web_api_port = 8086
 
@@ -617,7 +615,6 @@ timeout = 10
 [prefetch]
 ; Adaptive Prefetch System (v0.3.0+) - self-calibrating tile prefetching
 enabled = true
-strategy = auto                ; auto or adaptive
 mode = auto                    ; auto, aggressive, opportunistic, disabled
 ; web_api_port = 8086
 
@@ -774,7 +771,6 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `executor.max_retries` | positive integer | Max retry attempts per chunk |
 | `executor.retry_base_delay_ms` | positive integer | Exponential backoff base (ms) |
 | `prefetch.enabled` | `true`, `false` | Enable predictive prefetching |
-| `prefetch.strategy` | `auto`, `adaptive` | Prefetch strategy selection |
 | `prefetch.mode` | `auto`, `aggressive`, `opportunistic`, `disabled` | Prefetch mode (auto uses calibration) |
 | `prefetch.web_api_port` | 1024-65535 | X-Plane Web API port for telemetry and sim state |
 | `prefetch.max_tiles_per_cycle` | positive integer | Max tiles per prefetch cycle |
