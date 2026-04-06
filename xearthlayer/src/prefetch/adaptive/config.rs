@@ -475,7 +475,6 @@ mod tests {
     fn test_from_prefetch_settings_boundary_fields() {
         let settings = PrefetchSettings {
             enabled: true,
-            strategy: "adaptive".to_string(),
             mode: "auto".to_string(),
             web_api_port: 8086,
             max_tiles_per_cycle: 200,

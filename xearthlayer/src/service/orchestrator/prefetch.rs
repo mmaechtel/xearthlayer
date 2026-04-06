@@ -11,9 +11,7 @@ use tracing::info;
 
 use crate::aircraft_position::AircraftPositionBroadcaster;
 use crate::executor::{DdsClient, MemoryCache};
-use crate::prefetch::{
-    warn_if_legacy, AdaptivePrefetchConfig, AdaptivePrefetchCoordinator, Prefetcher,
-};
+use crate::prefetch::{AdaptivePrefetchConfig, AdaptivePrefetchCoordinator, Prefetcher};
 
 use super::super::error::ServiceError;
 use super::{PrefetchHandle, ServiceOrchestrator};
@@ -108,9 +106,6 @@ impl ServiceOrchestrator {
 
         // Keep a reference to DDS client for adaptive strategy
         let dds_client_for_adaptive = Arc::clone(&dds_client);
-
-        // Warn if a legacy strategy is configured (all now use adaptive)
-        warn_if_legacy(&config.strategy);
 
         // Build and start the prefetcher
         let prefetcher_cancel = self.cancellation.clone();

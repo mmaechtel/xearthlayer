@@ -90,6 +90,8 @@ pub const DEPRECATED_KEYS: &[&str] = &[
     "prefetch.turn_threshold",
     "prefetch.track_stability_duration",
     "prefetch.time_budget_margin",
+    // Removed in #136 - only adaptive strategy exists, setting was redundant
+    "prefetch.strategy",
     // Removed in #58 - per-axis load depth and dynamic window columns
     "prefetch.load_depth",
     "prefetch.default_window_cols",

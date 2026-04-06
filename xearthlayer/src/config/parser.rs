@@ -300,31 +300,6 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
         if let Some(v) = section.get("enabled") {
             config.prefetch.enabled = parse_bool(v);
         }
-        if let Some(v) = section.get("strategy") {
-            let v = v.trim().to_lowercase();
-            match v.as_str() {
-                "auto" | "adaptive" => {
-                    config.prefetch.strategy = "adaptive".to_string();
-                }
-                // Legacy strategies - map to adaptive with warning (deprecated in v0.4.0)
-                "heading-aware" | "radial" | "tile-based" => {
-                    tracing::warn!(
-                        "Prefetch strategy '{}' is deprecated and will be removed in a future version. \
-                         Using 'adaptive' instead. Please update your config file.",
-                        v
-                    );
-                    config.prefetch.strategy = "adaptive".to_string();
-                }
-                _ => {
-                    return Err(ConfigFileError::InvalidValue {
-                        section: "prefetch".to_string(),
-                        key: "strategy".to_string(),
-                        value: v.to_string(),
-                        reason: "must be 'auto' or 'adaptive'".to_string(),
-                    });
-                }
-            }
-        }
         if let Some(v) = section.get("mode") {
             let v = v.trim().to_lowercase();
             match v.as_str() {

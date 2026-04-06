@@ -71,9 +71,6 @@ pub struct PrefetchConfig {
     /// Whether prefetch is enabled.
     pub enabled: bool,
 
-    /// Prefetch strategy name ("auto" or "adaptive").
-    pub strategy: String,
-
     /// Adaptive prefetch mode: "auto", "aggressive", "opportunistic", or "disabled".
     pub mode: String,
 
@@ -190,7 +187,6 @@ impl OrchestratorConfig {
         // Extract prefetch configuration
         let prefetch = PrefetchConfig {
             enabled: config.prefetch.enabled,
-            strategy: config.prefetch.strategy.clone(),
             mode: config.prefetch.mode.clone(),
             web_api_port: config.prefetch.web_api_port,
             max_tiles_per_cycle: config.prefetch.max_tiles_per_cycle,
@@ -315,6 +311,5 @@ mod tests {
             orch_config.prefetch.web_api_port,
             config.prefetch.web_api_port
         );
-        assert_eq!(orch_config.prefetch.strategy, config.prefetch.strategy);
     }
 }

@@ -34,7 +34,6 @@
 //! 5. Enable data indices: 3 (speeds), 17 (heading), 20 (position)
 
 pub mod adaptive;
-mod builder;
 mod condition;
 pub mod config;
 pub mod coordinates;
@@ -65,9 +64,6 @@ pub use strategy::Prefetcher;
 pub use config::FuseInferenceConfig;
 pub use inference::{Direction, FuseRequestAnalyzer, LoadedEnvelope, TileRequestCallback};
 pub use types::{InputMode, PrefetchTile, PrefetchZone, TurnDirection, TurnState};
-
-// Legacy strategy migration utilities
-pub use builder::{is_legacy_strategy, warn_if_legacy};
 
 // Scenery-aware prefetch
 pub use scenery_index::{

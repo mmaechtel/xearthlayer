@@ -370,7 +370,6 @@ impl Default for ConfigFile {
             },
             prefetch: PrefetchSettings {
                 enabled: true,
-                strategy: "adaptive".to_string(),
                 mode: "auto".to_string(),
                 web_api_port: DEFAULT_WEB_API_PORT,
                 max_tiles_per_cycle: DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,

@@ -81,7 +81,6 @@ pub enum ConfigKey {
 
     // Prefetch settings
     PrefetchEnabled,
-    PrefetchStrategy,
     PrefetchMode,
     PrefetchWebApiPort,
     PrefetchMaxTilesPerCycle,
@@ -183,7 +182,6 @@ impl FromStr for ConfigKey {
             "logging.file" => Ok(ConfigKey::LoggingFile),
 
             "prefetch.enabled" => Ok(ConfigKey::PrefetchEnabled),
-            "prefetch.strategy" => Ok(ConfigKey::PrefetchStrategy),
             "prefetch.mode" => Ok(ConfigKey::PrefetchMode),
             "prefetch.web_api_port" => Ok(ConfigKey::PrefetchWebApiPort),
             "prefetch.max_tiles_per_cycle" => Ok(ConfigKey::PrefetchMaxTilesPerCycle),
@@ -281,7 +279,6 @@ impl ConfigKey {
             ConfigKey::PackagesConcurrentDownloads => "packages.concurrent_downloads",
             ConfigKey::LoggingFile => "logging.file",
             ConfigKey::PrefetchEnabled => "prefetch.enabled",
-            ConfigKey::PrefetchStrategy => "prefetch.strategy",
             ConfigKey::PrefetchMode => "prefetch.mode",
             ConfigKey::PrefetchWebApiPort => "prefetch.web_api_port",
             ConfigKey::PrefetchMaxTilesPerCycle => "prefetch.max_tiles_per_cycle",
@@ -418,7 +415,6 @@ impl ConfigKey {
             }
             ConfigKey::LoggingFile => path_to_display(&config.logging.file),
             ConfigKey::PrefetchEnabled => config.prefetch.enabled.to_string(),
-            ConfigKey::PrefetchStrategy => config.prefetch.strategy.clone(),
             ConfigKey::PrefetchMode => config.prefetch.mode.clone(),
             ConfigKey::PrefetchWebApiPort => config.prefetch.web_api_port.to_string(),
             ConfigKey::PrefetchMaxTilesPerCycle => config.prefetch.max_tiles_per_cycle.to_string(),
@@ -615,9 +611,6 @@ impl ConfigKey {
                 let v = value.to_lowercase();
                 config.prefetch.enabled = v == "true" || v == "1" || v == "yes" || v == "on";
             }
-            ConfigKey::PrefetchStrategy => {
-                config.prefetch.strategy = value.to_lowercase();
-            }
             ConfigKey::PrefetchMode => {
                 config.prefetch.mode = value.to_lowercase();
             }
@@ -789,7 +782,6 @@ impl ConfigKey {
             ConfigKey::PackagesConcurrentDownloads => Box::new(IntegerRangeSpec::new(1, 10)),
             ConfigKey::LoggingFile => Box::new(PathSpec),
             ConfigKey::PrefetchEnabled => Box::new(BooleanSpec),
-            ConfigKey::PrefetchStrategy => Box::new(OneOfSpec::new(&["auto", "adaptive"])),
             ConfigKey::PrefetchMode => Box::new(OneOfSpec::new(&[
                 "auto",
                 "aggressive",
@@ -875,7 +867,6 @@ impl ConfigKey {
             ConfigKey::PackagesConcurrentDownloads,
             ConfigKey::LoggingFile,
             ConfigKey::PrefetchEnabled,
-            ConfigKey::PrefetchStrategy,
             ConfigKey::PrefetchMode,
             ConfigKey::PrefetchWebApiPort,
             ConfigKey::PrefetchMaxTilesPerCycle,
