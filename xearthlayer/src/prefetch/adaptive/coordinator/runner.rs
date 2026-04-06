@@ -9,9 +9,11 @@
 //!
 //! # Staleness Detection
 //!
-//! When X-Plane exits, it stops sending UDP telemetry packets. This module
-//! detects the absence of telemetry and updates the GPS status to "Acquiring"
-//! to indicate the connection was lost.
+//! When X-Plane exits, it stops sending UDP telemetry packets. The run loop
+//! detects the absence of telemetry and enters **safe mode**: prefetch is
+//! paused and GPS status is set to `Acquiring`. When telemetry resumes, the
+//! phase detector is reset from the `on_ground` flag of the first new packet
+//! before normal cycling restarts.
 //!
 //! # Design Notes
 //!
@@ -19,6 +21,9 @@
 //! 1. Cancellation check (highest priority)
 //! 2. Telemetry reception
 //! 3. Staleness check interval
+//!
+//! Each arm delegates to a dedicated handler method so the loop body reads as
+//! a clean dispatch table with no nested logic.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,12 +32,34 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::prefetch::state::AircraftState;
+use crate::prefetch::state::{AircraftState, GpsStatus};
 use crate::prefetch::strategy::Prefetcher;
 
 use super::constants::{MIN_CYCLE_INTERVAL, STALENESS_CHECK_INTERVAL, TELEMETRY_STALE_THRESHOLD};
 use super::core::AdaptivePrefetchCoordinator;
 use super::telemetry::should_run_cycle;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Run-loop state
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Transient state threaded through each iteration of the prefetch run loop.
+struct LoopState {
+    last_cycle: Instant,
+    last_telemetry: Option<Instant>,
+    /// True while in safe mode: telemetry was previously stale.
+    telemetry_paused: bool,
+}
+
+impl LoopState {
+    fn new() -> Self {
+        Self {
+            last_cycle: Instant::now(),
+            last_telemetry: None,
+            telemetry_paused: false,
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Prefetcher trait implementation
@@ -47,8 +74,7 @@ impl Prefetcher for AdaptivePrefetchCoordinator {
         Box::pin(async move {
             tracing::info!(mode = ?self.effective_mode(), "Adaptive prefetcher started");
 
-            let mut last_cycle = Instant::now();
-            let mut last_telemetry: Option<Instant> = None;
+            let mut ls = LoopState::new();
             let mut staleness_interval = tokio::time::interval(STALENESS_CHECK_INTERVAL);
 
             loop {
@@ -59,36 +85,11 @@ impl Prefetcher for AdaptivePrefetchCoordinator {
 
                     state_opt = state_rx.recv() => {
                         let Some(state) = state_opt else { break };
-
-                        // Track when we last received telemetry
-                        last_telemetry = Some(Instant::now());
-
-                        if !should_run_cycle(last_cycle, MIN_CYCLE_INTERVAL) {
-                            continue;
-                        }
-
-                        self.process_telemetry(&state).await;
-                        last_cycle = Instant::now();
+                        if !self.on_telemetry_received(&state, &mut ls).await { break; }
                     }
 
                     _ = staleness_interval.tick() => {
-                        // Check if telemetry has gone stale
-                        if let Some(last) = last_telemetry {
-                            if last.elapsed() > TELEMETRY_STALE_THRESHOLD {
-                                tracing::info!(
-                                    age_secs = last.elapsed().as_secs(),
-                                    "Telemetry stale - X-Plane may have exited"
-                                );
-                                // Clear the GPS status to show we've lost connection
-                                if let Some(ref status) = self.shared_status {
-                                    status.update_gps_status(
-                                        crate::prefetch::state::GpsStatus::Acquiring
-                                    );
-                                }
-                                // Reset last_telemetry to avoid repeated log spam
-                                last_telemetry = None;
-                            }
-                        }
+                        self.on_staleness_tick(&mut ls);
                     }
                 }
             }
@@ -107,6 +108,71 @@ impl Prefetcher for AdaptivePrefetchCoordinator {
 
     fn startup_info(&self) -> String {
         self.startup_info_string()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Run-loop handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl AdaptivePrefetchCoordinator {
+    /// Handle an incoming telemetry packet.
+    ///
+    /// If the coordinator was in safe mode (telemetry previously stale), it
+    /// exits safe mode first: the phase detector is reset from `on_ground` and
+    /// GPS status is restored to `Connected`.
+    ///
+    /// Returns `true` to continue the loop, `false` when the channel has closed.
+    async fn on_telemetry_received(&mut self, state: &AircraftState, ls: &mut LoopState) -> bool {
+        ls.last_telemetry = Some(Instant::now());
+
+        if ls.telemetry_paused {
+            tracing::info!(
+                on_ground = state.on_ground,
+                "Telemetry resumed — exiting safe mode"
+            );
+            self.reset_phase_from_on_ground(state.on_ground);
+            ls.telemetry_paused = false;
+            self.set_gps_status(GpsStatus::Connected);
+        }
+
+        if !should_run_cycle(ls.last_cycle, MIN_CYCLE_INTERVAL) {
+            return true;
+        }
+
+        self.process_telemetry(state).await;
+        ls.last_cycle = Instant::now();
+        true
+    }
+
+    /// Handle a staleness-check tick.
+    ///
+    /// Enters safe mode when telemetry has been absent longer than
+    /// [`TELEMETRY_STALE_THRESHOLD`] and the coordinator is not already paused.
+    fn on_staleness_tick(&mut self, ls: &mut LoopState) {
+        let stale = ls
+            .last_telemetry
+            .is_some_and(|t| t.elapsed() > TELEMETRY_STALE_THRESHOLD);
+
+        if stale && !ls.telemetry_paused {
+            let age_secs = ls
+                .last_telemetry
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            tracing::info!(
+                age_secs,
+                "Telemetry stale — entering safe mode (prefetch paused)"
+            );
+            ls.telemetry_paused = true;
+            self.set_gps_status(GpsStatus::Acquiring);
+        }
+    }
+
+    /// Update the shared GPS status, if a shared status handle is configured.
+    fn set_gps_status(&self, status: GpsStatus) {
+        if let Some(ref shared) = self.shared_status {
+            shared.update_gps_status(status);
+        }
     }
 }
 

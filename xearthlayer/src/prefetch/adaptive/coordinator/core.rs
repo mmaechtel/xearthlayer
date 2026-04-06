@@ -916,6 +916,21 @@ impl AdaptivePrefetchCoordinator {
             super::status_updater::update_status_no_plan(status, &self.status, &self.cycle_stats());
         }
     }
+
+    /// Reset the phase detector based on SimState on_ground flag.
+    ///
+    /// Called when telemetry resumes after a stale period. Uses the on_ground
+    /// flag from the first new telemetry packet to correctly initialise the
+    /// phase detector without waiting for hysteresis to accumulate.
+    pub fn reset_phase_from_on_ground(&mut self, on_ground: bool) {
+        if on_ground {
+            self.phase_detector.reset_to_ground();
+            self.status.phase = FlightPhase::Ground;
+        } else {
+            self.phase_detector.reset_to_cruise();
+            self.status.phase = FlightPhase::Cruise;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2368,5 +2383,35 @@ mod tests {
                 "Should continue prefetch when paused (opportunistic)"
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // reset_phase_from_on_ground tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reset_phase_from_on_ground_true() {
+        let mut coord =
+            AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
+
+        // Drive into cruise via the phase detector directly (avoids hysteresis wait)
+        coord.phase_detector.set_phase(FlightPhase::Cruise);
+        coord.status.phase = FlightPhase::Cruise;
+        assert_eq!(coord.status.phase, FlightPhase::Cruise);
+
+        coord.reset_phase_from_on_ground(true);
+        assert_eq!(coord.status.phase, FlightPhase::Ground);
+        assert_eq!(coord.phase_detector.current_phase(), FlightPhase::Ground);
+    }
+
+    #[test]
+    fn test_reset_phase_from_on_ground_false() {
+        let mut coord = AdaptivePrefetchCoordinator::with_defaults();
+        // Starts in Ground by default
+        assert_eq!(coord.status.phase, FlightPhase::Ground);
+
+        coord.reset_phase_from_on_ground(false);
+        assert_eq!(coord.status.phase, FlightPhase::Cruise);
+        assert_eq!(coord.phase_detector.current_phase(), FlightPhase::Cruise);
     }
 }
