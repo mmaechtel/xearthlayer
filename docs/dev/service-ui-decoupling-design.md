@@ -6,6 +6,20 @@
 
 Related: #111 (FUSE hook pipeline), #112 (plugin architecture), #113 (release channels)
 
+### Tracking Issues
+
+| Issue | Domain |
+|-------|--------|
+| #139 | Remove `gpu-encode` feature flag |
+| #140 | `xearthlayer-proto` crate |
+| #141 | `xearthlayer-api` server adapter |
+| #142 | `xearthlayer-daemon` binary |
+| #143 | `DaemonClient` wrapper |
+| #144 | `xearthlayer-tui` extraction |
+| #145 | CLI service commands + cleanup |
+| #146 | Multi-package release pipeline |
+| #147 | `ServiceManager` trait |
+
 ## Problem Statement
 
 XEarthLayer's service layer (FUSE, cache, executor, prefetch) and terminal UI run in the same process with a shared lifecycle. Quitting the TUI stops the service. There is no way to run the service headless, connect a GUI, or interact with a running service from multiple clients.
