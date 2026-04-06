@@ -44,15 +44,16 @@ use super::telemetry::should_run_cycle;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Transient state threaded through each iteration of the prefetch run loop.
-struct LoopState {
-    last_cycle: Instant,
-    last_telemetry: Option<Instant>,
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct LoopState {
+    pub(crate) last_cycle: Instant,
+    pub(crate) last_telemetry: Option<Instant>,
     /// True while in safe mode: telemetry was previously stale.
-    telemetry_paused: bool,
+    pub(crate) telemetry_paused: bool,
 }
 
 impl LoopState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             last_cycle: Instant::now(),
             last_telemetry: None,
@@ -123,7 +124,11 @@ impl AdaptivePrefetchCoordinator {
     /// GPS status is restored to `Connected`.
     ///
     /// Returns `true` to continue the loop, `false` when the channel has closed.
-    async fn on_telemetry_received(&mut self, state: &AircraftState, ls: &mut LoopState) -> bool {
+    pub(crate) async fn on_telemetry_received(
+        &mut self,
+        state: &AircraftState,
+        ls: &mut LoopState,
+    ) -> bool {
         ls.last_telemetry = Some(Instant::now());
 
         if ls.telemetry_paused {
@@ -149,7 +154,7 @@ impl AdaptivePrefetchCoordinator {
     ///
     /// Enters safe mode when telemetry has been absent longer than
     /// [`TELEMETRY_STALE_THRESHOLD`] and the coordinator is not already paused.
-    fn on_staleness_tick(&mut self, ls: &mut LoopState) {
+    pub(crate) fn on_staleness_tick(&mut self, ls: &mut LoopState) {
         let stale = ls
             .last_telemetry
             .is_some_and(|t| t.elapsed() > TELEMETRY_STALE_THRESHOLD);
@@ -211,6 +216,158 @@ mod tests {
             snapshot.gps_status,
             GpsStatus::Acquiring,
             "GPS status should change to Acquiring when telemetry is stale"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Safe mode integration tests (Issue #125)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{AdaptivePrefetchCoordinator, LoopState};
+    use crate::prefetch::adaptive::phase_detector::FlightPhase;
+
+    /// Helper: create a coordinator with shared status for safe mode testing.
+    fn safe_mode_coordinator() -> (AdaptivePrefetchCoordinator, Arc<SharedPrefetchStatus>) {
+        let shared = SharedPrefetchStatus::new();
+        let coord =
+            AdaptivePrefetchCoordinator::with_defaults().with_shared_status(Arc::clone(&shared));
+        (coord, shared)
+    }
+
+    /// Helper: create a LoopState that appears stale (last telemetry was 10s ago).
+    fn stale_loop_state() -> LoopState {
+        let mut ls = LoopState::new();
+        ls.last_telemetry = Some(Instant::now() - Duration::from_secs(10));
+        ls
+    }
+
+    #[test]
+    fn test_staleness_tick_enters_safe_mode() {
+        let (mut coord, shared) = safe_mode_coordinator();
+        let mut ls = stale_loop_state();
+
+        assert!(!ls.telemetry_paused, "Should not start paused");
+
+        coord.on_staleness_tick(&mut ls);
+
+        assert!(
+            ls.telemetry_paused,
+            "Should enter safe mode after stale tick"
+        );
+        assert_eq!(
+            shared.snapshot().gps_status,
+            GpsStatus::Acquiring,
+            "GPS should be Acquiring in safe mode"
+        );
+    }
+
+    #[test]
+    fn test_staleness_tick_does_nothing_when_fresh() {
+        let (mut coord, _shared) = safe_mode_coordinator();
+        let mut ls = LoopState::new();
+        ls.last_telemetry = Some(Instant::now()); // Just received
+
+        coord.on_staleness_tick(&mut ls);
+
+        assert!(
+            !ls.telemetry_paused,
+            "Fresh telemetry should not trigger safe mode"
+        );
+    }
+
+    #[test]
+    fn test_staleness_tick_does_nothing_when_already_paused() {
+        let (mut coord, _shared) = safe_mode_coordinator();
+        let mut ls = stale_loop_state();
+        ls.telemetry_paused = true; // Already in safe mode
+
+        // Should not panic or double-set
+        coord.on_staleness_tick(&mut ls);
+        assert!(ls.telemetry_paused);
+    }
+
+    #[test]
+    fn test_staleness_tick_does_nothing_when_no_telemetry_ever() {
+        let (mut coord, _shared) = safe_mode_coordinator();
+        let mut ls = LoopState::new();
+        assert!(ls.last_telemetry.is_none());
+
+        coord.on_staleness_tick(&mut ls);
+
+        assert!(
+            !ls.telemetry_paused,
+            "Never received telemetry — not stale, just absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_from_safe_mode_on_ground() {
+        let (mut coord, shared) = safe_mode_coordinator();
+        let mut ls = stale_loop_state();
+
+        // Enter safe mode
+        coord.on_staleness_tick(&mut ls);
+        assert!(ls.telemetry_paused);
+        assert_eq!(shared.snapshot().gps_status, GpsStatus::Acquiring);
+
+        // Resume with on_ground=true (aircraft landed)
+        let state = AircraftState::new(47.0, 8.0, 90.0, 15.0, 500.0, true);
+        coord.on_telemetry_received(&state, &mut ls).await;
+
+        assert!(!ls.telemetry_paused, "Should exit safe mode");
+        assert_eq!(
+            coord.phase_detector().current_phase(),
+            FlightPhase::Ground,
+            "Should reset to Ground when on_ground=true"
+        );
+        assert_eq!(
+            shared.snapshot().gps_status,
+            GpsStatus::Connected,
+            "GPS should be restored to Connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_from_safe_mode_airborne() {
+        let (mut coord, shared) = safe_mode_coordinator();
+        let mut ls = stale_loop_state();
+
+        // Enter safe mode
+        coord.on_staleness_tick(&mut ls);
+        assert!(ls.telemetry_paused);
+
+        // Resume with on_ground=false (aircraft airborne)
+        let state = AircraftState::new(47.0, 8.0, 90.0, 250.0, 35000.0, false);
+        coord.on_telemetry_received(&state, &mut ls).await;
+
+        assert!(!ls.telemetry_paused, "Should exit safe mode");
+        assert_eq!(
+            coord.phase_detector().current_phase(),
+            FlightPhase::Cruise,
+            "Should reset to Cruise when on_ground=false"
+        );
+        assert_eq!(shared.snapshot().gps_status, GpsStatus::Connected);
+    }
+
+    #[tokio::test]
+    async fn test_telemetry_received_without_safe_mode_does_not_reset_phase() {
+        let (mut coord, _shared) = safe_mode_coordinator();
+        let mut ls = LoopState::new();
+        ls.last_cycle = Instant::now() - Duration::from_secs(5); // Allow cycle to run
+
+        // Normal telemetry (not paused) — should NOT reset phase
+        let state = AircraftState::new(47.0, 8.0, 90.0, 250.0, 35000.0, false);
+        coord.on_telemetry_received(&state, &mut ls).await;
+
+        // Phase should still be Ground (default) because normal telemetry
+        // goes through PhaseDetector.update(), not reset_phase_from_on_ground()
+        assert_eq!(
+            coord.phase_detector().current_phase(),
+            FlightPhase::Ground,
+            "Normal telemetry should use PhaseDetector.update(), not force a reset"
         );
     }
 
