@@ -128,7 +128,7 @@ mod tests {
         let shared_status = SharedPrefetchStatus::new();
 
         // Simulate receiving telemetry (sets GPS status to Connected)
-        let state = AircraftState::new(51.47, -0.46, 90.0, 0.0, 0.0); // EGLL
+        let state = AircraftState::new(51.47, -0.46, 90.0, 0.0, 0.0, false); // EGLL
         shared_status.update_aircraft(&state);
 
         // Verify status is Connected

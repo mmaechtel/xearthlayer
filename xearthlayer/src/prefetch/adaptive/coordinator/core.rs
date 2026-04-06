@@ -1198,7 +1198,7 @@ mod tests {
             ..Default::default()
         };
         let mut coord = AdaptivePrefetchCoordinator::new(config);
-        let state = AircraftState::new(53.5, 9.5, 90.0, 250.0, 35000.0);
+        let state = AircraftState::new(53.5, 9.5, 90.0, 250.0, 35000.0, false);
 
         // Disabled coordinator returns None
         let result = coord.process_telemetry(&state).await;
@@ -1209,7 +1209,7 @@ mod tests {
     async fn test_process_telemetry_no_dds_client() {
         let mut coord =
             AdaptivePrefetchCoordinator::with_defaults().with_calibration(test_calibration());
-        let state = AircraftState::new(53.5, 9.5, 90.0, 10.0, 5.0); // Ground conditions
+        let state = AircraftState::new(53.5, 9.5, 90.0, 10.0, 5.0, false); // Ground conditions
 
         // No DDS client - returns Some(0) because plan is generated but not executed
         let result = coord.process_telemetry(&state).await;
@@ -1367,7 +1367,7 @@ mod tests {
         let mut coord =
             AdaptivePrefetchCoordinator::new(config).with_shared_status(Arc::clone(&shared_status));
 
-        let state = AircraftState::new(53.5, 9.5, 90.0, 250.0, 35000.0);
+        let state = AircraftState::new(53.5, 9.5, 90.0, 250.0, 35000.0, false);
 
         // Process telemetry - should return None but still update status
         let result = coord.process_telemetry(&state).await;
@@ -1701,7 +1701,7 @@ mod tests {
 
         // Now move aircraft near northern boundary.
         // Aircraft at lat=52.5 → near edge of window.
-        let state = AircraftState::new(52.5, 10.0, 0.0, 200.0, 35000.0);
+        let state = AircraftState::new(52.5, 10.0, 0.0, 200.0, 35000.0, false);
 
         // First cycle: boundary plan generated, only 5 submitted (ChannelFull)
         let result = coord.process_telemetry(&state).await;
@@ -1782,7 +1782,7 @@ mod tests {
             .collect();
         coord.pending_tiles = fake_pending;
 
-        let state = AircraftState::new(55.5, 10.0, 0.0, 200.0, 35000.0);
+        let state = AircraftState::new(55.5, 10.0, 0.0, 200.0, 35000.0, false);
 
         // Cycle with pending tiles: should drain pending first, NOT generate new plan
         let result = coord.process_telemetry(&state).await;

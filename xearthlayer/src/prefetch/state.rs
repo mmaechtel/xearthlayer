@@ -290,6 +290,8 @@ pub struct AircraftState {
     pub ground_speed: f32,
     /// Altitude MSL in feet.
     pub altitude: f32,
+    /// Whether the aircraft is on the ground (from SimState).
+    pub on_ground: bool,
     /// Timestamp when this state was received.
     pub updated_at: Instant,
 }
@@ -302,6 +304,7 @@ impl AircraftState {
         heading: f32,
         ground_speed: f32,
         altitude: f32,
+        on_ground: bool,
     ) -> Self {
         Self {
             latitude,
@@ -309,6 +312,7 @@ impl AircraftState {
             heading,
             ground_speed,
             altitude,
+            on_ground,
             updated_at: Instant::now(),
         }
     }
@@ -413,7 +417,7 @@ mod tests {
     #[test]
     fn test_extrapolate_north() {
         // Aircraft at 0,0 heading north at 60 knots (1 nm/min)
-        let state = AircraftState::new(0.0, 0.0, 0.0, 60.0, 10000.0);
+        let state = AircraftState::new(0.0, 0.0, 0.0, 60.0, 10000.0, false);
 
         // After 60 seconds, should be ~1 nm north (~0.0167 degrees)
         let (lat, lon) = state.extrapolate(60.0);
@@ -429,7 +433,7 @@ mod tests {
     #[test]
     fn test_extrapolate_east() {
         // Aircraft at 0,0 heading east at 60 knots
-        let state = AircraftState::new(0.0, 0.0, 90.0, 60.0, 10000.0);
+        let state = AircraftState::new(0.0, 0.0, 90.0, 60.0, 10000.0, false);
 
         // After 60 seconds, should be ~1 nm east
         let (lat, lon) = state.extrapolate(60.0);
@@ -445,7 +449,7 @@ mod tests {
     #[test]
     fn test_extrapolate_stationary() {
         // Aircraft at rest
-        let state = AircraftState::new(45.0, -122.0, 90.0, 0.0, 5000.0);
+        let state = AircraftState::new(45.0, -122.0, 90.0, 0.0, 5000.0, false);
 
         let (lat, lon) = state.extrapolate(600.0);
 
@@ -455,29 +459,29 @@ mod tests {
 
     #[test]
     fn test_has_significant_change_heading() {
-        let state1 = AircraftState::new(45.0, -122.0, 90.0, 120.0, 10000.0);
-        let state2 = AircraftState::new(45.0, -122.0, 110.0, 120.0, 10000.0);
+        let state1 = AircraftState::new(45.0, -122.0, 90.0, 120.0, 10000.0, false);
+        let state2 = AircraftState::new(45.0, -122.0, 110.0, 120.0, 10000.0, false);
 
         assert!(state1.has_significant_change(&state2));
     }
 
     #[test]
     fn test_has_significant_change_heading_wraparound() {
-        let state1 = AircraftState::new(45.0, -122.0, 5.0, 120.0, 10000.0);
-        let state2 = AircraftState::new(45.0, -122.0, 355.0, 120.0, 10000.0);
+        let state1 = AircraftState::new(45.0, -122.0, 5.0, 120.0, 10000.0, false);
+        let state2 = AircraftState::new(45.0, -122.0, 355.0, 120.0, 10000.0, false);
 
         // 10 degree difference, not significant
         assert!(!state1.has_significant_change(&state2));
 
-        let state3 = AircraftState::new(45.0, -122.0, 340.0, 120.0, 10000.0);
+        let state3 = AircraftState::new(45.0, -122.0, 340.0, 120.0, 10000.0, false);
         // 25 degree difference, significant
         assert!(state1.has_significant_change(&state3));
     }
 
     #[test]
     fn test_has_significant_change_speed() {
-        let state1 = AircraftState::new(45.0, -122.0, 90.0, 120.0, 10000.0);
-        let state2 = AircraftState::new(45.0, -122.0, 90.0, 160.0, 10000.0);
+        let state1 = AircraftState::new(45.0, -122.0, 90.0, 120.0, 10000.0, false);
+        let state2 = AircraftState::new(45.0, -122.0, 90.0, 160.0, 10000.0, false);
 
         // 33% speed change (40/120), significant
         assert!(state1.has_significant_change(&state2));
@@ -485,8 +489,8 @@ mod tests {
 
     #[test]
     fn test_no_significant_change() {
-        let state1 = AircraftState::new(45.0, -122.0, 90.0, 120.0, 10000.0);
-        let state2 = AircraftState::new(45.001, -122.001, 92.0, 125.0, 10000.0);
+        let state1 = AircraftState::new(45.0, -122.0, 90.0, 120.0, 10000.0, false);
+        let state2 = AircraftState::new(45.001, -122.001, 92.0, 125.0, 10000.0, false);
 
         // Small changes in all dimensions, not significant
         assert!(!state1.has_significant_change(&state2));
