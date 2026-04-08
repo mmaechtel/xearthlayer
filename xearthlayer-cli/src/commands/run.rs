@@ -341,9 +341,7 @@ pub fn run(args: RunArgs) -> Result<(), CliError> {
     orchestrator.shutdown();
 
     // Print final session summary (to stdout after TUI exits)
-    if final_snapshot.jobs_completed > 0 {
-        ui::dashboard::print_session_summary(&final_snapshot);
-    }
+    ui::dashboard::print_session_summary(&final_snapshot);
 
     println!();
     println!("All packages unmounted. Goodbye!");
