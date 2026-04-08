@@ -135,8 +135,9 @@ impl CacheLayer {
         // Chunks keep the existing provider directory layout
         let chunk_disk_dir = disk_dir.clone();
 
-        // 1. Start memory cache service
-        let memory_config = ServiceCacheConfig::memory(memory_size, None);
+        // 1. Start memory cache service (with metrics for self-reporting size)
+        let memory_config =
+            ServiceCacheConfig::memory(memory_size, None).with_metrics(metrics.clone());
         let memory_service = CacheService::start(memory_config)
             .await
             .map_err(|e| ServiceError::CacheError(format!("Memory cache start failed: {}", e)))?;
