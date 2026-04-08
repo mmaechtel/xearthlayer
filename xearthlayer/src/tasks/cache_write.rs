@@ -18,7 +18,6 @@
 
 use crate::coord::TileCoord;
 use crate::executor::{MemoryCache, ResourceType, Task, TaskContext, TaskError, TaskResult};
-use crate::metrics::OptionalMetrics;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -108,19 +107,15 @@ where
                     "Writing to memory cache"
                 );
 
-                // Memory cache is async-safe (uses moka internally)
+                // Memory cache is async-safe (uses moka internally).
+                // Size metrics are reported internally by the provider.
                 self.memory_cache
                     .put(self.tile.row, self.tile.col, self.tile.zoom, dds_data)
                     .await;
 
-                // Emit updated cache size to metrics
-                let total_size = self.memory_cache.size_bytes();
-                ctx.metrics_clone().memory_cache_size(total_size as u64);
-
                 debug!(
                     job_id = %job_id,
                     tile = ?self.tile,
-                    cache_size_bytes = total_size,
                     "Cache write complete"
                 );
 

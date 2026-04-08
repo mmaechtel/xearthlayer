@@ -87,7 +87,10 @@ impl CacheService {
 
         match config.provider {
             ProviderConfig::Memory { ttl } => {
-                let provider = MemoryCacheProvider::new(config.max_size_bytes, ttl);
+                let mut provider = MemoryCacheProvider::new(config.max_size_bytes, ttl);
+                if let Some(client) = config.metrics_client {
+                    provider = provider.with_metrics(client);
+                }
                 let cache = Arc::new(provider);
 
                 info!(

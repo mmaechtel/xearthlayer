@@ -256,19 +256,13 @@ where
                 let cache = Arc::clone(&self.memory_cache);
                 let tile = self.tile;
                 let dds_data_for_cache = dds_data.clone();
-                let metrics_for_cache = metrics.clone();
                 tokio::spawn(async move {
                     cache
                         .put(tile.row, tile.col, tile.zoom, dds_data_for_cache)
                         .await;
 
-                    // Emit updated cache size to metrics
-                    let total_cache_size = cache.size_bytes();
-                    metrics_for_cache.memory_cache_size(total_cache_size as u64);
-
                     debug!(
                         tile = ?tile,
-                        cache_size_bytes = total_cache_size,
                         "Memory cache write complete (async)"
                     );
                 });

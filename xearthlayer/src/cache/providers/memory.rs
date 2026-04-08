@@ -23,6 +23,7 @@ use std::time::Duration;
 use moka::future::Cache as MokaCache;
 
 use crate::cache::traits::{BoxFuture, Cache, GcResult, ServiceCacheError};
+use crate::metrics::MetricsClient;
 
 /// In-memory cache provider using moka.
 ///
@@ -35,6 +36,9 @@ pub struct MemoryCacheProvider {
 
     /// Maximum size in bytes.
     max_size_bytes: AtomicU64,
+
+    /// Optional metrics client for self-reporting cache size.
+    metrics_client: Option<MetricsClient>,
 }
 
 impl MemoryCacheProvider {
@@ -64,6 +68,27 @@ impl MemoryCacheProvider {
         Self {
             cache,
             max_size_bytes: AtomicU64::new(max_size_bytes),
+            metrics_client: None,
+        }
+    }
+
+    /// Set the metrics client for self-reporting cache size.
+    ///
+    /// When set, the provider emits `MemoryCacheSizeUpdate` events after
+    /// every mutation (set, delete, gc), keeping the TUI accurate without
+    /// requiring external callers to push size metrics.
+    pub fn with_metrics(mut self, client: MetricsClient) -> Self {
+        self.metrics_client = Some(client);
+        self
+    }
+
+    /// Report current cache size to metrics.
+    ///
+    /// Called internally after every mutation. External callers should
+    /// NOT emit cache size metrics — the provider owns this responsibility.
+    fn report_size_to_metrics(&self) {
+        if let Some(ref client) = self.metrics_client {
+            client.memory_cache_size(self.cache.weighted_size());
         }
     }
 }
@@ -73,6 +98,7 @@ impl Cache for MemoryCacheProvider {
         let key = key.to_string();
         Box::pin(async move {
             self.cache.insert(key, value).await;
+            self.report_size_to_metrics();
             Ok(())
         })
     }
@@ -87,6 +113,7 @@ impl Cache for MemoryCacheProvider {
         Box::pin(async move {
             let existed = self.cache.contains_key(&key);
             self.cache.remove(&key).await;
+            self.report_size_to_metrics();
             Ok(existed)
         })
     }
@@ -132,6 +159,8 @@ impl Cache for MemoryCacheProvider {
 
             let size_after = self.cache.weighted_size();
             let count_after = self.cache.entry_count();
+
+            self.report_size_to_metrics();
 
             Ok(GcResult {
                 entries_removed: count_before.saturating_sub(count_after) as usize,
