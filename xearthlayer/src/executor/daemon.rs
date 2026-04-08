@@ -159,6 +159,9 @@ pub trait DaemonMemoryCache: Send + Sync + 'static {
         data: Vec<u8>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 
+    /// Returns the current cache size in bytes.
+    fn size_bytes(&self) -> u64;
+
     /// Checks if a tile exists in the cache without loading data.
     ///
     /// This is more efficient than `get` when you only need to know if a tile
@@ -195,6 +198,10 @@ where
         data: Vec<u8>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move { crate::executor::MemoryCache::put(self, row, col, zoom, data).await })
+    }
+
+    fn size_bytes(&self) -> u64 {
+        crate::executor::MemoryCache::size_bytes(self) as u64
     }
 }
 
@@ -680,6 +687,7 @@ where
             let cache = Arc::clone(memory_cache);
             let data_for_promote = data.clone();
             let tile_for_promote = tile;
+            let metrics_for_promote = metrics_client.clone();
             tokio::spawn(async move {
                 cache
                     .put(
@@ -689,6 +697,9 @@ where
                         data_for_promote,
                     )
                     .await;
+                if let Some(client) = metrics_for_promote {
+                    client.memory_cache_size(cache.size_bytes());
+                }
             });
 
             if let Some(tx) = request.response_tx {
@@ -952,6 +963,10 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
             self.data.lock().unwrap().insert((row, col, zoom), data);
             Box::pin(async {})
+        }
+
+        fn size_bytes(&self) -> u64 {
+            0
         }
     }
 

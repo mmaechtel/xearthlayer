@@ -386,6 +386,10 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
             Box::pin(async {}) // No-op for testing
         }
+
+        fn size_bytes(&self) -> u64 {
+            0
+        }
     }
 
     #[tokio::test]
