@@ -187,6 +187,34 @@ Adding a field to `BuildAndCacheDdsTask::new()`, `DdsGenerateJob::new()`, and
 - **`CLAUDE.md`**: Add to `[texture]` section description
 - **`CHANGELOG.md`**: Add entry under next version
 
+## CPU vs. GPU Execution
+
+The DDS encoding pipeline supports three backends: Software (CPU), ISPC (CPU/SIMD), and
+wgpu (GPU compute shaders). The color adjustment runs **on CPU**, before the image enters
+any of these backends. This is a deliberate choice:
+
+**Why CPU is correct for the initial implementation:**
+
+1. **Cost is negligible**: Color adjustment is ~2-5 ms for 16.7M pixels (simple arithmetic
+   per channel). Assembly is ~10-20 ms, DDS encoding is 50-200 ms (CPU) or 20-50 ms (GPU).
+   The transform disappears in the noise of the assembly step it is merged with.
+
+2. **GPU separate pass would be slower**: Uploading 64 MB RGBA to GPU (~2-5 ms PCIe transfer),
+   running a compute shader (~0.5 ms), then proceeding to encode adds overhead that exceeds
+   the CPU cost. Net negative.
+
+3. **Image is already in CPU memory**: The JPEG chunks are decoded and assembled on CPU
+   (`execute_blocking`). The RGBA canvas is already in RAM. Touching it with a simple loop
+   costs less than a GPU round-trip.
+
+4. **GPU integration is viable as future optimization**: The color transform could be merged
+   into the existing WGSL encode shader as a first pass before BCn compression. This would
+   add ~0 ms extra (runs on data already uploaded for encoding). But it requires modifying
+   the `block_compression` crate's WGSL shaders — out of scope for the initial feature.
+
+**Decision**: CPU transform merged into the `execute_blocking` assembly call. The `is_identity()`
+short-circuit ensures zero cost when unconfigured (the common case).
+
 ## Cache Invalidation
 
 Changing color settings does **not** auto-invalidate cached DDS tiles. Users must run
