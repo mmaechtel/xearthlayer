@@ -21,29 +21,28 @@ short-circuits when all values are zero (default), ensuring zero overhead for un
 
 ## Config Format
 
-INI-based, flat keys in `[texture]` section. Per-provider overrides use a `_providername` suffix:
+INI-based, flat keys in `[texture]` section. Global values apply to all providers:
 
 ```ini
 [texture]
-; Color adjustment (range: -100 to 100, default: 0)
+; Color adjustment applied after assembly, before DDS encoding
+; Range: -100 to 100, default: 0 (no adjustment)
 saturation = 0
 brightness = 0
 contrast = 0
-
-; Per-provider overrides (optional, override global values for that provider)
-; saturation_bing = 10
-; brightness_bing = -5
-; saturation_go2 = 5
 ```
 
-The parser resolves the active provider at parse time: if `provider.type = bing` and
-`saturation_bing = 10` exists, the effective saturation is 10. Otherwise the global
-value is used.
+Per-provider overrides (e.g., `saturation_bing = 10`) are **deferred to a future version**.
+Most users use a single provider — global values cover the primary use case.
 
-CLI access via `xearthlayer config get/set` works with global keys only:
+The `ConfigKey` enum must include all three keys so that `xearthlayer config upgrade`
+detects missing settings in existing config files and adds them with defaults.
+
+CLI access:
 ```bash
 xearthlayer config set texture.saturation 10
 xearthlayer config get texture.brightness
+xearthlayer config upgrade   # adds missing keys with default 0
 ```
 
 ## Algorithm
@@ -91,7 +90,7 @@ to the other (same pattern as `format`, `compressor`, `gpu_device`).
 
 ```
 config.ini
-  ↓  (parser.rs: resolve per-provider override)
+  ↓  (parser.rs: parse global values)
 TextureSettings.color_adjustment: ColorAdjustment          [config/settings.rs]
   ↓  (run.rs: manually copies field)
 TextureConfig.with_color_adjustment()                      [config/texture.rs]
@@ -144,16 +143,14 @@ Note: `TextureSettings` is the INI-parsed struct. `TextureConfig` (service layer
 - Note: f64→f32 precision loss is acceptable for [-100, 100] integer-like values
 
 **`config/parser.rs`**: In `[texture]` section parsing:
-1. Parse global `saturation`, `brightness`, `contrast` (default 0.0)
-2. Check `saturation_{provider}` etc. for active provider override
-3. Clamp to [-100.0, 100.0]
-4. Assign to `config.texture.color_adjustment`
+1. Parse `saturation`, `brightness`, `contrast` (default 0.0)
+2. Clamp to [-100.0, 100.0]
+3. Assign to `config.texture.color_adjustment`
 
 **`config/writer.rs`**: Add 3 keys to `[texture]` template with comments.
 
 Tests:
 - Global parse roundtrip
-- Provider override wins over global
 - Invalid value → error
 - Missing keys → defaults
 
@@ -176,11 +173,10 @@ Tests:
 **`service/runtime_builder.rs`**:
 - Add `color_adjustment: ColorAdjustment` field
 - Add `.with_color_adjustment()` builder method
-- Update **all 4** `create_factory_*()` methods to pass `self.color_adjustment` to factory:
-  - `create_factory_software()`
-  - `create_factory_ispc()`
-  - `create_factory_gpu()`
-  - `create_factory_gpu_with_fallback()` (if exists)
+- Update **all 3** `create_factory_*()` methods to pass `self.color_adjustment` to factory:
+  - `create_factory_with_disk_cache()`
+  - `create_factory_without_disk_cache()`
+  - `create_factory_with_bridges()`
 
 **`service/facade.rs`**: Call `.with_color_adjustment(config.texture().color_adjustment())`.
 
@@ -226,12 +222,12 @@ All files requiring changes, grouped by step:
 | 2 | `xearthlayer/src/config/defaults.rs` | 3 default constants |
 | 2 | `xearthlayer/src/config/settings.rs` | Add field to `TextureSettings` |
 | 2 | `xearthlayer/src/config/keys.rs` | 3 new ConfigKey variants |
-| 2 | `xearthlayer/src/config/parser.rs` | Parse global + provider-suffix override |
+| 2 | `xearthlayer/src/config/parser.rs` | Parse 3 global values from `[texture]` |
 | 2 | `xearthlayer/src/config/writer.rs` | Template for 3 new keys |
 | 3 | `xearthlayer/src/config/texture.rs` | Add field + builder + accessor to `TextureConfig` |
 | 3 | `xearthlayer-cli/src/commands/run.rs` | Bridge TextureSettings → TextureConfig |
 | 3 | `xearthlayer/src/service/config.rs` | `ServiceConfig` / `ServiceConfigBuilder` |
-| 3 | `xearthlayer/src/service/runtime_builder.rs` | Field + builder + all 4 `create_factory_*()` |
+| 3 | `xearthlayer/src/service/runtime_builder.rs` | Field + builder + all 3 `create_factory_*()` |
 | 3 | `xearthlayer/src/service/facade.rs` | Call `.with_color_adjustment()` |
 | 3 | `xearthlayer/src/jobs/factory.rs` | Field on `DefaultDdsJobFactory` |
 | 3 | `xearthlayer/src/jobs/dds_generate.rs` | Field on `DdsGenerateJob` |
@@ -282,10 +278,11 @@ comments. A future enhancement could include a hash of color settings in the cac
 | `too_many_arguments` clippy lint | Already suppressed on `DdsGenerateJob::new()`. Acceptable. |
 | Existing test breakage from new constructor arg | Mechanical fix: add `ColorAdjustment::default()` to all call sites |
 | Performance regression | `is_identity()` short-circuit. Transform is <5ms vs. 50-200ms encode. |
-| INI parser complexity for provider suffix | Simple `format!("saturation_{}", provider)` lookup, no new abstractions |
+| Config upgrade for existing users | `ConfigKey` variants ensure `config upgrade` adds missing keys with defaults |
 
 ## Future Extensions (not in scope)
 
+- **Per-provider overrides**: `saturation_bing = 10` suffix pattern in INI. Isolated parser change (~20 lines) when users request it.
 - **Tile-to-tile color normalization**: Histogram matching between adjacent tiles (like Ortho4XP V2.0 Color Normalize). Requires neighbor tile data — incompatible with streaming on-demand without significant buffering.
 - **Per-region overrides**: Different settings for different geographic regions.
 - **Cache key hashing**: Include color settings hash in cache key for automatic invalidation.
