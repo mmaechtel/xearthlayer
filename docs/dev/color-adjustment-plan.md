@@ -85,20 +85,24 @@ Expected: **2-5 ms** per tile — negligible vs. DDS encode (50-200 ms).
 
 ## Data Flow
 
+**Important**: `TextureSettings` (config layer) and `TextureConfig` (service layer) are
+two separate types. `ColorAdjustment` must be added to both; `run.rs` copies from one
+to the other (same pattern as `format`, `compressor`, `gpu_device`).
+
 ```
 config.ini
   ↓  (parser.rs: resolve per-provider override)
-ConfigFile.texture.color_adjustment: ColorAdjustment
-  ↓  (run.rs)
-TextureConfig.with_color_adjustment()
-  ↓  (facade.rs)
-RuntimeBuilder.with_color_adjustment()
-  ↓  (runtime_builder.rs → create_factory)
-DefaultDdsJobFactory { color_adjustment }
+TextureSettings.color_adjustment: ColorAdjustment          [config/settings.rs]
+  ↓  (run.rs: manually copies field)
+TextureConfig.with_color_adjustment()                      [config/texture.rs]
+  ↓  (facade.rs: reads from ServiceConfig)
+RuntimeBuilder.with_color_adjustment()                     [service/runtime_builder.rs]
+  ↓  (runtime_builder.rs → all 4 create_factory_* methods)
+DefaultDdsJobFactory { color_adjustment }                  [jobs/factory.rs]
   ↓  (factory.rs → create_job)
-DdsGenerateJob { color_adjustment }
+DdsGenerateJob { color_adjustment }                        [jobs/dds_generate.rs]
   ↓  (dds_generate.rs → create_tasks)
-BuildAndCacheDdsTask { color_adjustment }
+BuildAndCacheDdsTask { color_adjustment }                  [tasks/build_and_cache_dds.rs]
   ↓  (build_and_cache_dds.rs → execute)
 apply_to_image(&mut canvas)  // between assembly and encode
 ```
@@ -109,10 +113,11 @@ apply_to_image(&mut canvas)  // between assembly and encode
 
 **New file**: `xearthlayer/src/texture/color.rs`
 
+- `#[derive(Debug, Clone, Copy, PartialEq)]` — Copy because 12 bytes (3x f32), moved into closures
 - `ColorAdjustment` struct: `saturation: f32, brightness: f32, contrast: f32`
 - `Default` impl (all 0.0)
 - `is_identity() -> bool`
-- `apply_to_image(&self, image: &mut RgbaImage)`
+- `apply_to_image(&self, image: &mut RgbaImage)` — iterates `pixels_mut()`, modifies R/G/B in-place
 - Unit tests:
   - Identity (0,0,0) leaves image unchanged
   - Saturation -100 → grayscale
@@ -120,6 +125,7 @@ apply_to_image(&mut canvas)  // between assembly and encode
   - Contrast 0 → identity
   - Alpha untouched
   - Values clamp, no overflow
+  - Concrete pixel value assertion (e.g., red [255,0,0] at brightness +50 → [~382 clamped to 255, 127, 127])
 
 **Modify**: `xearthlayer/src/texture/mod.rs` — add `mod color; pub use color::ColorAdjustment;`
 
@@ -128,11 +134,14 @@ apply_to_image(&mut canvas)  // between assembly and encode
 **`config/defaults.rs`**: Add 3 constants (all 0.0).
 
 **`config/settings.rs`**: Add `color_adjustment: ColorAdjustment` to `TextureSettings`.
+Note: `TextureSettings` is the INI-parsed struct. `TextureConfig` (service layer) is separate — see Step 3.
 
 **`config/keys.rs`**: Add `TextureSaturation`, `TextureBrightness`, `TextureContrast` variants.
 - `FromStr`: `"texture.saturation"` etc.
-- Validation: `FloatRangeSpec::new(-100.0, 100.0)` (already exists)
-- `get()`/`set_unchecked()` read/write `config.texture.color_adjustment.*`
+- Validation: `FloatRangeSpec::new(-100.0, 100.0)` (already exists, uses f64 internally)
+- `get()`: read `config.texture.color_adjustment.saturation` as f32, format to string
+- `set_unchecked()`: parse string to f64, cast to f32, write to struct
+- Note: f64→f32 precision loss is acceptable for [-100, 100] integer-like values
 
 **`config/parser.rs`**: In `[texture]` section parsing:
 1. Parse global `saturation`, `brightness`, `contrast` (default 0.0)
@@ -150,14 +159,30 @@ Tests:
 
 ### Step 3: Thread through pipeline
 
+**Two config types must be updated** (they are separate structs, manually bridged in `run.rs`):
+
+**`config/texture.rs`** (`TextureConfig` — service layer):
+- Add `color_adjustment: ColorAdjustment` field
+- Add `.with_color_adjustment(adj: ColorAdjustment) -> Self` builder method
+- Add `color_adjustment(&self) -> ColorAdjustment` accessor
+
+**`xearthlayer-cli/src/commands/run.rs`** (bridges TextureSettings → TextureConfig):
+- Add `.with_color_adjustment(config.texture.color_adjustment)` to the TextureConfig builder chain
+  (same pattern as existing `.with_compressor()`, `.with_gpu_device()`)
+
+**`service/config.rs`** (`ServiceConfig` / `ServiceConfigBuilder`):
+- If `TextureConfig` is accessed via `ServiceConfig.texture()`, ensure color_adjustment is available
+
 **`service/runtime_builder.rs`**:
 - Add `color_adjustment: ColorAdjustment` field
 - Add `.with_color_adjustment()` builder method
-- Pass to factory in `create_factory_*()` methods
+- Update **all 4** `create_factory_*()` methods to pass `self.color_adjustment` to factory:
+  - `create_factory_software()`
+  - `create_factory_ispc()`
+  - `create_factory_gpu()`
+  - `create_factory_gpu_with_fallback()` (if exists)
 
 **`service/facade.rs`**: Call `.with_color_adjustment(config.texture().color_adjustment())`.
-
-**`xearthlayer-cli/src/commands/run.rs`**: Set on `TextureConfig`.
 
 **`jobs/factory.rs`**: Add field to `DefaultDdsJobFactory`, pass to jobs.
 
@@ -179,13 +204,42 @@ let image_result = self.executor.execute_blocking(move || {
 
 Adding a field to `BuildAndCacheDdsTask::new()`, `DdsGenerateJob::new()`, and
 `DefaultDdsJobFactory::new()` breaks existing callers. Update all to pass
-`ColorAdjustment::default()`. This includes test files.
+`ColorAdjustment::default()`. This includes:
+- Test files in `tasks/`, `jobs/`, `service/`
+- Any integration tests that construct these types directly
+- `ServiceConfig` / `ServiceConfigBuilder` if they construct `TextureConfig`
 
 ### Step 5: Documentation
 
 - **`docs/configuration.md`**: Document 3 new keys + per-provider override syntax
 - **`CLAUDE.md`**: Add to `[texture]` section description
 - **`CHANGELOG.md`**: Add entry under next version
+
+## Complete File List
+
+All files requiring changes, grouped by step:
+
+| Step | File | Change |
+|------|------|--------|
+| 1 | `xearthlayer/src/texture/color.rs` | **NEW** — ColorAdjustment struct + transform + tests |
+| 1 | `xearthlayer/src/texture/mod.rs` | Add `mod color; pub use color::ColorAdjustment;` |
+| 2 | `xearthlayer/src/config/defaults.rs` | 3 default constants |
+| 2 | `xearthlayer/src/config/settings.rs` | Add field to `TextureSettings` |
+| 2 | `xearthlayer/src/config/keys.rs` | 3 new ConfigKey variants |
+| 2 | `xearthlayer/src/config/parser.rs` | Parse global + provider-suffix override |
+| 2 | `xearthlayer/src/config/writer.rs` | Template for 3 new keys |
+| 3 | `xearthlayer/src/config/texture.rs` | Add field + builder + accessor to `TextureConfig` |
+| 3 | `xearthlayer-cli/src/commands/run.rs` | Bridge TextureSettings → TextureConfig |
+| 3 | `xearthlayer/src/service/config.rs` | `ServiceConfig` / `ServiceConfigBuilder` |
+| 3 | `xearthlayer/src/service/runtime_builder.rs` | Field + builder + all 4 `create_factory_*()` |
+| 3 | `xearthlayer/src/service/facade.rs` | Call `.with_color_adjustment()` |
+| 3 | `xearthlayer/src/jobs/factory.rs` | Field on `DefaultDdsJobFactory` |
+| 3 | `xearthlayer/src/jobs/dds_generate.rs` | Field on `DdsGenerateJob` |
+| 3 | `xearthlayer/src/tasks/build_and_cache_dds.rs` | Field + apply between assembly and encode |
+| 4 | Various test files | Add `ColorAdjustment::default()` to all broken call sites |
+| 5 | `docs/configuration.md` | Document 3 keys + provider override syntax |
+| 5 | `CLAUDE.md` | Add to `[texture]` section description |
+| 5 | `CHANGELOG.md` | Add entry |
 
 ## CPU vs. GPU Execution
 
