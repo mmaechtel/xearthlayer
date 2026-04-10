@@ -156,7 +156,9 @@ impl Widget for CacheWidgetCompact<'_> {
             ])
             .split(area);
 
-        // Memory tier
+        // Memory tier — FUSE-only counts/rate so the widget reflects
+        // X-Plane's actual cache experience rather than aggregate totals
+        // diluted by prefetch/prewarm traffic (see #171).
         render_cache_tier(
             buf,
             columns[0],
@@ -165,13 +167,13 @@ impl Widget for CacheWidgetCompact<'_> {
                 color: Color::Magenta,
                 current_bytes: self.snapshot.memory_cache_size_bytes,
                 max_bytes: self.config.memory_max_bytes as u64,
-                hit_rate: self.snapshot.memory_cache_hit_rate * 100.0,
-                hits: self.snapshot.memory_cache_hits,
-                misses: self.snapshot.memory_cache_misses,
+                hit_rate: self.snapshot.fuse_memory_cache_hit_rate * 100.0,
+                hits: self.snapshot.fuse_memory_cache_hits,
+                misses: self.snapshot.fuse_memory_cache_misses,
             },
         );
 
-        // DDS Disk tier
+        // DDS Disk tier — FUSE-only counts/rate (see #171).
         render_cache_tier(
             buf,
             columns[1],
@@ -180,9 +182,9 @@ impl Widget for CacheWidgetCompact<'_> {
                 color: Color::Blue,
                 current_bytes: self.snapshot.dds_disk_cache_size_bytes,
                 max_bytes: self.config.dds_disk_max_bytes as u64,
-                hit_rate: self.snapshot.dds_disk_cache_hit_rate * 100.0,
-                hits: self.snapshot.dds_disk_cache_hits,
-                misses: self.snapshot.dds_disk_cache_misses,
+                hit_rate: self.snapshot.fuse_dds_disk_cache_hit_rate * 100.0,
+                hits: self.snapshot.fuse_dds_disk_cache_hits,
+                misses: self.snapshot.fuse_dds_disk_cache_misses,
             },
         );
 
@@ -238,7 +240,7 @@ mod tests {
     #[test]
     fn test_dds_disk_hits_formatted() {
         let snapshot = TelemetrySnapshot {
-            dds_disk_cache_hits: 17_300,
+            fuse_dds_disk_cache_hits: 17_300,
             ..Default::default()
         };
         let output = render_compact_to_string(&snapshot);
@@ -266,13 +268,103 @@ mod tests {
     #[test]
     fn test_memory_hits_formatted() {
         let snapshot = TelemetrySnapshot {
-            memory_cache_hits: 1_500_000,
+            fuse_memory_cache_hits: 1_500_000,
             ..Default::default()
         };
         let output = render_compact_to_string(&snapshot);
         assert!(
             output.contains("1.5M hits"),
             "Memory hits should be formatted, got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_memory_tier_uses_fuse_only_rate() {
+        // Regression for #171: widget must render the FUSE-only memory hit rate
+        // to show X-Plane's actual cache experience, not the aggregate polluted
+        // by prefetch traffic.
+        let snapshot = TelemetrySnapshot {
+            // Aggregate: looks like ~40% hit rate (dominated by prefetch misses)
+            memory_cache_hits: 40,
+            memory_cache_misses: 60,
+            memory_cache_hit_rate: 0.40,
+            // FUSE only: X-Plane actually sees 90% hit rate
+            fuse_memory_cache_hits: 90,
+            fuse_memory_cache_misses: 10,
+            fuse_memory_cache_hit_rate: 0.90,
+            ..Default::default()
+        };
+        let output = render_compact_to_string(&snapshot);
+        assert!(
+            output.contains("90.0%"),
+            "Memory tier should render FUSE rate 90.0%, got:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("40.0%"),
+            "Memory tier must NOT render aggregate rate 40.0%, got:\n{}",
+            output
+        );
+        assert!(
+            output.contains("90 hits"),
+            "Memory tier should render FUSE hits (90), got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_dds_disk_tier_uses_fuse_only_rate() {
+        // Regression for #171: widget must render the FUSE-only DDS disk hit
+        // rate, not the aggregate polluted by prefetch traffic.
+        let snapshot = TelemetrySnapshot {
+            // Aggregate: dominated by prefetch misses
+            dds_disk_cache_hits: 200,
+            dds_disk_cache_misses: 800,
+            dds_disk_cache_hit_rate: 0.20,
+            // FUSE only: 80% hit rate
+            fuse_dds_disk_cache_hits: 80,
+            fuse_dds_disk_cache_misses: 20,
+            fuse_dds_disk_cache_hit_rate: 0.80,
+            ..Default::default()
+        };
+        let output = render_compact_to_string(&snapshot);
+        assert!(
+            output.contains("80.0%"),
+            "DDS disk tier should render FUSE rate 80.0%, got:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("20.0%"),
+            "DDS disk tier must NOT render aggregate rate 20.0%, got:\n{}",
+            output
+        );
+        assert!(
+            output.contains("80 hits"),
+            "DDS disk tier should render FUSE hits (80), got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_chunk_tier_still_uses_aggregate() {
+        // Chunks are fine as aggregate (all chunk reads flow through one path,
+        // no origin discrimination needed). This pins that behavior.
+        let snapshot = TelemetrySnapshot {
+            chunk_disk_cache_hits: 5000,
+            chunk_disk_cache_misses: 1000,
+            chunk_disk_cache_hit_rate: 5000.0 / 6000.0, // ~83.3%
+            ..Default::default()
+        };
+        let output = render_compact_to_string(&snapshot);
+        assert!(
+            output.contains("83.3%"),
+            "Chunks tier should render aggregate rate 83.3%, got:\n{}",
+            output
+        );
+        assert!(
+            output.contains("5.0K hits"),
+            "Chunks tier should render aggregate hit count, got:\n{}",
             output
         );
     }

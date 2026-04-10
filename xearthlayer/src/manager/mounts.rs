@@ -714,11 +714,16 @@ impl MountManager {
             memory_cache_hits: 0,
             memory_cache_misses: 0,
             memory_cache_hit_rate: 0.0,
+            fuse_memory_cache_hits: 0,
+            fuse_memory_cache_misses: 0,
             fuse_memory_cache_hit_rate: 0.0,
             memory_cache_size_bytes: 0,
             dds_disk_cache_hits: 0,
             dds_disk_cache_misses: 0,
             dds_disk_cache_hit_rate: 0.0,
+            fuse_dds_disk_cache_hits: 0,
+            fuse_dds_disk_cache_misses: 0,
+            fuse_dds_disk_cache_hit_rate: 0.0,
             dds_disk_cache_size_bytes: 0,
             dds_disk_bytes_read: 0,
             chunk_disk_cache_hits: 0,
@@ -774,6 +779,8 @@ impl MountManager {
             total.downloads_active += snapshot.downloads_active;
             total.memory_cache_hits += snapshot.memory_cache_hits;
             total.memory_cache_misses += snapshot.memory_cache_misses;
+            total.fuse_memory_cache_hits += snapshot.fuse_memory_cache_hits;
+            total.fuse_memory_cache_misses += snapshot.fuse_memory_cache_misses;
             // Use max() for cache sizes since all services share the same cache
             // (summing would incorrectly report N times the actual size)
             total.memory_cache_size_bytes = total
@@ -781,6 +788,8 @@ impl MountManager {
                 .max(snapshot.memory_cache_size_bytes);
             total.dds_disk_cache_hits += snapshot.dds_disk_cache_hits;
             total.dds_disk_cache_misses += snapshot.dds_disk_cache_misses;
+            total.fuse_dds_disk_cache_hits += snapshot.fuse_dds_disk_cache_hits;
+            total.fuse_dds_disk_cache_misses += snapshot.fuse_dds_disk_cache_misses;
             total.chunk_disk_cache_hits += snapshot.chunk_disk_cache_hits;
             total.chunk_disk_cache_misses += snapshot.chunk_disk_cache_misses;
             // Disk caches are also shared across services, so use max()
@@ -821,6 +830,20 @@ impl MountManager {
         let memory_total = total.memory_cache_hits + total.memory_cache_misses;
         total.memory_cache_hit_rate = if memory_total > 0 {
             total.memory_cache_hits as f64 / memory_total as f64
+        } else {
+            0.0
+        };
+
+        let fuse_memory_total = total.fuse_memory_cache_hits + total.fuse_memory_cache_misses;
+        total.fuse_memory_cache_hit_rate = if fuse_memory_total > 0 {
+            total.fuse_memory_cache_hits as f64 / fuse_memory_total as f64
+        } else {
+            0.0
+        };
+
+        let fuse_dds_disk_total = total.fuse_dds_disk_cache_hits + total.fuse_dds_disk_cache_misses;
+        total.fuse_dds_disk_cache_hit_rate = if fuse_dds_disk_total > 0 {
+            total.fuse_dds_disk_cache_hits as f64 / fuse_dds_disk_total as f64
         } else {
             0.0
         };

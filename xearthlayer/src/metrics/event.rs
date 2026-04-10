@@ -59,10 +59,15 @@ pub enum MetricEvent {
     DdsDiskCacheHit {
         /// Size of the cached DDS tile in bytes.
         bytes: u64,
+        /// `true` if this was a FUSE (X-Plane) request, `false` for prefetch/prewarm.
+        is_fuse: bool,
     },
 
     /// A DDS tile was not found in the DDS disk cache.
-    DdsDiskCacheMiss,
+    DdsDiskCacheMiss {
+        /// `true` if this was a FUSE (X-Plane) request, `false` for prefetch/prewarm.
+        is_fuse: bool,
+    },
 
     /// A disk cache write operation started.
     DiskWriteStarted,
@@ -206,7 +211,7 @@ impl MetricEvent {
             Self::ChunkDiskCacheHit { .. } => "chunk_disk_cache_hit",
             Self::ChunkDiskCacheMiss => "chunk_disk_cache_miss",
             Self::DdsDiskCacheHit { .. } => "dds_disk_cache_hit",
-            Self::DdsDiskCacheMiss => "dds_disk_cache_miss",
+            Self::DdsDiskCacheMiss { .. } => "dds_disk_cache_miss",
             Self::DiskWriteStarted => "disk_write_started",
             Self::DiskWriteCompleted { .. } => "disk_write_completed",
             Self::DiskCacheInitialSize { .. } => "disk_cache_initial_size",
@@ -278,11 +283,15 @@ mod tests {
     #[test]
     fn test_dds_disk_cache_event_types() {
         assert_eq!(
-            MetricEvent::DdsDiskCacheHit { bytes: 1024 }.event_type(),
+            MetricEvent::DdsDiskCacheHit {
+                bytes: 1024,
+                is_fuse: false
+            }
+            .event_type(),
             "dds_disk_cache_hit"
         );
         assert_eq!(
-            MetricEvent::DdsDiskCacheMiss.event_type(),
+            MetricEvent::DdsDiskCacheMiss { is_fuse: false }.event_type(),
             "dds_disk_cache_miss"
         );
     }

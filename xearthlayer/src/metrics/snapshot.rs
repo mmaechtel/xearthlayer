@@ -59,18 +59,34 @@ pub struct TelemetrySnapshot {
     pub memory_cache_misses: u64,
     /// Memory cache hit rate — all origins (0.0 - 1.0)
     pub memory_cache_hit_rate: f64,
+    /// Memory cache hits from FUSE (X-Plane) requests only.
+    ///
+    /// Used by the cache widget to show X-Plane's actual cache experience,
+    /// uncontaminated by prefetch/prewarm traffic (see #171).
+    pub fuse_memory_cache_hits: u64,
+    /// Memory cache misses from FUSE (X-Plane) requests only.
+    pub fuse_memory_cache_misses: u64,
     /// Memory cache hit rate — FUSE (X-Plane) requests only (0.0 - 1.0)
     pub fuse_memory_cache_hit_rate: f64,
     /// Memory cache current size in bytes
     pub memory_cache_size_bytes: u64,
 
     // === DDS Disk Cache metrics ===
-    /// DDS disk cache hits
+    /// DDS disk cache hits (all origins)
     pub dds_disk_cache_hits: u64,
-    /// DDS disk cache misses
+    /// DDS disk cache misses (all origins)
     pub dds_disk_cache_misses: u64,
-    /// DDS disk cache hit rate (0.0 - 1.0)
+    /// DDS disk cache hit rate — all origins (0.0 - 1.0)
     pub dds_disk_cache_hit_rate: f64,
+    /// DDS disk cache hits from FUSE (X-Plane) requests only.
+    ///
+    /// Used by the cache widget to show X-Plane's actual cache experience,
+    /// uncontaminated by prefetch/prewarm traffic (see #171).
+    pub fuse_dds_disk_cache_hits: u64,
+    /// DDS disk cache misses from FUSE (X-Plane) requests only.
+    pub fuse_dds_disk_cache_misses: u64,
+    /// DDS disk cache hit rate — FUSE (X-Plane) requests only (0.0 - 1.0)
+    pub fuse_dds_disk_cache_hit_rate: f64,
     /// DDS disk cache current size in bytes
     pub dds_disk_cache_size_bytes: u64,
     /// DDS disk bytes read this session (from cache hits)
@@ -142,11 +158,16 @@ impl Default for TelemetrySnapshot {
             memory_cache_hits: 0,
             memory_cache_misses: 0,
             memory_cache_hit_rate: 0.0,
+            fuse_memory_cache_hits: 0,
+            fuse_memory_cache_misses: 0,
             fuse_memory_cache_hit_rate: 0.0,
             memory_cache_size_bytes: 0,
             dds_disk_cache_hits: 0,
             dds_disk_cache_misses: 0,
             dds_disk_cache_hit_rate: 0.0,
+            fuse_dds_disk_cache_hits: 0,
+            fuse_dds_disk_cache_misses: 0,
+            fuse_dds_disk_cache_hit_rate: 0.0,
             dds_disk_cache_size_bytes: 0,
             dds_disk_bytes_read: 0,
             chunk_disk_cache_hits: 0,
@@ -387,11 +408,16 @@ mod tests {
             memory_cache_hits: 30,
             memory_cache_misses: 60,
             memory_cache_hit_rate: 0.333,
+            fuse_memory_cache_hits: 15,
+            fuse_memory_cache_misses: 10,
             fuse_memory_cache_hit_rate: 0.6,
             memory_cache_size_bytes: 500_000_000,
             dds_disk_cache_hits: 17300,
             dds_disk_cache_misses: 1200,
             dds_disk_cache_hit_rate: 17300.0 / 18500.0,
+            fuse_dds_disk_cache_hits: 8500,
+            fuse_dds_disk_cache_misses: 600,
+            fuse_dds_disk_cache_hit_rate: 8500.0 / 9100.0,
             dds_disk_cache_size_bytes: 289_000_000_000,
             dds_disk_bytes_read: 190_000_000_000,
             chunk_disk_cache_hits: 5000,

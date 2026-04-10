@@ -158,10 +158,17 @@ pub struct AggregatedState {
     // =========================================================================
     // DDS Disk Cache Metrics
     // =========================================================================
-    /// DDS disk cache hits.
+    /// DDS disk cache hits (all origins).
     pub dds_disk_cache_hits: u64,
-    /// DDS disk cache misses.
+    /// DDS disk cache misses (all origins).
     pub dds_disk_cache_misses: u64,
+    /// DDS disk cache hits from FUSE (X-Plane) requests only.
+    ///
+    /// Used by the cache widget to show X-Plane's actual cache experience,
+    /// uncontaminated by prefetch/prewarm traffic (see #171).
+    pub fuse_dds_disk_cache_hits: u64,
+    /// DDS disk cache misses from FUSE (X-Plane) requests only.
+    pub fuse_dds_disk_cache_misses: u64,
     /// Total bytes read from DDS disk cache (cache hits).
     pub dds_disk_bytes_read: u64,
     /// Current DDS disk cache size in bytes (absolute value from LRU index).
@@ -262,6 +269,8 @@ impl AggregatedState {
             chunk_disk_cache_size_bytes: 0,
             dds_disk_cache_hits: 0,
             dds_disk_cache_misses: 0,
+            fuse_dds_disk_cache_hits: 0,
+            fuse_dds_disk_cache_misses: 0,
             dds_disk_bytes_read: 0,
             dds_disk_cache_size_bytes: 0,
             memory_cache_hits: 0,
@@ -310,6 +319,8 @@ impl AggregatedState {
         self.disk_write_time_us = 0;
         self.dds_disk_cache_hits = 0;
         self.dds_disk_cache_misses = 0;
+        self.fuse_dds_disk_cache_hits = 0;
+        self.fuse_dds_disk_cache_misses = 0;
         self.dds_disk_bytes_read = 0;
         self.memory_cache_hits = 0;
         self.memory_cache_misses = 0;

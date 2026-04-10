@@ -634,9 +634,11 @@ where
             .instrument(tracing::trace_span!(target: "profiling", "dds_disk_cache_check"))
             .await;
         if dds_disk_result.is_none() {
-            // Track DDS disk cache miss in metrics
+            // Track DDS disk cache miss in metrics.
+            // Passes origin.is_fuse() so the daemon can maintain a FUSE-only
+            // counter separate from prefetch/prewarm traffic (see #171).
             if let Some(client) = metrics_client {
-                client.dds_disk_cache_miss();
+                client.dds_disk_cache_miss(origin.is_fuse());
             }
             debug!(
                 tile_row = tile.row,
@@ -661,9 +663,11 @@ where
                 "DDS disk cache hit — serving without re-encode"
             );
 
-            // Track DDS disk cache hit in metrics
+            // Track DDS disk cache hit in metrics.
+            // Passes origin.is_fuse() so the daemon can maintain a FUSE-only
+            // counter separate from prefetch/prewarm traffic (see #171).
             if let Some(client) = metrics_client {
-                client.dds_disk_cache_hit(data.len() as u64);
+                client.dds_disk_cache_hit(data.len() as u64, origin.is_fuse());
                 if origin.is_fuse() {
                     client.fuse_tile_served();
                 }

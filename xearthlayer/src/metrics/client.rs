@@ -116,15 +116,27 @@ impl MetricsClient {
     // =========================================================================
 
     /// Records a DDS disk cache hit (tile-level granularity).
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Size of the cached DDS tile
+    /// * `is_fuse` - `true` if this was a FUSE (X-Plane) request, `false` for
+    ///   prefetch/prewarm. The daemon uses this to maintain a FUSE-only counter
+    ///   that powers the cache widget's X-Plane-experience hit rate (see #171).
     #[inline]
-    pub fn dds_disk_cache_hit(&self, bytes: u64) {
-        self.send(MetricEvent::DdsDiskCacheHit { bytes });
+    pub fn dds_disk_cache_hit(&self, bytes: u64, is_fuse: bool) {
+        self.send(MetricEvent::DdsDiskCacheHit { bytes, is_fuse });
     }
 
     /// Records a DDS disk cache miss.
+    ///
+    /// # Arguments
+    ///
+    /// * `is_fuse` - `true` if this was a FUSE (X-Plane) request, `false` for
+    ///   prefetch/prewarm.
     #[inline]
-    pub fn dds_disk_cache_miss(&self) {
-        self.send(MetricEvent::DdsDiskCacheMiss);
+    pub fn dds_disk_cache_miss(&self, is_fuse: bool) {
+        self.send(MetricEvent::DdsDiskCacheMiss { is_fuse });
     }
 
     /// Records a disk write starting.
@@ -429,15 +441,18 @@ mod tests {
     #[tokio::test]
     async fn test_client_dds_disk_cache_events() {
         let (client, mut rx) = create_client();
-        client.dds_disk_cache_hit(11_000_000);
-        client.dds_disk_cache_miss();
+        client.dds_disk_cache_hit(11_000_000, true);
+        client.dds_disk_cache_miss(false);
         assert!(matches!(
             rx.recv().await,
-            Some(MetricEvent::DdsDiskCacheHit { bytes: 11_000_000 })
+            Some(MetricEvent::DdsDiskCacheHit {
+                bytes: 11_000_000,
+                is_fuse: true
+            })
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(MetricEvent::DdsDiskCacheMiss)
+            Some(MetricEvent::DdsDiskCacheMiss { is_fuse: false })
         ));
     }
 
