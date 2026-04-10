@@ -13,8 +13,8 @@ pub trait OptionalMetrics {
     fn download_retried(&self);
     fn chunk_disk_cache_hit(&self, bytes: u64);
     fn chunk_disk_cache_miss(&self);
-    fn dds_disk_cache_hit(&self, bytes: u64);
-    fn dds_disk_cache_miss(&self);
+    fn dds_disk_cache_hit(&self, bytes: u64, is_fuse: bool);
+    fn dds_disk_cache_miss(&self, is_fuse: bool);
     fn disk_write_started(&self);
     fn disk_write_completed(&self, bytes: u64, duration_us: u64);
     fn disk_cache_initial_size(&self, bytes: u64);
@@ -79,16 +79,16 @@ impl OptionalMetrics for Option<MetricsClient> {
     }
 
     #[inline]
-    fn dds_disk_cache_hit(&self, bytes: u64) {
+    fn dds_disk_cache_hit(&self, bytes: u64, is_fuse: bool) {
         if let Some(client) = self {
-            client.dds_disk_cache_hit(bytes);
+            client.dds_disk_cache_hit(bytes, is_fuse);
         }
     }
 
     #[inline]
-    fn dds_disk_cache_miss(&self) {
+    fn dds_disk_cache_miss(&self, is_fuse: bool) {
         if let Some(client) = self {
-            client.dds_disk_cache_miss();
+            client.dds_disk_cache_miss(is_fuse);
         }
     }
 

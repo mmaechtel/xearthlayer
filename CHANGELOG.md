@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI cache hit rates reflect X-Plane experience, not prefetch traffic** ([#171](https://github.com/samsoir/xearthlayer/issues/171)): The Memory and DDS Disk tiers in the cache widget now render FUSE-only hit rates and counts, so the percentages reflect how well the cache is serving X-Plane's actual requests. Previously, aggregate counters included prefetch and prewarm traffic — a long-haul flight with a 100%-full memory cache would show ~47% hit rate because prefetch misses dominated the denominator. Added `is_fuse` discriminator to `DdsDiskCacheHit`/`DdsDiskCacheMiss` events, paired FUSE-only counters in state and snapshot, and wired the executor daemon to tag events based on `RequestOrigin`. The Chunks tier continues to use aggregate (there's only one chunk-read path, so aggregate equals FUSE there). Also fixed a latent bug in `manager/mounts.rs` where `fuse_memory_cache_hit_rate` was never recalculated during multi-service aggregation.
+
 ### Changed
 
 - **Three-tier cache metrics in TUI** ([#166](https://github.com/samsoir/xearthlayer/issues/166)): Split the combined "Disk" cache display into separate DDS Disk and Chunks tiers with independent hit rates. The TUI now shows a 3-column layout (Memory, DDS Disk, Chunks) with per-tier progress bars and hit/miss counters. DDS disk hit rate (93%+ in flight tests) is no longer hidden by chunk-level event volume.

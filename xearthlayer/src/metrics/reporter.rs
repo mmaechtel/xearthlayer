@@ -98,6 +98,13 @@ impl MetricsReporter for TuiReporter {
             0.0
         };
 
+        let fuse_dds_disk_total = state.fuse_dds_disk_cache_hits + state.fuse_dds_disk_cache_misses;
+        let fuse_dds_disk_hit_rate = if fuse_dds_disk_total > 0 {
+            state.fuse_dds_disk_cache_hits as f64 / fuse_dds_disk_total as f64
+        } else {
+            0.0
+        };
+
         let chunk_disk_total = state.chunk_disk_cache_hits + state.chunk_disk_cache_misses;
         let chunk_disk_hit_rate = if chunk_disk_total > 0 {
             state.chunk_disk_cache_hits as f64 / chunk_disk_total as f64
@@ -156,11 +163,16 @@ impl MetricsReporter for TuiReporter {
             memory_cache_hits: state.memory_cache_hits,
             memory_cache_misses: state.memory_cache_misses,
             memory_cache_hit_rate: memory_hit_rate,
+            fuse_memory_cache_hits: state.fuse_memory_cache_hits,
+            fuse_memory_cache_misses: state.fuse_memory_cache_misses,
             fuse_memory_cache_hit_rate: fuse_memory_hit_rate,
             memory_cache_size_bytes: state.memory_cache_size_bytes,
             dds_disk_cache_hits: state.dds_disk_cache_hits,
             dds_disk_cache_misses: state.dds_disk_cache_misses,
             dds_disk_cache_hit_rate: dds_disk_hit_rate,
+            fuse_dds_disk_cache_hits: state.fuse_dds_disk_cache_hits,
+            fuse_dds_disk_cache_misses: state.fuse_dds_disk_cache_misses,
+            fuse_dds_disk_cache_hit_rate: fuse_dds_disk_hit_rate,
             dds_disk_cache_size_bytes: state.dds_disk_cache_size_bytes,
             dds_disk_bytes_read: state.dds_disk_bytes_read,
             chunk_disk_cache_hits: state.chunk_disk_cache_hits,
@@ -270,6 +282,72 @@ mod tests {
         assert_eq!(snapshot.memory_cache_hit_rate, 0.0);
         assert_eq!(snapshot.dds_disk_cache_hit_rate, 0.0);
         assert_eq!(snapshot.chunk_disk_cache_hit_rate, 0.0);
+    }
+
+    #[test]
+    fn test_fuse_dds_disk_cache_hit_rate_exposed_on_snapshot() {
+        // Regression for #171: snapshot must expose FUSE-only DDS disk hit rate
+        // and underlying hit/miss counts, computed from `fuse_dds_disk_cache_*`
+        // counters (not the aggregate ones that include prefetch traffic).
+        let mut state = AggregatedState::new();
+        state.dds_disk_cache_hits = 200; // aggregate
+        state.dds_disk_cache_misses = 800;
+        state.fuse_dds_disk_cache_hits = 80; // FUSE only
+        state.fuse_dds_disk_cache_misses = 20;
+
+        let history = TimeSeriesHistory::default();
+        let reporter = TuiReporter::new();
+        let snapshot = reporter.report(&state, &history);
+
+        assert_eq!(snapshot.fuse_dds_disk_cache_hits, 80);
+        assert_eq!(snapshot.fuse_dds_disk_cache_misses, 20);
+        assert!(
+            (snapshot.fuse_dds_disk_cache_hit_rate - 0.8).abs() < 0.001,
+            "expected fuse rate 0.8, got {}",
+            snapshot.fuse_dds_disk_cache_hit_rate
+        );
+        // Aggregate still reflects the combined counts
+        assert!(
+            (snapshot.dds_disk_cache_hit_rate - 0.2).abs() < 0.001,
+            "aggregate rate should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_fuse_dds_disk_cache_hit_rate_zero_total() {
+        let state = AggregatedState::new();
+        let history = TimeSeriesHistory::default();
+        let reporter = TuiReporter::new();
+        let snapshot = reporter.report(&state, &history);
+        assert_eq!(snapshot.fuse_dds_disk_cache_hit_rate, 0.0);
+    }
+
+    #[test]
+    fn test_fuse_memory_cache_counts_exposed_on_snapshot() {
+        // Regression for #171: the snapshot must expose FUSE-only memory hit/miss
+        // counts so the cache widget can render X-Plane's actual experience
+        // rather than aggregate totals diluted by prefetch traffic.
+        let mut state = AggregatedState::new();
+        state.memory_cache_hits = 150; // aggregate (FUSE + prefetch)
+        state.memory_cache_misses = 50;
+        state.fuse_memory_cache_hits = 90; // FUSE only
+        state.fuse_memory_cache_misses = 10;
+
+        let history = TimeSeriesHistory::default();
+        let reporter = TuiReporter::new();
+        let snapshot = reporter.report(&state, &history);
+
+        assert_eq!(
+            snapshot.fuse_memory_cache_hits, 90,
+            "snapshot must carry FUSE-only memory hit count"
+        );
+        assert_eq!(
+            snapshot.fuse_memory_cache_misses, 10,
+            "snapshot must carry FUSE-only memory miss count"
+        );
+        // Aggregate fields should remain unchanged — still useful as diagnostics.
+        assert_eq!(snapshot.memory_cache_hits, 150);
+        assert_eq!(snapshot.memory_cache_misses, 50);
     }
 
     #[test]

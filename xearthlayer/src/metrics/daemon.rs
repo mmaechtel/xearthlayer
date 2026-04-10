@@ -188,12 +188,18 @@ impl MetricsDaemon {
             MetricEvent::DdsDiskCacheSizeUpdate { bytes } => {
                 self.state.dds_disk_cache_size_bytes = bytes;
             }
-            MetricEvent::DdsDiskCacheHit { bytes } => {
+            MetricEvent::DdsDiskCacheHit { bytes, is_fuse } => {
                 self.state.dds_disk_cache_hits += 1;
                 self.state.dds_disk_bytes_read += bytes;
+                if is_fuse {
+                    self.state.fuse_dds_disk_cache_hits += 1;
+                }
             }
-            MetricEvent::DdsDiskCacheMiss => {
+            MetricEvent::DdsDiskCacheMiss { is_fuse } => {
                 self.state.dds_disk_cache_misses += 1;
+                if is_fuse {
+                    self.state.fuse_dds_disk_cache_misses += 1;
+                }
             }
 
             // Memory cache events
@@ -443,12 +449,58 @@ mod tests {
     #[test]
     fn test_process_dds_disk_cache_events() {
         let (mut daemon, _tx) = create_daemon();
-        daemon.process_event(MetricEvent::DdsDiskCacheHit { bytes: 11_000_000 });
-        daemon.process_event(MetricEvent::DdsDiskCacheHit { bytes: 11_000_000 });
-        daemon.process_event(MetricEvent::DdsDiskCacheMiss);
+        daemon.process_event(MetricEvent::DdsDiskCacheHit {
+            bytes: 11_000_000,
+            is_fuse: false,
+        });
+        daemon.process_event(MetricEvent::DdsDiskCacheHit {
+            bytes: 11_000_000,
+            is_fuse: false,
+        });
+        daemon.process_event(MetricEvent::DdsDiskCacheMiss { is_fuse: false });
         assert_eq!(daemon.state.dds_disk_cache_hits, 2);
         assert_eq!(daemon.state.dds_disk_cache_misses, 1);
         assert_eq!(daemon.state.dds_disk_bytes_read, 22_000_000);
+    }
+
+    #[test]
+    fn test_dds_disk_cache_events_segregate_fuse_from_aggregate() {
+        // Regression for #171: DDS disk cache events tagged with `is_fuse: true`
+        // must increment both aggregate and FUSE-only counters; events with
+        // `is_fuse: false` (prefetch, prewarm) must only hit the aggregate.
+        let (mut daemon, _tx) = create_daemon();
+
+        // FUSE hit → both counters
+        daemon.process_event(MetricEvent::DdsDiskCacheHit {
+            bytes: 1_000,
+            is_fuse: true,
+        });
+        assert_eq!(daemon.state.dds_disk_cache_hits, 1);
+        assert_eq!(daemon.state.fuse_dds_disk_cache_hits, 1);
+
+        // Prefetch hit → aggregate only
+        daemon.process_event(MetricEvent::DdsDiskCacheHit {
+            bytes: 2_000,
+            is_fuse: false,
+        });
+        assert_eq!(daemon.state.dds_disk_cache_hits, 2);
+        assert_eq!(
+            daemon.state.fuse_dds_disk_cache_hits, 1,
+            "prefetch hits must NOT touch the FUSE-only counter"
+        );
+
+        // FUSE miss → both counters
+        daemon.process_event(MetricEvent::DdsDiskCacheMiss { is_fuse: true });
+        assert_eq!(daemon.state.dds_disk_cache_misses, 1);
+        assert_eq!(daemon.state.fuse_dds_disk_cache_misses, 1);
+
+        // Prefetch miss → aggregate only
+        daemon.process_event(MetricEvent::DdsDiskCacheMiss { is_fuse: false });
+        assert_eq!(daemon.state.dds_disk_cache_misses, 2);
+        assert_eq!(
+            daemon.state.fuse_dds_disk_cache_misses, 1,
+            "prefetch misses must NOT touch the FUSE-only counter"
+        );
     }
 
     #[test]
