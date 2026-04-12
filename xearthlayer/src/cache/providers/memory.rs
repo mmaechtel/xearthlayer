@@ -105,7 +105,22 @@ impl Cache for MemoryCacheProvider {
 
     fn get(&self, key: &str) -> BoxFuture<'_, Result<Option<Vec<u8>>, ServiceCacheError>> {
         let key = key.to_string();
-        Box::pin(async move { Ok(self.cache.get(&key).await) })
+        Box::pin(async move {
+            let result = self.cache.get(&key).await;
+            match &result {
+                Some(data) => {
+                    tracing::debug!(
+                        key = %key,
+                        size = data.len(),
+                        "Memory cache hit"
+                    );
+                }
+                None => {
+                    tracing::debug!(key = %key, "Memory cache miss");
+                }
+            }
+            Ok(result)
+        })
     }
 
     fn delete(&self, key: &str) -> BoxFuture<'_, Result<bool, ServiceCacheError>> {

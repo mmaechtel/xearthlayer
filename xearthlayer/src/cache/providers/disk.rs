@@ -114,7 +114,9 @@ impl DiskCacheProvider {
             Ok(stats) => {
                 info!(
                     dir = %config.directory.display(),
+                    tier = if config.is_dds_tier { "dds" } else { "chunks" },
                     files = stats.files_indexed,
+                    skipped = stats.skipped_unparseable,
                     size_mb = stats.total_bytes / 1_000_000,
                     max_mb = config.max_size_bytes / 1_000_000,
                     "Disk cache provider started"
@@ -274,6 +276,14 @@ impl Cache for DiskCacheProvider {
         let key_owned = key.to_string();
 
         Box::pin(async move {
+            debug!(
+                key = %key_owned,
+                size,
+                path = %path.display(),
+                tier = if self.is_dds_tier { "dds" } else { "chunks" },
+                "Disk cache write starting"
+            );
+
             // Ensure parent directory exists (creates region dir on first write)
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent)
@@ -315,33 +325,38 @@ impl Cache for DiskCacheProvider {
                 Ok(data) => {
                     // Update LRU index access time
                     self.lru_index.touch(&key_owned);
-                    debug!(key = %key_owned, size = data.len(), is_dds, "Cache hit");
+                    debug!(
+                        key = %key_owned,
+                        size = data.len(),
+                        path = %path.display(),
+                        tier = if is_dds { "dds" } else { "chunks" },
+                        "Disk cache hit"
+                    );
                     Ok(Some(data))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // File not on disk - ensure index is clean
-                    if self.lru_index.contains(&key_owned) {
+                    let was_in_index = self.lru_index.contains(&key_owned);
+                    if was_in_index {
                         self.lru_index.remove(&key_owned);
-                        debug!(key = %key_owned, "Removed stale index entry");
                     }
-                    if is_dds {
-                        debug!(
-                            key = %key_owned,
-                            path = %path.display(),
-                            "DDS disk cache miss — file not found at computed path"
-                        );
-                    }
+                    debug!(
+                        key = %key_owned,
+                        path = %path.display(),
+                        tier = if is_dds { "dds" } else { "chunks" },
+                        was_in_index,
+                        "Disk cache miss — file not found"
+                    );
                     Ok(None)
                 }
                 Err(e) => {
-                    if is_dds {
-                        warn!(
-                            key = %key_owned,
-                            path = %path.display(),
-                            error = %e,
-                            "DDS disk cache read error (not NotFound)"
-                        );
-                    }
+                    warn!(
+                        key = %key_owned,
+                        path = %path.display(),
+                        tier = if is_dds { "dds" } else { "chunks" },
+                        error = %e,
+                        "Disk cache read error"
+                    );
                     Err(ServiceCacheError::Io(e))
                 }
             }
@@ -373,7 +388,13 @@ impl Cache for DiskCacheProvider {
     fn contains(&self, key: &str) -> BoxFuture<'_, Result<bool, ServiceCacheError>> {
         // Check index first (faster than filesystem)
         let in_index = self.lru_index.contains(key);
+        let is_dds = self.is_dds_tier;
         if !in_index {
+            debug!(
+                key = %key,
+                tier = if is_dds { "dds" } else { "chunks" },
+                "Disk cache contains: not in LRU index"
+            );
             return Box::pin(async move { Ok(false) });
         }
 
@@ -383,10 +404,22 @@ impl Cache for DiskCacheProvider {
 
         Box::pin(async move {
             if tokio::fs::metadata(&path).await.is_ok() {
+                debug!(
+                    key = %key_owned,
+                    path = %path.display(),
+                    tier = if is_dds { "dds" } else { "chunks" },
+                    "Disk cache contains: found (index + file verified)"
+                );
                 Ok(true)
             } else {
                 // File doesn't exist - clean up stale index entry
                 self.lru_index.remove(&key_owned);
+                debug!(
+                    key = %key_owned,
+                    path = %path.display(),
+                    tier = if is_dds { "dds" } else { "chunks" },
+                    "Disk cache contains: stale index entry (file missing), cleaned up"
+                );
                 Ok(false)
             }
         })
