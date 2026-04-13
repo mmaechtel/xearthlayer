@@ -187,6 +187,21 @@ pub struct AdaptivePrefetchCoordinator {
     /// stale timeout). After [`MAX_REGION_ATTEMPTS`] demotions, the region is marked
     /// NoCoverage and permanently excluded for this session.
     region_attempts: std::collections::HashMap<DsfRegion, u8>,
+
+    /// Mapping of planned tiles to their source DSF region for the current
+    /// in-flight plan. Populated by the cruise branch of [`update()`] and
+    /// consumed by [`execute()`] to compute per-region submission completeness.
+    ///
+    /// A region is marked `InProgress` only when every one of its planned
+    /// tiles is successfully submitted — regions whose tiles were deferred,
+    /// channel-rejected, or throttle-overflowed stay unmarked so they
+    /// naturally re-enter `new_regions_with_extent` on the next cycle.
+    /// This fixes the `#172` bug where regions were marked before
+    /// submission and then stuck `InProgress` despite tiles never being
+    /// generated.
+    ///
+    /// Cleared after each [`execute()`] call (per-plan transient state).
+    pub(super) current_plan_regions: std::collections::HashMap<TileCoord, DsfRegion>,
 }
 
 impl std::fmt::Debug for AdaptivePrefetchCoordinator {
@@ -237,6 +252,7 @@ impl AdaptivePrefetchCoordinator {
             pending_tiles: Vec::new(),
             dds_disk_checker: None,
             region_attempts: std::collections::HashMap::new(),
+            current_plan_regions: std::collections::HashMap::new(),
         }
     }
 
@@ -597,20 +613,19 @@ impl AdaptivePrefetchCoordinator {
                     tiles_with_region.truncate(max_tiles);
                 }
 
-                // Mark submitted regions as InProgress
-                let mut marked_regions = HashSet::new();
+                // Record tile→region mapping for execute() to use when
+                // deciding which regions to mark InProgress. Marking is
+                // deferred until after submission so only regions whose
+                // tiles were actually accepted by the executor get marked.
+                // See #172 Part 1: regions that get marked InProgress
+                // before submission (under throttle ramp or channel full)
+                // become stuck because `should_prefetch` then filters them
+                // out of `new_regions_with_extent` indefinitely.
+                self.current_plan_regions.clear();
+                self.current_plan_regions.reserve(tiles_with_region.len());
                 let mut all_tiles = Vec::with_capacity(tiles_with_region.len());
                 for (tile, region) in tiles_with_region {
-                    if marked_regions.insert(region) {
-                        if let Some(ref geo_index) = self.geo_index {
-                            self.boundary_strategy.mark_in_progress(&region, geo_index);
-                        }
-                        tracing::debug!(
-                            region_lat = region.lat,
-                            region_lon = region.lon,
-                            "Prefetch target: region queued"
-                        );
-                    }
+                    self.current_plan_regions.insert(tile, region);
                     all_tiles.push(tile);
                 }
 
@@ -657,6 +672,67 @@ impl AdaptivePrefetchCoordinator {
             cancellation,
         );
 
+        // Per-cycle instrumentation (#172 Part 4): surface the
+        // tiles_planned / tiles_submitted / tiles_pending shape of each
+        // cycle at INFO level so a persistent "planned ≫ submitted"
+        // pattern is immediately visible in logs without grepping the
+        // decision tree. This is the primary telemetry for verifying
+        // that the mark-after-submit invariant holds in flight.
+        let tiles_planned = plan.tiles.len();
+        let tiles_submitted = result.submitted_count();
+        let tiles_pending = result.pending.len();
+        let tiles_dropped = tiles_planned.saturating_sub(tiles_submitted + tiles_pending);
+        if tiles_planned > 0 {
+            tracing::info!(
+                strategy = plan.strategy,
+                tiles_planned,
+                tiles_submitted,
+                tiles_pending,
+                tiles_dropped,
+                deferred = result.deferred,
+                "Prefetch cycle summary"
+            );
+        }
+
+        // Mark regions as InProgress only if ALL of their planned tiles
+        // appear in `result.submitted_tiles` — the authoritative record of
+        // what the executor actually accepted. This positive check is
+        // correct even in the `MAX_PENDING_TILES` truncation case where
+        // some tiles are dropped (neither submitted nor pending): dropped
+        // tiles are not in `submitted_tiles`, so their regions correctly
+        // stay unmarked and re-enter `new_regions_with_extent` next cycle.
+        //
+        // See #172 Part 1 (the ordering fix) + Part 2 (this positive
+        // check, replacing the earlier "not in pending" approximation).
+        if !self.current_plan_regions.is_empty() && !result.deferred {
+            let submitted_set: std::collections::HashSet<TileCoord> =
+                result.submitted_tiles.iter().copied().collect();
+            let mut region_planned: std::collections::HashMap<DsfRegion, Vec<TileCoord>> =
+                std::collections::HashMap::new();
+            for (tile, region) in &self.current_plan_regions {
+                region_planned.entry(*region).or_default().push(*tile);
+            }
+
+            if let Some(ref geo_index) = self.geo_index {
+                let mut marked = 0usize;
+                for (region, planned_tiles) in &region_planned {
+                    let fully_submitted = planned_tiles.iter().all(|t| submitted_set.contains(t));
+                    if fully_submitted {
+                        self.boundary_strategy.mark_in_progress(region, geo_index);
+                        marked += 1;
+                    }
+                }
+                if marked > 0 {
+                    tracing::debug!(
+                        regions_marked = marked,
+                        regions_in_plan = region_planned.len(),
+                        "Prefetch: marked fully-submitted regions as InProgress"
+                    );
+                }
+            }
+        }
+        self.current_plan_regions.clear();
+
         if result.deferred {
             self.total_deferred_cycles += 1;
         }
@@ -664,7 +740,7 @@ impl AdaptivePrefetchCoordinator {
             self.pending_tiles = result.pending;
         }
 
-        result.submitted
+        tiles_submitted
     }
 
     /// Mark tiles as cached (to avoid re-prefetching).
@@ -901,9 +977,14 @@ impl AdaptivePrefetchCoordinator {
         // without checking whether tiles had actually been generated.
         self.evaluate_stale_regions(&geo_index);
 
+        // Consult the authoritative DDS disk cache rather than the
+        // `cached_tiles` shadow HashSet. See #172 Part 3: the shadow
+        // failed to track ~94% of actually-cached tiles in production,
+        // leaving the rescue path (evaluate_stale_regions) to carry
+        // the work.
         BoundaryStrategy::promote_completed_regions(
             &geo_index,
-            &self.cached_tiles,
+            self.dds_disk_checker.as_ref(),
             self.scenery_index.as_ref(),
         );
         // Evict PrefetchedRegion entries for regions outside the retained window,
@@ -912,6 +993,31 @@ impl AdaptivePrefetchCoordinator {
         // Evict cached_tiles entries for tiles outside the retained window,
         // allowing re-query of the memory cache for those tiles.
         BoundaryStrategy::evict_cached_tiles_outside_retained(&mut self.cached_tiles, &geo_index);
+
+        // Per-maintenance-cycle instrumentation (#172 Part 4): report
+        // region-state distribution. A healthy system shows normal-path
+        // promotions dominating; if `in_progress` stays high while
+        // `prefetched` remains low, the fast-path is stalling and the
+        // rescue path is carrying the work — the same anti-pattern that
+        // produced the 61:4 rescue ratio in the LOWW flight log.
+        let (in_progress, prefetched, no_coverage) = geo_index
+            .iter::<PrefetchedRegion>()
+            .into_iter()
+            .fold((0usize, 0usize, 0usize), |(ip, p, nc), (_, r)| {
+                if r.is_in_progress() {
+                    (ip + 1, p, nc)
+                } else if r.is_prefetched() {
+                    (ip, p + 1, nc)
+                } else {
+                    (ip, p, nc + 1)
+                }
+            });
+        tracing::debug!(
+            regions_in_progress = in_progress,
+            regions_prefetched = prefetched,
+            regions_nocoverage = no_coverage,
+            "Region maintenance: state distribution"
+        );
     }
 
     /// Evaluate stale InProgress regions and decide: promote, demote, or NoCoverage.
@@ -939,27 +1045,16 @@ impl AdaptivePrefetchCoordinator {
             let tiles =
                 BoundaryStrategy::tiles_for_region(&strategy, &region, self.scenery_index.as_ref());
 
-            // Check if tiles exist on DDS disk cache
-            let tiles_on_disk = if let Some(ref checker) = self.dds_disk_checker {
-                // Use a synchronous block_on since we're in an async context
-                // but evaluate_stale_regions is called from the sync maintenance path.
-                // The DdsDiskCacheChecker::tile_exists is backed by an O(1) in-memory
-                // DashMap lookup, so blocking is negligible.
-                let checker = Arc::clone(checker);
-                let tiles_clone = tiles.clone();
-                tokio::task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        if tiles_clone.is_empty() {
-                            return false;
-                        }
-                        // Check a sample — if the first tile exists, assume the region is covered
-                        let t = &tiles_clone[0];
-                        checker.tile_exists(t.row, t.col, t.zoom).await
-                    })
-                })
-            } else {
-                false
+            // Check if tiles exist on DDS disk cache.
+            // Uses the sync `tile_exists_blocking` method — see #172
+            // Part 3: the prior `block_in_place` + `block_on` dance has
+            // been pushed into the trait impl (`DdsDiskCacheBridge`).
+            // Keep the rescue-path "sample the first tile" heuristic;
+            // full coverage is checked by `promote_completed_regions`
+            // on the fast path.
+            let tiles_on_disk = match (self.dds_disk_checker.as_ref(), tiles.first()) {
+                (Some(checker), Some(t)) => checker.tile_exists_blocking(t.row, t.col, t.zoom),
+                _ => false,
             };
 
             if tiles_on_disk {
@@ -1055,7 +1150,7 @@ mod tests {
     use crate::prefetch::adaptive::coordinator::test_support::{
         ground_state, make_scenery_index, patched_region_area, test_calibration, test_plan,
         BackpressureMockClient, CapLimitedDdsClient, DummyTracker, HighLoadDdsClient,
-        StableBoundsTracker,
+        MockDiskChecker, StableBoundsTracker,
     };
     // ─────────────────────────────────────────────────────────────────────────
     // Creation tests
@@ -1765,12 +1860,14 @@ mod tests {
 
         // After maintenance, stale regions should be swept (timeout=120s, so not yet).
         // But the key assertion: the method exists and is callable.
-        // For a real promotion test, mark tiles as cached first.
+        // For a real promotion test (post-#172 Part 3), populate the DDS
+        // disk checker with the region's tiles so the authoritative
+        // check sees them as present.
         let region = DsfRegion::new(55, 7);
         let tiles = coord.boundary_strategy.expand_to_tiles(&region, 14);
-        for tile in &tiles {
-            coord.cached_tiles.insert(*tile);
-        }
+        let checker: Arc<dyn crate::executor::DdsDiskCacheChecker> =
+            MockDiskChecker::with_tile_coords(tiles.iter().copied());
+        coord.dds_disk_checker = Some(checker);
 
         coord.run_region_maintenance();
 
@@ -1782,7 +1879,7 @@ mod tests {
         );
         assert!(
             state.unwrap().is_prefetched(),
-            "Region should be promoted to Prefetched when all tiles are cached"
+            "Region should be promoted to Prefetched when all tiles are on disk"
         );
     }
 
@@ -2529,5 +2626,159 @@ mod tests {
         coord.reset_phase_from_on_ground(false);
         assert_eq!(coord.status.phase, FlightPhase::Cruise);
         assert_eq!(coord.phase_detector.current_phase(), FlightPhase::Cruise);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Mark-after-submit ordering tests (#172 Part 1)
+    //
+    // A region must only be marked `InProgress` if every one of its planned
+    // tiles was successfully submitted to the executor. Regions whose tiles
+    // were deferred, channel-rejected, or throttle-overflowed must stay
+    // unmarked so they can re-enter `new_regions_with_extent` on the next
+    // cycle. This prevents the "shadow claims success, disk says empty"
+    // bug observed on LOWW westbound flights where the departure-bubble
+    // DSFs were marked InProgress during the throttle ramp but their
+    // tiles were never submitted.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Helper: fast-forward a coordinator into Cruise phase at (50.0, 10.0)
+    /// heading 0° (north). Uses the existing hysteresis/timeout shortcut
+    /// pattern from `test_pending_tiles_retained_on_channel_full`.
+    fn fast_forward_to_cruise(coord: &mut AdaptivePrefetchCoordinator) {
+        coord.phase_detector.hysteresis_duration = std::time::Duration::from_millis(1);
+        coord.phase_detector.takeoff_timeout = std::time::Duration::from_millis(1);
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        coord.update((50.0, 10.0), 0.0, 200.0, 35000.0);
+    }
+
+    fn count_in_progress_regions(geo_index: &crate::geo_index::GeoIndex) -> usize {
+        use crate::geo_index::PrefetchedRegion;
+        geo_index
+            .iter::<PrefetchedRegion>()
+            .into_iter()
+            .filter(|(_, r)| r.is_in_progress())
+            .count()
+    }
+
+    #[tokio::test]
+    async fn test_deferred_cycle_marks_no_regions() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+        // HighLoadDdsClient reports executor_load=0.95 — above the
+        // BACKPRESSURE_DEFER_THRESHOLD, so execute_plan returns
+        // deferred=true with the whole plan stored as pending.
+        let client = Arc::new(HighLoadDdsClient);
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            // Zero ramp so Transition throttle doesn't clip the plan —
+            // isolate the backpressure-defer scenario cleanly.
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index))
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        fast_forward_to_cruise(&mut coord);
+        assert_eq!(
+            coord.phase_detector.current_phase(),
+            FlightPhase::Cruise,
+            "Precondition: coordinator must be in Cruise phase",
+        );
+
+        let state = AircraftState::new(50.0, 10.0, 0.0, 200.0, 35000.0, false);
+        let submitted = coord.process_telemetry(&state).await.unwrap_or(0);
+
+        assert_eq!(
+            submitted, 0,
+            "Plan must defer under high executor backpressure",
+        );
+        assert_eq!(
+            count_in_progress_regions(&geo_index),
+            0,
+            "No regions should be marked InProgress when the entire plan is deferred",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_channel_full_marks_only_fully_submitted_regions() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+        // Cap of 1 guarantees no region can be 100% submitted — every
+        // region in a geometric-fallback plan has multiple tiles.
+        let client = Arc::new(CapLimitedDdsClient::new(1));
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index))
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        fast_forward_to_cruise(&mut coord);
+        assert_eq!(coord.phase_detector.current_phase(), FlightPhase::Cruise);
+
+        let state = AircraftState::new(50.0, 10.0, 0.0, 200.0, 35000.0, false);
+        let submitted = coord.process_telemetry(&state).await.unwrap_or(0);
+
+        assert!(
+            submitted <= 1,
+            "Channel cap of 1 should admit at most 1 tile, got {}",
+            submitted,
+        );
+        assert_eq!(
+            count_in_progress_regions(&geo_index),
+            0,
+            "With cap=1, no region is fully submitted — zero regions should be marked",
+        );
+        assert!(
+            !coord.pending_tiles.is_empty(),
+            "Unsubmitted tiles must be stored as pending for retry",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fully_submitted_cycle_marks_all_planned_regions() {
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+        // Cap well above any plausible plan size — all tiles admit.
+        let client = Arc::new(CapLimitedDdsClient::new(100_000));
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index))
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>);
+
+        fast_forward_to_cruise(&mut coord);
+        assert_eq!(coord.phase_detector.current_phase(), FlightPhase::Cruise);
+
+        let state = AircraftState::new(50.0, 10.0, 0.0, 200.0, 35000.0, false);
+        let submitted = coord.process_telemetry(&state).await.unwrap_or(0);
+
+        assert!(submitted > 0, "Happy path should submit tiles");
+        assert!(
+            coord.pending_tiles.is_empty(),
+            "No tiles should be pending when the full plan submits",
+        );
+        assert!(
+            count_in_progress_regions(&geo_index) > 0,
+            "Regions with all tiles submitted must be marked InProgress",
+        );
     }
 }

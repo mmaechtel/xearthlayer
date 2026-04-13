@@ -12,7 +12,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::coord::TileCoord;
-use crate::executor::{DdsClient, DdsClientError, Priority};
+use crate::executor::{DdsClient, DdsClientError, DdsDiskCacheChecker, Priority};
 use crate::prefetch::adaptive::calibration::{PerformanceCalibration, StrategyMode};
 use crate::prefetch::adaptive::strategy::PrefetchPlan;
 use crate::prefetch::state::AircraftState;
@@ -108,6 +108,57 @@ pub(crate) fn make_scenery_index(lat: i32, lon: i32, chunk_zoom: u8) -> Arc<Scen
 // ─────────────────────────────────────────────────────────────────────────────
 // SceneTracker mocks
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DDS disk cache checker mock
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Mock [`DdsDiskCacheChecker`] for coordinator tests.
+///
+/// Holds an in-memory `HashSet<(row, col, zoom)>` of chunk-origin triples.
+/// Use [`MockDiskChecker::with_tile_coords`] to seed it with [`TileCoord`]s
+/// (each is converted via `chunk_origin()` before storage, matching what
+/// `promote_completed_regions` queries).
+pub(crate) struct MockDiskChecker {
+    tiles: std::sync::Mutex<HashSet<(u32, u32, u8)>>,
+}
+
+impl MockDiskChecker {
+    pub(crate) fn new() -> Self {
+        Self {
+            tiles: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Build a checker pre-populated from a set of [`TileCoord`]s.
+    pub(crate) fn with_tile_coords(iter: impl IntoIterator<Item = TileCoord>) -> Arc<Self> {
+        let me = Self::new();
+        {
+            let mut set = me.tiles.lock().unwrap();
+            for tile in iter {
+                let (r, c, z) = tile.chunk_origin();
+                set.insert((r, c, z));
+            }
+        }
+        Arc::new(me)
+    }
+}
+
+impl DdsDiskCacheChecker for MockDiskChecker {
+    fn tile_exists(
+        &self,
+        row: u32,
+        col: u32,
+        zoom: u8,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let present = self.tiles.lock().unwrap().contains(&(row, col, zoom));
+        Box::pin(async move { present })
+    }
+
+    fn tile_exists_blocking(&self, row: u32, col: u32, zoom: u8) -> bool {
+        self.tiles.lock().unwrap().contains(&(row, col, zoom))
+    }
+}
 
 /// Mock SceneTracker that returns no data for all queries.
 pub(crate) struct DummyTracker;

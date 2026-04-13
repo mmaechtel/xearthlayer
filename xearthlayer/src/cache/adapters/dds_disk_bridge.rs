@@ -73,6 +73,22 @@ impl DdsDiskCacheChecker for DdsDiskCacheBridge {
             self.client.contains(&tile).await
         })
     }
+
+    fn tile_exists_blocking(&self, row: u32, col: u32, zoom: u8) -> bool {
+        // Delegates to the async `tile_exists` via `block_in_place` so
+        // the sync callsite is free of the runtime-handle dance. Moving
+        // the hack into the trait impl encapsulates it here — callers
+        // (e.g. `promote_completed_regions`) can treat this as a plain
+        // sync method.
+        //
+        // TODO(#175): specialise with a truly sync path by exposing
+        // an index-only check through the `Cache` trait. The DashMap
+        // lookup backing `lru_index` is already sync; the async wrapper
+        // is gratuitous for hot-path existence checks.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.tile_exists(row, col, zoom))
+        })
+    }
 }
 
 #[cfg(test)]

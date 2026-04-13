@@ -19,13 +19,32 @@ use super::core::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Result of a plan execution attempt.
+///
+/// `submitted_tiles` is the authoritative set of tiles that were accepted
+/// by the executor during this call. Callers that need a per-tile submission
+/// signal (e.g. the coordinator deciding which regions to mark `InProgress`)
+/// must use this field rather than inferring submission from `pending` —
+/// tiles dropped by the `MAX_PENDING_TILES` truncation appear in neither
+/// `submitted_tiles` nor `pending`, and a negative check would misclassify
+/// them as submitted. See #172 Part 2.
 pub(crate) struct ExecutionResult {
-    /// Number of tiles successfully submitted.
-    pub submitted: usize,
-    /// Tiles that could not be submitted (channel full / throttle overflow).
+    /// Tiles that were successfully submitted to the executor in this call.
+    pub submitted_tiles: Vec<TileCoord>,
+    /// Tiles that could not be submitted (channel full / throttle overflow),
+    /// retained for retry on a subsequent cycle. May be truncated to
+    /// `MAX_PENDING_TILES` — tiles beyond the cap are silently dropped.
     pub pending: Vec<TileCoord>,
     /// Whether the entire cycle was deferred due to high load.
     pub deferred: bool,
+}
+
+impl ExecutionResult {
+    /// Count of tiles actually submitted. Convenience accessor for callers
+    /// that only need the cardinality (status reporting, totals).
+    #[inline]
+    pub fn submitted_count(&self) -> usize {
+        self.submitted_tiles.len()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +91,7 @@ pub(crate) fn execute_plan(
             "Executor backpressure — deferring prefetch cycle, tiles stored as pending"
         );
         return ExecutionResult {
-            submitted: 0,
+            submitted_tiles: Vec::new(),
             pending,
             deferred: true,
         };
@@ -107,7 +126,7 @@ pub(crate) fn execute_plan(
                 "Transition throttle — grace period, tiles stored as pending"
             );
             return ExecutionResult {
-                submitted: 0,
+                submitted_tiles: Vec::new(),
                 pending,
                 deferred: false,
             };
@@ -131,18 +150,18 @@ pub(crate) fn execute_plan(
         Vec::new()
     };
 
-    let mut submitted = 0;
     let tiles_to_submit: Vec<TileCoord> = plan.tiles.iter().take(max_tiles).copied().collect();
+    let mut submitted_tiles: Vec<TileCoord> = Vec::with_capacity(tiles_to_submit.len());
     let mut channel_remainder = Vec::new();
     for (idx, tile) in tiles_to_submit.iter().enumerate() {
         let request =
             crate::runtime::JobRequest::prefetch_with_cancellation(*tile, cancellation.clone());
         match client.submit(request) {
-            Ok(()) => submitted += 1,
+            Ok(()) => submitted_tiles.push(*tile),
             Err(crate::executor::DdsClientError::ChannelFull) => {
                 channel_remainder = tiles_to_submit[idx..].to_vec();
                 tracing::debug!(
-                    submitted,
+                    submitted = submitted_tiles.len(),
                     channel_remaining = channel_remainder.len(),
                     "Channel full — storing remainder for next cycle"
                 );
@@ -170,7 +189,7 @@ pub(crate) fn execute_plan(
             combined.truncate(MAX_PENDING_TILES);
         }
         tracing::debug!(
-            submitted,
+            submitted = submitted_tiles.len(),
             pending = combined.len(),
             "Storing {} tiles for subsequent cycles",
             combined.len()
@@ -180,9 +199,9 @@ pub(crate) fn execute_plan(
         Vec::new()
     };
 
-    if submitted > 0 {
+    if !submitted_tiles.is_empty() {
         tracing::info!(
-            tiles = submitted,
+            tiles = submitted_tiles.len(),
             strategy = plan.strategy,
             estimated_ms = plan.estimated_completion_ms,
             "Prefetch batch submitted"
@@ -190,7 +209,7 @@ pub(crate) fn execute_plan(
     }
 
     ExecutionResult {
-        submitted,
+        submitted_tiles,
         pending,
         deferred: false,
     }
@@ -222,7 +241,8 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        assert_eq!(result.submitted, 0);
+        assert_eq!(result.submitted_count(), 0);
+        assert!(result.submitted_tiles.is_empty());
         assert!(result.deferred);
         assert_eq!(result.pending.len(), 10);
     }
@@ -240,7 +260,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        assert_eq!(result.submitted, 5);
+        assert_eq!(result.submitted_count(), 5);
         assert!(!result.deferred);
     }
 
@@ -257,7 +277,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        assert_eq!(result.submitted, 10);
+        assert_eq!(result.submitted_count(), 10);
         assert!(result.pending.is_empty());
     }
 
@@ -274,7 +294,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        assert_eq!(result.submitted, 5);
+        assert_eq!(result.submitted_count(), 5);
         assert_eq!(result.pending.len(), 5);
     }
 
@@ -300,7 +320,129 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        assert_eq!(result.submitted, 0);
+        assert_eq!(result.submitted_count(), 0);
         assert!(result.pending.len() <= MAX_PENDING_TILES);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Part 2 (#172): ExecutionResult.submitted_tiles authoritative-set tests
+    //
+    // `submitted_tiles` is the authoritative record of what the executor
+    // accepted. Callers deciding per-region completion must rely on this
+    // positive signal, not on "not in pending" — tiles dropped by the
+    // `MAX_PENDING_TILES` truncation appear in NEITHER list.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_submitted_tiles_contains_exactly_accepted_submissions() {
+        // 5 distinct tiles, channel cap of 3 → first 3 submit, last 2 go
+        // to pending as channel_remainder. `submitted_tiles` must contain
+        // exactly the first 3, in submission order.
+        let tiles: Vec<TileCoord> = (0..5)
+            .map(|i| TileCoord {
+                row: 100 + i,
+                col: 200,
+                zoom: 14,
+            })
+            .collect();
+        let cal = test_calibration();
+        let plan = PrefetchPlan::with_tiles(tiles.clone(), &cal, "test", 0, 5);
+        let client = CapLimitedDdsClient::new(3);
+        let mut throttle = default_throttle();
+
+        let result = execute_plan(
+            &plan,
+            &client,
+            &mut throttle,
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        assert_eq!(result.submitted_tiles.len(), 3, "First 3 tiles submit");
+        assert_eq!(result.pending.len(), 2, "Last 2 tiles become pending");
+
+        // Submitted tiles must be exactly the first three, in order
+        assert_eq!(result.submitted_tiles, tiles[..3]);
+        // Pending must be the remainder
+        assert_eq!(result.pending, tiles[3..]);
+        // Submitted and pending must be disjoint
+        for t in &result.submitted_tiles {
+            assert!(
+                !result.pending.contains(t),
+                "Submitted tile {:?} must not appear in pending",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn test_submitted_tiles_empty_when_throttle_cuts_all() {
+        // A BackpressureMockClient at high pressure causes defer — all
+        // tiles go to pending, none submitted. `submitted_tiles` must be
+        // empty.
+        let plan = test_plan(10);
+        let client = BackpressureMockClient::new(0.9);
+        let mut throttle = default_throttle();
+
+        let result = execute_plan(
+            &plan,
+            &client,
+            &mut throttle,
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        assert!(result.submitted_tiles.is_empty());
+        assert!(result.deferred);
+        assert_eq!(result.pending.len(), 10);
+    }
+
+    #[test]
+    fn test_dropped_tiles_missing_from_both_sets_under_pending_cap() {
+        // When a plan exceeds MAX_PENDING_TILES AND is fully deferred,
+        // pending gets truncated to the cap. Tiles beyond the cap appear
+        // in NEITHER submitted_tiles nor pending — they are silently
+        // dropped. This test documents and guards that invariant so a
+        // correct-by-construction marking check (Part 1) can rely on
+        // submitted_tiles as the positive signal.
+        let tile_count = MAX_PENDING_TILES + 5;
+        let tiles: Vec<TileCoord> = (0..tile_count as u32)
+            .map(|i| TileCoord {
+                row: 10_000 + i,
+                col: 20_000,
+                zoom: 14,
+            })
+            .collect();
+        let cal = test_calibration();
+        let plan = PrefetchPlan::with_tiles(tiles.clone(), &cal, "test", 0, tile_count);
+        let client = Arc::new(HighLoadDdsClient);
+        let mut throttle = default_throttle();
+
+        let result = execute_plan(
+            &plan,
+            client.as_ref(),
+            &mut throttle,
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        assert!(result.submitted_tiles.is_empty(), "High load defers all");
+        assert_eq!(
+            result.pending.len(),
+            MAX_PENDING_TILES,
+            "Pending truncated to cap"
+        );
+
+        // The last 5 tiles of the plan are in NEITHER set — dropped
+        let tail = &tiles[tile_count - 5..];
+        for t in tail {
+            assert!(
+                !result.submitted_tiles.contains(t),
+                "Dropped tile {:?} must not appear in submitted_tiles",
+                t
+            );
+            assert!(
+                !result.pending.contains(t),
+                "Dropped tile {:?} must not appear in pending",
+                t
+            );
+        }
     }
 }

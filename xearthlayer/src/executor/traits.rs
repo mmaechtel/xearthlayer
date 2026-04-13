@@ -280,6 +280,20 @@ pub trait DdsDiskCacheChecker: Send + Sync + 'static {
         col: u32,
         zoom: u8,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>;
+
+    /// Synchronous tile-existence check for hot-path per-tile queries from
+    /// sync contexts (e.g. region promotion from the prefetch maintenance
+    /// pass). Callers avoid the `block_in_place` + `block_on` pattern.
+    ///
+    /// Implementations must be fast: this method can be called thousands
+    /// of times per maintenance cycle (once per planned tile per InProgress
+    /// region). Backing storage should be an in-memory index lookup.
+    /// Rare stale-index false positives are acceptable — the stale rescue
+    /// path (`evaluate_stale_regions`) still runs the authoritative check.
+    ///
+    /// Must be callable from a Tokio runtime thread (some implementations
+    /// use `block_in_place` internally).
+    fn tile_exists_blocking(&self, row: u32, col: u32, zoom: u8) -> bool;
 }
 
 // ============================================================================

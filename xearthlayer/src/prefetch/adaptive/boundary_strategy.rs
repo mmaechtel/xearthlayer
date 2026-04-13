@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::coord::{to_tile_coords, TileCoord};
+use crate::executor::DdsDiskCacheChecker;
 use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion, RetainedRegion};
 use crate::prefetch::tile_based::DsfTileCoord;
 use crate::prefetch::SceneryIndex;
@@ -96,16 +97,37 @@ impl BoundaryStrategy {
         removed
     }
 
-    /// Check InProgress regions and promote to Prefetched if all tiles are cached.
+    /// Check InProgress regions and promote to Prefetched if all tiles are
+    /// present in the authoritative DDS disk cache.
     ///
-    /// For each InProgress region, expands it to DDS tiles at the given zoom level
-    /// and checks whether all tiles are present in the `cached_tiles` set. If so,
-    /// the region is promoted to `Prefetched` state.
+    /// For each InProgress region, expands it to DDS tiles via
+    /// `tiles_for_region` (using the scenery index when available) and
+    /// queries the `DdsDiskCacheChecker` for each tile. A region is
+    /// promoted to `Prefetched` only when **every** one of its tiles
+    /// is present on disk (check-all with short-circuit on first miss).
+    ///
+    /// If `dds_disk_checker` is `None`, promotion is skipped — there is
+    /// no source of truth to consult. The rescue path
+    /// (`evaluate_stale_regions`) will still fire for stale regions.
+    ///
+    /// See #172 Part 3: the prior version consulted a `cached_tiles`
+    /// `HashSet` shadow that failed to track ~94% of actually-cached
+    /// tiles during production flights (4 normal vs. 61 stale-rescue
+    /// promotions in a 9-hour log). Querying the authoritative cache
+    /// directly collapses one source of truth.
     pub fn promote_completed_regions(
         geo_index: &GeoIndex,
-        cached_tiles: &std::collections::HashSet<TileCoord>,
+        dds_disk_checker: Option<&Arc<dyn DdsDiskCacheChecker>>,
         scenery_index: Option<&Arc<SceneryIndex>>,
     ) -> usize {
+        let Some(checker) = dds_disk_checker else {
+            // Without an authoritative checker there is nothing to
+            // consult — skip promotion and let the rescue path handle
+            // stale regions. This preserves behaviour for tests that
+            // don't wire a checker.
+            return 0;
+        };
+
         let strategy = BoundaryStrategy::new();
         let in_progress: Vec<DsfRegion> = geo_index
             .iter::<PrefetchedRegion>()
@@ -117,7 +139,16 @@ impl BoundaryStrategy {
         let mut promoted = 0;
         for region in &in_progress {
             let tiles = Self::tiles_for_region(&strategy, region, scenery_index);
-            if !tiles.is_empty() && tiles.iter().all(|t| cached_tiles.contains(t)) {
+            if tiles.is_empty() {
+                continue;
+            }
+            // Check-all with short-circuit on first miss. Each lookup is
+            // an O(1) in-memory index check.
+            let all_present = tiles.iter().all(|t| {
+                let (chunk_row, chunk_col, chunk_zoom) = t.chunk_origin();
+                checker.tile_exists_blocking(chunk_row, chunk_col, chunk_zoom)
+            });
+            if all_present {
                 geo_index.insert::<PrefetchedRegion>(*region, PrefetchedRegion::prefetched());
                 promoted += 1;
             }
@@ -331,6 +362,52 @@ mod tests {
     // Region promotion
     // =========================================================================
 
+    /// Mock [`DdsDiskCacheChecker`] backed by an in-memory set of tile
+    /// chunk coordinates. Used by `promote_completed_regions` tests to
+    /// simulate tiles present / absent on the DDS disk cache.
+    struct MockDiskChecker {
+        tiles: std::sync::Mutex<HashSet<(u32, u32, u8)>>,
+    }
+
+    impl MockDiskChecker {
+        fn new() -> Self {
+            Self {
+                tiles: std::sync::Mutex::new(HashSet::new()),
+            }
+        }
+
+        /// Populate from a set of [`TileCoord`]s, converting each to its
+        /// chunk-origin triple before storing (matches what
+        /// `promote_completed_regions` queries).
+        fn with_tile_coords(iter: impl IntoIterator<Item = TileCoord>) -> Arc<Self> {
+            let me = Self::new();
+            {
+                let mut set = me.tiles.lock().unwrap();
+                for tile in iter {
+                    let (r, c, z) = tile.chunk_origin();
+                    set.insert((r, c, z));
+                }
+            }
+            Arc::new(me)
+        }
+    }
+
+    impl DdsDiskCacheChecker for MockDiskChecker {
+        fn tile_exists(
+            &self,
+            row: u32,
+            col: u32,
+            zoom: u8,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+            let present = self.tiles.lock().unwrap().contains(&(row, col, zoom));
+            Box::pin(async move { present })
+        }
+
+        fn tile_exists_blocking(&self, row: u32, col: u32, zoom: u8) -> bool {
+            self.tiles.lock().unwrap().contains(&(row, col, zoom))
+        }
+    }
+
     #[test]
     fn test_promote_completed_regions() {
         let geo_index = GeoIndex::new();
@@ -343,11 +420,13 @@ mod tests {
         let tiles = strategy.expand_to_tiles(&region, 14);
         assert!(!tiles.is_empty());
 
-        // Put all tiles into the cached set
-        let cached_tiles: std::collections::HashSet<TileCoord> = tiles.into_iter().collect();
+        // Populate the mock disk checker with every tile's chunk coords.
+        let checker: Arc<dyn DdsDiskCacheChecker> =
+            MockDiskChecker::with_tile_coords(tiles.iter().copied());
 
         // No scenery index — uses geometric fallback
-        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, None);
+        let promoted =
+            BoundaryStrategy::promote_completed_regions(&geo_index, Some(&checker), None);
         assert_eq!(promoted, 1);
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
@@ -366,15 +445,35 @@ mod tests {
         let tiles = strategy.expand_to_tiles(&region, 14);
         assert!(tiles.len() > 1);
 
-        // Only put one tile into the cached set
-        let mut cached_tiles = std::collections::HashSet::new();
-        cached_tiles.insert(tiles[0]);
+        // Mock checker knows only one tile → region is incomplete
+        let checker: Arc<dyn DdsDiskCacheChecker> =
+            MockDiskChecker::with_tile_coords(std::iter::once(tiles[0]));
 
-        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, None);
+        let promoted =
+            BoundaryStrategy::promote_completed_regions(&geo_index, Some(&checker), None);
         assert_eq!(promoted, 0);
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
         assert!(state.is_in_progress());
+    }
+
+    #[test]
+    fn test_promote_skipped_when_no_checker_configured() {
+        // Without a `DdsDiskCacheChecker` there is no authoritative source
+        // to consult. `promote_completed_regions` should skip and return 0
+        // rather than promote based on nothing.
+        let geo_index = GeoIndex::new();
+        let region = DsfRegion::new(50, 9);
+        geo_index.insert::<PrefetchedRegion>(region, PrefetchedRegion::in_progress());
+
+        let promoted = BoundaryStrategy::promote_completed_regions(&geo_index, None, None);
+        assert_eq!(promoted, 0);
+
+        let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
+        assert!(
+            state.is_in_progress(),
+            "Region must stay InProgress when no checker is configured"
+        );
     }
 
     // =========================================================================
@@ -476,15 +575,16 @@ mod tests {
         assert!(!tiles.is_empty());
         assert!(tiles.iter().all(|t| t.zoom == 12));
 
-        // Cache all the zoom 12 tiles
-        let cached_tiles: std::collections::HashSet<TileCoord> = tiles.into_iter().collect();
+        // Populate the mock disk checker with every tile's chunk coords.
+        let checker: Arc<dyn DdsDiskCacheChecker> =
+            MockDiskChecker::with_tile_coords(tiles.iter().copied());
 
         // Promote should work with SceneryIndex (not hardcoded zoom 14)
         let promoted =
-            BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, Some(&index));
+            BoundaryStrategy::promote_completed_regions(&geo_index, Some(&checker), Some(&index));
         assert_eq!(
             promoted, 1,
-            "Should promote when all scenery index tiles are cached"
+            "Should promote when all scenery index tiles are on disk"
         );
 
         let state = geo_index.get::<PrefetchedRegion>(&region).unwrap();
@@ -504,11 +604,12 @@ mod tests {
         // Cache zoom 14 tiles (the OLD wrong behavior) instead of zoom 12
         let strategy = BoundaryStrategy::new();
         let wrong_tiles = strategy.expand_to_tiles(&region, 14);
-        let cached_tiles: std::collections::HashSet<TileCoord> = wrong_tiles.into_iter().collect();
+        let checker: Arc<dyn DdsDiskCacheChecker> =
+            MockDiskChecker::with_tile_coords(wrong_tiles.into_iter());
 
         // Promote should NOT succeed — cached zoom 14, but index expects zoom 12
         let promoted =
-            BoundaryStrategy::promote_completed_regions(&geo_index, &cached_tiles, Some(&index));
+            BoundaryStrategy::promote_completed_regions(&geo_index, Some(&checker), Some(&index));
         assert_eq!(
             promoted, 0,
             "Should not promote when cached tiles are at wrong zoom level"
