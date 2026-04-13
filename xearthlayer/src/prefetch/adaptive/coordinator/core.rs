@@ -1149,8 +1149,8 @@ mod tests {
     use super::*;
     use crate::prefetch::adaptive::coordinator::test_support::{
         ground_state, make_scenery_index, patched_region_area, test_calibration, test_plan,
-        BackpressureMockClient, CapLimitedDdsClient, DummyTracker, HighLoadDdsClient,
-        MockDiskChecker, StableBoundsTracker,
+        AlwaysMissMemoryCache, BackpressureMockClient, CapLimitedDdsClient, DummyTracker,
+        HighLoadDdsClient, MockDiskChecker, StableBoundsTracker,
     };
     // ─────────────────────────────────────────────────────────────────────────
     // Creation tests
@@ -2744,6 +2744,78 @@ mod tests {
         assert!(
             !coord.pending_tiles.is_empty(),
             "Unsubmitted tiles must be stored as pending for retry",
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Shadow-staleness integration regression (#172 post-flight finding)
+    //
+    // End-to-end guard: a pre-populated `cached_tiles` shadow combined with
+    // an empty memory cache must NOT cause the filter pipeline to starve
+    // the prefetcher. The coordinator must submit tiles whose reality
+    // differs from the shadow's belief.
+    //
+    // In production, this exact condition produced multiple
+    // `Prefetch plan filter pipeline summary raw_plan_tiles=200
+    // cache_skipped=200 ... remaining=0` lines over ~10 minutes of cruise,
+    // causing FUSE to fault tiles in on-demand at scenery-window boundary
+    // crossings (manifesting as 20-second hard sim freezes).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_coordinator_submits_work_despite_stale_shadow_and_empty_cache() {
+        use crate::executor::DaemonMemoryCache;
+        use crate::geo_index::GeoIndex;
+
+        let geo_index = Arc::new(GeoIndex::new());
+        // Large channel cap — we want to see what the plan produces, not
+        // stress-test submission backpressure.
+        let client = Arc::new(CapLimitedDdsClient::new(10_000));
+        // Cache that reports miss for every query — simulates a memory
+        // cache that has evicted every tile it once held (the intentional
+        // "request absorber, not working-set holder" sizing).
+        let always_miss: Arc<dyn DaemonMemoryCache> = Arc::new(AlwaysMissMemoryCache);
+
+        let config = AdaptivePrefetchConfig {
+            mode: PrefetchMode::Aggressive,
+            ramp_duration: std::time::Duration::from_secs(0),
+            ..Default::default()
+        };
+        let mut coord = AdaptivePrefetchCoordinator::new(config)
+            .with_calibration(test_calibration())
+            .with_geo_index(Arc::clone(&geo_index))
+            .with_dds_client(Arc::clone(&client) as Arc<dyn DdsClient>)
+            .with_memory_cache(always_miss);
+
+        // Pre-populate the shadow as if it had accumulated entries across
+        // many prior cycles before the memory cache evicted them. In
+        // production, this shadow grew to tens of thousands of entries
+        // that were no longer backed by real cache contents.
+        for row in 0..500u32 {
+            for col in 0..10u32 {
+                coord.cached_tiles.insert(TileCoord { row, col, zoom: 14 });
+            }
+        }
+        assert_eq!(
+            coord.cached_tiles.len(),
+            5000,
+            "Precondition: shadow is heavily populated",
+        );
+
+        fast_forward_to_cruise(&mut coord);
+        assert_eq!(coord.phase_detector.current_phase(), FlightPhase::Cruise);
+
+        let state = AircraftState::new(50.0, 10.0, 0.0, 200.0, 35000.0, false);
+        let submitted = coord.process_telemetry(&state).await.unwrap_or(0);
+
+        // Pre-hotfix behaviour: filter consults the shadow → claims all
+        // tiles are cached → plan empties → submitted == 0.
+        // Post-hotfix behaviour: filter queries the authoritative cache
+        // (always miss) → tiles survive filtering → submitted > 0.
+        assert!(
+            submitted > 0,
+            "Coordinator must submit tiles when the authoritative memory \
+             cache is empty, regardless of how populated the shadow HashSet is"
         );
     }
 
