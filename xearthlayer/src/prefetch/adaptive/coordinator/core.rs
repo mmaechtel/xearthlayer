@@ -22,10 +22,9 @@ use crate::prefetch::SceneryIndex;
 use super::super::boundary_strategy::BoundaryStrategy;
 use super::super::calibration::{PerformanceCalibration, StrategyMode};
 use super::super::config::{AdaptivePrefetchConfig, PrefetchMode};
-use super::super::ground_strategy::GroundStrategy;
 use super::super::phase_detector::{FlightPhase, PhaseDetector};
 use super::super::prefetch_box::PrefetchBox;
-use super::super::strategy::{AdaptivePrefetchStrategy, PrefetchPlan};
+use super::super::strategy::PrefetchPlan;
 use super::super::transition_throttle::TransitionThrottle;
 use crate::scene_tracker::SceneTracker;
 
@@ -100,9 +99,6 @@ pub struct AdaptivePrefetchCoordinator {
 
     /// Transition throttle for takeoff ramp-up.
     transition_throttle: TransitionThrottle,
-
-    /// Ground strategy.
-    ground_strategy: GroundStrategy,
 
     /// X-Plane sim state from Web API (direct detection, replaces heuristics).
     sim_state: crate::aircraft_position::web_api::sim_state::SimState,
@@ -216,7 +212,6 @@ impl AdaptivePrefetchCoordinator {
         let phase_detector = PhaseDetector::new(&config);
         let transition_throttle =
             TransitionThrottle::with_config(config.ramp_duration, config.ramp_start_fraction);
-        let ground_strategy = GroundStrategy::new(&config);
         let boundary_strategy = BoundaryStrategy::new();
         let prefetch_box = PrefetchBox::new(config.box_extent, config.box_max_bias);
 
@@ -225,7 +220,6 @@ impl AdaptivePrefetchCoordinator {
             calibration: None,
             phase_detector,
             transition_throttle,
-            ground_strategy,
             sim_state: crate::aircraft_position::web_api::sim_state::SimState::default(),
             dds_client: None,
             memory_cache: None,
@@ -283,11 +277,9 @@ impl AdaptivePrefetchCoordinator {
 
     /// Set the scenery index for tile lookup.
     ///
-    /// The index is used by both the ground strategy (ring-based prefetch)
-    /// and the boundary strategy (cruise prefetch) to discover actual
-    /// installed zoom levels rather than assuming zoom 14.
+    /// The index is used by the prefetch box (both ground and cruise phases)
+    /// to discover actual installed zoom levels rather than assuming zoom 14.
     pub fn with_scenery_index(mut self, index: Arc<SceneryIndex>) -> Self {
-        self.ground_strategy = self.ground_strategy.with_scenery_index(Arc::clone(&index));
         self.scenery_index = Some(index);
         self
     }
@@ -446,6 +438,11 @@ impl AdaptivePrefetchCoordinator {
             return None;
         }
 
+        // Clear last cycle's published bounds — any early return below
+        // leaves the debug map with `None`, preventing stale overlays.
+        // Re-populated only when a valid box is actually constructed.
+        self.status.box_bounds = None;
+
         // Check if enabled
         if !self.config.enabled {
             self.status.enabled = false;
@@ -484,136 +481,140 @@ impl AdaptivePrefetchCoordinator {
             .clone()
             .unwrap_or_else(PerformanceCalibration::default_opportunistic);
 
-        // Select and execute strategy
-        let plan = match phase {
-            FlightPhase::Ground => {
-                self.status.active_strategy = self.ground_strategy.name();
-                self.ground_strategy.calculate_prefetch(
-                    position,
-                    track,
-                    &calibration,
-                    &self.cached_tiles,
-                )
-            }
+        // Pick box shape per phase. Transition skips prefetch entirely so
+        // X-Plane gets full resources during takeoff. Ground and Cruise
+        // both use the same prefetch box — ground with symmetric bias
+        // (aircraft centered), cruise with heading-biased forward extent.
+        // This unification replaces the separate `GroundStrategy`
+        // (deleted post-#172) with a single, reusable box.
+        let (extent, max_bias, strategy_name) = match phase {
             FlightPhase::Transition => {
-                // During transition, no prefetch — X-Plane gets all system resources
                 return None;
             }
+            FlightPhase::Ground => (self.config.box_extent, 0.5, "ground_box"),
             FlightPhase::Cruise => {
-                let (lat, lon) = position;
-
-                // Compute speed-proportional box extent for this cycle.
                 let extent = crate::prefetch::adaptive::compute_extent(
                     ground_speed_kt,
                     self.config.box_min_speed,
                     self.config.box_max_speed,
                     self.config.box_min_extent,
-                    self.config.box_extent, // max extent
+                    self.config.box_extent,
                 );
-                self.status.box_extent = extent;
-
-                // Update retained region tracking from prefetch box bounds.
-                // This must cover the full prefetch box + buffer so that
-                // evict_non_retained() doesn't remove regions we just prefetched.
-                if let Some(ref geo_index) = self.geo_index {
-                    self.prefetch_box.update_retention_with_extent(
-                        lat,
-                        lon,
-                        track,
-                        self.config.window_buffer as i32,
-                        geo_index,
-                        extent,
-                    );
-                }
-
-                // Compute sliding prefetch box regions
-                let new_regions = if let Some(ref geo_index) = self.geo_index {
-                    self.prefetch_box
-                        .new_regions_with_extent(lat, lon, track, geo_index, extent)
-                } else {
-                    self.prefetch_box
-                        .regions_with_extent(lat, lon, track, extent)
-                };
-
-                if new_regions.is_empty() {
-                    tracing::trace!(
-                        lat = format!("{:.2}", lat),
-                        lon = format!("{:.2}", lon),
-                        track = format!("{:.1}", track),
-                        "Cruise: no new regions in prefetch box"
-                    );
-                    return None;
-                }
-
-                // Log the box bounds for debugging
-                let (box_lat_min, box_lat_max, box_lon_min, box_lon_max) = self
-                    .prefetch_box
-                    .bounds_with_extent(lat, lon, track, extent);
-                tracing::debug!(
-                    aircraft = format!("{:.4}, {:.4}", lat, lon),
-                    track = format!("{:.1}", track),
-                    ground_speed_kt = format!("{:.0}", ground_speed_kt),
-                    extent = format!("{:.2}", extent),
-                    box_bounds = format!(
-                        "[{:.1}:{:.1}N, {:.1}:{:.1}E]",
-                        box_lat_min, box_lat_max, box_lon_min, box_lon_max
-                    ),
-                    new_regions = new_regions.len(),
-                    "Sliding prefetch box: new regions detected"
-                );
-
-                // Expand regions to tiles. Every DSF region that intersects the
-                // prefetch window must have all its tiles submitted (unless
-                // already cached — that filtering happens downstream in the
-                // pipeline). Regions with no tiles available are marked
-                // NoCoverage immediately so they're excluded from future cycles.
-                //
-                // See #172 post-flight finding: previous versions of this path
-                // sorted tiles by distance-from-aircraft and truncated at
-                // `max_tiles_per_cycle`. Together those produced forward
-                // starvation — tiles near the aircraft (already cached from
-                // prewarm) monopolised the submission budget, while uncached
-                // forward-edge tiles never entered the plan. Removing both
-                // restores the design intent: "if it intersects the window,
-                // it gets prefetched." Rate limiting is handled downstream
-                // by the filter pipeline, executor backpressure, and the
-                // `pending_tiles` retry queue — not by arbitrary truncation.
-                let mut tiles_with_region: Vec<(TileCoord, DsfRegion)> = Vec::new();
-                for region in &new_regions {
-                    let tiles = self.get_tiles_for_region(region);
-                    if tiles.is_empty() {
-                        if let Some(ref geo_index) = self.geo_index {
-                            self.boundary_strategy.mark_no_coverage(region, geo_index);
-                        }
-                    } else {
-                        for tile in tiles {
-                            tiles_with_region.push((tile, *region));
-                        }
-                    }
-                }
-
-                if tiles_with_region.is_empty() {
-                    return None;
-                }
-
-                // Record tile→region mapping for execute() to use when
-                // deciding which regions to mark InProgress. Marking is
-                // deferred until after submission so only regions whose
-                // tiles were actually accepted by the executor get marked
-                // (see Part 1).
-                self.current_plan_regions.clear();
-                self.current_plan_regions.reserve(tiles_with_region.len());
-                let mut all_tiles = Vec::with_capacity(tiles_with_region.len());
-                for (tile, region) in tiles_with_region {
-                    self.current_plan_regions.insert(tile, region);
-                    all_tiles.push(tile);
-                }
-
-                let total = all_tiles.len();
-                self.status.active_strategy = "sliding_box";
-                PrefetchPlan::with_tiles(all_tiles, &calibration, "sliding_box", 0, total)
+                (extent, self.config.box_max_bias, "sliding_box")
             }
         };
+
+        self.status.box_extent = extent;
+        self.status.active_strategy = strategy_name;
+
+        let shape = crate::prefetch::adaptive::prefetch_box::BoxShape::new(extent, max_bias);
+        let (lat, lon) = position;
+
+        // Compute the actual box bounds once. This becomes the single source
+        // of truth for: retention updates, region enumeration, tracing, and
+        // the debug map overlay. Publishing here (before the `new_regions`
+        // emptiness check) means the map shows the active box even on cycles
+        // that produce no work — the overlay accurately reflects "the box the
+        // coordinator was looking at" at all times.
+        let (box_lat_min, box_lat_max, box_lon_min, box_lon_max) =
+            self.prefetch_box.bounds_with_shape(lat, lon, track, shape);
+        self.status.box_bounds = Some(crate::prefetch::state::BoxBoundsSnapshot {
+            lat_min: box_lat_min,
+            lat_max: box_lat_max,
+            lon_min: box_lon_min,
+            lon_max: box_lon_max,
+        });
+
+        // Update retained region tracking from prefetch box bounds — cruise only.
+        // On the ground the aircraft is stationary so there is no "behind" to
+        // retain; updating retention in the ground branch would activate
+        // `evict_non_retained` against regions that legitimately live far from
+        // the aircraft (e.g. prewarm state from a previous session).
+        if matches!(phase, FlightPhase::Cruise) {
+            if let Some(ref geo_index) = self.geo_index {
+                self.prefetch_box.update_retention_with_shape(
+                    lat,
+                    lon,
+                    track,
+                    self.config.window_buffer as i32,
+                    geo_index,
+                    shape,
+                );
+            }
+        }
+
+        let new_regions = if let Some(ref geo_index) = self.geo_index {
+            self.prefetch_box
+                .new_regions_with_shape(lat, lon, track, geo_index, shape)
+        } else {
+            self.prefetch_box.regions_with_shape(lat, lon, track, shape)
+        };
+
+        if new_regions.is_empty() {
+            tracing::trace!(
+                lat = format!("{:.2}", lat),
+                lon = format!("{:.2}", lon),
+                track = format!("{:.1}", track),
+                phase = ?phase,
+                "No new regions in prefetch box"
+            );
+            return None;
+        }
+
+        // Log the box bounds for debugging (reusing the values computed above).
+        tracing::debug!(
+            aircraft = format!("{:.4}, {:.4}", lat, lon),
+            track = format!("{:.1}", track),
+            ground_speed_kt = format!("{:.0}", ground_speed_kt),
+            extent = format!("{:.2}", extent),
+            max_bias = format!("{:.2}", max_bias),
+            phase = ?phase,
+            box_bounds = format!(
+                "[{:.1}:{:.1}N, {:.1}:{:.1}E]",
+                box_lat_min, box_lat_max, box_lon_min, box_lon_max
+            ),
+            new_regions = new_regions.len(),
+            "Prefetch box: new regions detected"
+        );
+
+        // Expand regions to tiles. Every DSF region that intersects the
+        // prefetch window must have all its tiles submitted (unless
+        // already cached — that filtering happens downstream). No caps,
+        // no distance-sort; the filter pipeline, executor backpressure,
+        // and pending_tiles queue handle rate limiting. See #172
+        // post-flight: distance-sort + cap produced forward starvation.
+        let mut tiles_with_region: Vec<(TileCoord, DsfRegion)> = Vec::new();
+        for region in &new_regions {
+            let tiles = self.get_tiles_for_region(region);
+            if tiles.is_empty() {
+                if let Some(ref geo_index) = self.geo_index {
+                    self.boundary_strategy.mark_no_coverage(region, geo_index);
+                }
+            } else {
+                for tile in tiles {
+                    tiles_with_region.push((tile, *region));
+                }
+            }
+        }
+
+        if tiles_with_region.is_empty() {
+            return None;
+        }
+
+        // Record tile→region mapping for execute() to use when deciding
+        // which regions to mark InProgress. Marking is deferred until
+        // after submission — only regions whose tiles were actually
+        // accepted by the executor get marked (see Part 1).
+        self.current_plan_regions.clear();
+        self.current_plan_regions.reserve(tiles_with_region.len());
+        let mut all_tiles = Vec::with_capacity(tiles_with_region.len());
+        for (tile, region) in tiles_with_region {
+            self.current_plan_regions.insert(tile, region);
+            all_tiles.push(tile);
+        }
+
+        let total = all_tiles.len();
+        let plan = PrefetchPlan::with_tiles(all_tiles, &calibration, strategy_name, 0, total);
 
         // Log plan details
         if !plan.is_empty() {
@@ -1273,7 +1274,7 @@ mod tests {
         // Ground conditions: low speed, low AGL
         let _plan = coord.update((53.5, 9.5), 45.0, 10.0, 0.0);
         assert_eq!(coord.status.phase, FlightPhase::Ground);
-        assert_eq!(coord.status.active_strategy, "ground");
+        assert_eq!(coord.status.active_strategy, "ground_box");
     }
 
     #[test]
@@ -1922,8 +1923,6 @@ mod tests {
 
         let config = AdaptivePrefetchConfig {
             mode: PrefetchMode::Aggressive,
-            default_window_rows: 6,
-            window_lon_extent: 6.0,
             // Zero ramp so transition throttle doesn't reduce tile count
             ramp_duration: std::time::Duration::from_secs(0),
             ..Default::default()
@@ -2489,12 +2488,13 @@ mod tests {
 
         let geo_index = Arc::new(GeoIndex::new());
 
-        // `max_tiles_per_cycle = 5` used to cap plans hard. Post-fix,
-        // the cruise path ignores this value entirely — we set it low
-        // to prove the cap is inert.
+        // `max_tiles_per_cycle` was removed post-#172 entirely (rate
+        // limiting now handled by the filter pipeline, executor
+        // backpressure, and pending-tiles queue). This test verifies the
+        // plan contains many more tiles than the old cap (200) would
+        // have imposed.
         let config = AdaptivePrefetchConfig {
             mode: PrefetchMode::Aggressive,
-            max_tiles_per_cycle: 5,
             ..Default::default()
         };
         let mut coord = AdaptivePrefetchCoordinator::new(config)

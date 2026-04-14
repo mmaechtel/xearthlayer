@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::aircraft_position::AircraftPositionProvider;
 use crate::geo_index::{PatchCoverage, PrefetchedRegion, RetainedRegion};
-use crate::prefetch::adaptive::{AdaptivePrefetchConfig, PrefetchBox};
+use crate::prefetch::BoxBoundsSnapshot;
 
 use super::state::DebugMapState;
 
@@ -66,6 +66,17 @@ pub struct BoxBounds {
     pub lat_max: f64,
     pub lon_min: f64,
     pub lon_max: f64,
+}
+
+impl From<BoxBoundsSnapshot> for BoxBounds {
+    fn from(b: BoxBoundsSnapshot) -> Self {
+        Self {
+            lat_min: b.lat_min,
+            lat_max: b.lat_max,
+            lon_min: b.lon_min,
+            lon_max: b.lon_max,
+        }
+    }
 }
 
 /// A single DSF region with its current state and activity.
@@ -140,15 +151,14 @@ pub struct StatsInfo {
 pub fn collect_snapshot(state: &DebugMapState) -> DebugStateSnapshot {
     let aircraft = collect_aircraft(state);
     let sim_state = collect_sim_state(state);
-    let live_extent = {
-        let snapshot = state.prefetch_status.snapshot();
-        if snapshot.box_extent > 0.0 {
-            Some(snapshot.box_extent)
-        } else {
-            None
-        }
-    };
-    let prefetch_box = compute_prefetch_box(&aircraft, live_extent);
+    // Bounds are published directly by the coordinator each cycle, so the
+    // overlay matches the *actual* box (phase-specific bias included) with
+    // zero reconstruction. `None` means no active prefetch box this cycle.
+    let prefetch_box = state
+        .prefetch_status
+        .snapshot()
+        .box_bounds
+        .map(BoxBounds::from);
     let regions = collect_regions(state);
     let tiles = collect_tiles(state);
     let stats = collect_stats(state);
@@ -190,72 +200,71 @@ fn collect_sim_state(state: &DebugMapState) -> SimStateInfo {
     }
 }
 
-fn compute_prefetch_box(
-    aircraft: &Option<AircraftInfo>,
-    live_extent: Option<f64>,
-) -> Option<BoxBounds> {
-    let aircraft = aircraft.as_ref()?;
-    let track = aircraft.track.unwrap_or(aircraft.heading) as f64;
-
-    let config = AdaptivePrefetchConfig::default();
-    let pbox = PrefetchBox::new(config.box_extent, config.box_max_bias);
-    let extent = live_extent.unwrap_or(config.box_extent);
-    let (lat_min, lat_max, lon_min, lon_max) =
-        pbox.bounds_with_extent(aircraft.latitude, aircraft.longitude, track, extent);
-
-    Some(BoxBounds {
-        lat_min,
-        lat_max,
-        lon_min,
-        lon_max,
-    })
-}
-
 fn collect_regions(state: &DebugMapState) -> Vec<RegionInfo> {
     use std::collections::HashMap;
 
-    // Start with tile activity — this is the ground truth of what's been loaded
     let activity = state.tile_activity.snapshot();
     let mut region_map: HashMap<(i32, i32), RegionInfo> = HashMap::new();
 
-    // Layer 1: Tile activity (FUSE + prefetch generation events)
-    for (region, act) in &activity {
-        let region_state = if act.fuse_generated > 0 && act.prefetch_generated > 0 {
-            RegionState::Mixed
-        } else if act.fuse_generated > 0 {
-            RegionState::FuseLoaded
-        } else if act.prefetch_generated > 0 {
-            RegionState::Prefetched
-        } else if act.fuse_cache_hits > 0 || act.prefetch_cache_hits > 0 {
-            RegionState::Prefetched // all cache hits = was prefetched earlier
-        } else {
-            continue;
-        };
-
-        let mut info = RegionInfo::new(region.lat, region.lon, region_state);
-        info.fuse_hits = act.fuse_cache_hits;
-        info.fuse_misses = act.fuse_generated;
-        info.prefetch_generated = act.prefetch_generated;
-        region_map.insert((region.lat, region.lon), info);
-    }
-
-    // Layer 2: GeoIndex prefetch state (overlay on top of activity)
+    // Layer 1 (authoritative): GeoIndex lifecycle state.
+    //
+    // The coordinator owns these transitions: `InProgress` is set only
+    // after tiles are accepted by the executor, and `Prefetched` is set
+    // only after the completion promoter verifies every tile for the
+    // region is on the DDS disk. Activity counters (below) are evidence
+    // that individual tiles moved, but a region isn't "done" just because
+    // one tile completed — that distinction is what this layer enforces.
     if let Some(ref geo_index) = state.geo_index {
         for (region, prefetched) in geo_index.iter::<PrefetchedRegion>() {
-            let key = (region.lat, region.lon);
-            if !region_map.contains_key(&key) {
-                let geo_state = if prefetched.is_in_progress() {
-                    RegionState::InProgress
-                } else if prefetched.is_prefetched() {
-                    RegionState::Prefetched
-                } else {
-                    RegionState::NoCoverage
-                };
-                region_map.insert(key, RegionInfo::new(region.lat, region.lon, geo_state));
+            let region_state = if prefetched.is_in_progress() {
+                RegionState::InProgress
+            } else if prefetched.is_prefetched() {
+                RegionState::Prefetched
+            } else {
+                RegionState::NoCoverage
+            };
+            region_map.insert(
+                (region.lat, region.lon),
+                RegionInfo::new(region.lat, region.lon, region_state),
+            );
+        }
+    }
+
+    // Layer 2: Activity counters + refinement.
+    //
+    // Two jobs:
+    //   1. For regions the GeoIndex hasn't recorded, classify from activity alone.
+    //   2. For regions the GeoIndex marked `Prefetched`, upgrade to `Mixed`
+    //      when FUSE has touched them — this is the "prefetch successfully
+    //      served X-Plane's demand" case the plain green doesn't convey.
+    //
+    // `InProgress` is never upgraded: the coordinator's lifecycle takes
+    // priority until the promoter moves the region to `Prefetched`, even
+    // if a few tiles happen to complete mid-flight.
+    for (region, act) in &activity {
+        let key = (region.lat, region.lon);
+        let fuse_touched = act.fuse_generated > 0 || act.fuse_cache_hits > 0;
+
+        if !region_map.contains_key(&key) {
+            if let Some(s) = classify_activity_only(act) {
+                region_map.insert(key, RegionInfo::new(region.lat, region.lon, s));
+            } else {
+                continue;
             }
         }
 
-        // Layer 3: Patch coverage
+        let info = region_map.get_mut(&key).expect("inserted above");
+        if info.state == RegionState::Prefetched && fuse_touched {
+            info.state = RegionState::Mixed;
+        }
+
+        info.fuse_hits = act.fuse_cache_hits;
+        info.fuse_misses = act.fuse_generated;
+        info.prefetch_generated = act.prefetch_generated;
+    }
+
+    if let Some(ref geo_index) = state.geo_index {
+        // Layer 3: Patch coverage — only for regions with no prior classification.
         for region in geo_index.regions::<PatchCoverage>() {
             let key = (region.lat, region.lon);
             if !region_map.contains_key(&key) {
@@ -266,7 +275,8 @@ fn collect_regions(state: &DebugMapState) -> Vec<RegionInfo> {
             }
         }
 
-        // Layer 4: Retained regions
+        // Layer 4: Retained regions — tracked by SceneryWindow retention,
+        // visible only when nothing else has claimed the region.
         for region in geo_index.regions::<RetainedRegion>() {
             let key = (region.lat, region.lon);
             if !region_map.contains_key(&key) {
@@ -279,6 +289,21 @@ fn collect_regions(state: &DebugMapState) -> Vec<RegionInfo> {
     }
 
     region_map.into_values().collect()
+}
+
+/// Classify a region purely from activity counters when the GeoIndex has
+/// no record for it (e.g., eviction, or fuse-only loads outside the
+/// coordinator's scope). Returns `None` if the region has no activity
+/// worth showing.
+fn classify_activity_only(act: &super::activity::RegionActivity) -> Option<RegionState> {
+    let fuse_touched = act.fuse_generated > 0 || act.fuse_cache_hits > 0;
+    let prefetch_touched = act.prefetch_generated > 0 || act.prefetch_cache_hits > 0;
+    match (fuse_touched, prefetch_touched) {
+        (true, true) => Some(RegionState::Mixed),
+        (true, false) => Some(RegionState::FuseLoaded),
+        (false, true) => Some(RegionState::Prefetched),
+        (false, false) => None,
+    }
 }
 
 fn collect_tiles(state: &DebugMapState) -> Vec<TileInfo> {
@@ -367,6 +392,50 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_activity_both_paths_is_mixed() {
+        // Region has BOTH prefetch and FUSE activity — whether via cache
+        // hits or generations. Both present → Mixed (orange).
+        let act = super::super::activity::RegionActivity {
+            fuse_generated: 0,
+            fuse_cache_hits: 3,
+            prefetch_generated: 2,
+            prefetch_cache_hits: 0,
+            last_activity: None,
+        };
+        assert_eq!(classify_activity_only(&act), Some(RegionState::Mixed));
+    }
+
+    #[test]
+    fn test_classify_activity_fuse_only_is_fuse_loaded() {
+        let act = super::super::activity::RegionActivity {
+            fuse_generated: 1,
+            fuse_cache_hits: 0,
+            prefetch_generated: 0,
+            prefetch_cache_hits: 0,
+            last_activity: None,
+        };
+        assert_eq!(classify_activity_only(&act), Some(RegionState::FuseLoaded));
+    }
+
+    #[test]
+    fn test_classify_activity_prefetch_only_is_prefetched() {
+        let act = super::super::activity::RegionActivity {
+            fuse_generated: 0,
+            fuse_cache_hits: 0,
+            prefetch_generated: 5,
+            prefetch_cache_hits: 0,
+            last_activity: None,
+        };
+        assert_eq!(classify_activity_only(&act), Some(RegionState::Prefetched));
+    }
+
+    #[test]
+    fn test_classify_activity_empty_is_none() {
+        let act = super::super::activity::RegionActivity::default();
+        assert_eq!(classify_activity_only(&act), None);
+    }
+
+    #[test]
     fn test_box_bounds_serialises() {
         let bounds = BoxBounds {
             lat_min: 45.0,
@@ -380,44 +449,21 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_prefetch_box_heading_west() {
-        let aircraft = Some(AircraftInfo {
-            latitude: 48.0,
-            longitude: 15.0,
-            heading: 270.0,
-            track: Some(270.0),
-            ground_speed: 450.0,
-            altitude: 35000.0,
-        });
-        let bounds = compute_prefetch_box(&aircraft, None).unwrap();
-        // Heading west: lon biased west (3° ahead), east (1° behind)
-        assert!(bounds.lon_min < 13.0, "West edge should be ~12°");
-        assert!(bounds.lon_max < 17.0, "East edge should be ~16°");
-    }
-
-    #[test]
-    fn test_compute_prefetch_box_none_without_aircraft() {
-        let bounds = compute_prefetch_box(&None, None);
-        assert!(bounds.is_none());
-    }
-
-    #[test]
-    fn test_compute_prefetch_box_with_custom_extent() {
-        let aircraft = Some(AircraftInfo {
-            latitude: 47.0,
-            longitude: 8.0,
-            heading: 270.0,
-            track: Some(270.0),
-            ground_speed: 140.0,
-            altitude: 10000.0,
-        });
-        let bounds = compute_prefetch_box(&aircraft, Some(4.0)).unwrap();
-        let lon_range = bounds.lon_max - bounds.lon_min;
-        assert!(
-            (lon_range - 4.0).abs() < 0.01,
-            "Should use provided extent 4.0, got range {}",
-            lon_range
-        );
+    fn test_box_bounds_from_snapshot() {
+        // The debug map now reads BoxBoundsSnapshot published by the
+        // coordinator verbatim — no recomputation. This guards the
+        // field-by-field conversion so drift can't creep back in.
+        let snap = BoxBoundsSnapshot {
+            lat_min: 44.5,
+            lat_max: 51.5,
+            lon_min: 11.0,
+            lon_max: 19.0,
+        };
+        let bounds = BoxBounds::from(snap);
+        assert_eq!(bounds.lat_min, 44.5);
+        assert_eq!(bounds.lat_max, 51.5);
+        assert_eq!(bounds.lon_min, 11.0);
+        assert_eq!(bounds.lon_max, 19.0);
     }
 
     #[test]

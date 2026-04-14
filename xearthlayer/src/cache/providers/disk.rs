@@ -386,43 +386,28 @@ impl Cache for DiskCacheProvider {
     }
 
     fn contains(&self, key: &str) -> BoxFuture<'_, Result<bool, ServiceCacheError>> {
-        // Check index first (faster than filesystem)
+        // The LRU index IS the canonical map for "what's in this cache"
+        // — writes update it, deletes remove from it, GC removes from it.
+        // XEL is the sole writer to the cache directory, so we trust the
+        // index. No filesystem verify here (removed post-#172 — the
+        // per-call `tokio::fs::metadata()` was producing thousands of
+        // syscalls per filter cycle, which manifested as constant disk
+        // activity in the TUI).
+        //
+        // Stale index entries (file missing but index says yes) are
+        // handled reactively in `get()` — if the read fails with
+        // NotFound, the entry is removed. Filter-side false positives
+        // produce at most a skipped plan entry that X-Plane later
+        // requests via FUSE and properly generates.
         let in_index = self.lru_index.contains(key);
         let is_dds = self.is_dds_tier;
-        if !in_index {
-            debug!(
-                key = %key,
-                tier = if is_dds { "dds" } else { "chunks" },
-                "Disk cache contains: not in LRU index"
-            );
-            return Box::pin(async move { Ok(false) });
-        }
-
-        // Verify file exists (index might be stale)
-        let path = self.key_path(key);
-        let key_owned = key.to_string();
-
-        Box::pin(async move {
-            if tokio::fs::metadata(&path).await.is_ok() {
-                debug!(
-                    key = %key_owned,
-                    path = %path.display(),
-                    tier = if is_dds { "dds" } else { "chunks" },
-                    "Disk cache contains: found (index + file verified)"
-                );
-                Ok(true)
-            } else {
-                // File doesn't exist - clean up stale index entry
-                self.lru_index.remove(&key_owned);
-                debug!(
-                    key = %key_owned,
-                    path = %path.display(),
-                    tier = if is_dds { "dds" } else { "chunks" },
-                    "Disk cache contains: stale index entry (file missing), cleaned up"
-                );
-                Ok(false)
-            }
-        })
+        debug!(
+            key = %key,
+            in_index,
+            tier = if is_dds { "dds" } else { "chunks" },
+            "Disk cache contains (index-only)"
+        );
+        Box::pin(async move { Ok(in_index) })
     }
 
     fn size_bytes(&self) -> u64 {
@@ -622,38 +607,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_disk_provider_stale_index_cleanup_on_get() {
+        // Post-#172: `contains()` is index-only for performance (no per-call
+        // filesystem verify). Stale index entries (file missing but index
+        // still has it) are instead cleaned up reactively on `get()`: if
+        // the read fails with NotFound, the entry is removed. This moves
+        // the cleanup cost from "every contains() call, always" to "only
+        // when a get() actually discovers the missing file."
         let (_temp_dir, provider) = create_test_provider(1_000_000).await;
 
-        // Set a value
         provider.set("key1", vec![1, 2, 3]).await.unwrap();
         assert!(provider.lru_index().contains("key1"));
 
-        // Manually delete the file using the provider's path resolution
+        // External mutation: delete the file behind the cache's back.
         let path = provider.lru_index().key_to_path("key1");
         std::fs::remove_file(path).unwrap();
 
-        // Get should return None and clean up index
-        let value = provider.get("key1").await.unwrap();
-        assert!(value.is_none());
-        assert!(!provider.lru_index().contains("key1"));
+        // `contains()` still reports true — it trusts the canonical
+        // index and doesn't do a per-call fs verify.
+        assert!(
+            provider.contains("key1").await.unwrap(),
+            "contains() trusts the index; no fs verify"
+        );
 
-        provider.shutdown().await;
-    }
+        // `get()` discovers the file is missing and cleans up reactively.
+        let result = provider.get("key1").await.unwrap();
+        assert!(result.is_none(), "get() returns None for missing file");
+        assert!(
+            !provider.lru_index().contains("key1"),
+            "Stale index entry must be removed after failed get()"
+        );
 
-    #[tokio::test]
-    async fn test_disk_provider_stale_index_cleanup_on_contains() {
-        let (_temp_dir, provider) = create_test_provider(1_000_000).await;
-
-        // Set a value
-        provider.set("key1", vec![1, 2, 3]).await.unwrap();
-
-        // Manually delete the file using the provider's path resolution
-        let path = provider.lru_index().key_to_path("key1");
-        std::fs::remove_file(path).unwrap();
-
-        // Contains should return false and clean up index
-        assert!(!provider.contains("key1").await.unwrap());
-        assert!(!provider.lru_index().contains("key1"));
+        // A subsequent contains() now correctly returns false.
+        assert!(
+            !provider.contains("key1").await.unwrap(),
+            "contains() returns false after reactive cleanup"
+        );
 
         provider.shutdown().await;
     }

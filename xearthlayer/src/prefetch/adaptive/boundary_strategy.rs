@@ -144,10 +144,13 @@ impl BoundaryStrategy {
             }
             // Check-all with short-circuit on first miss. Each lookup is
             // an O(1) in-memory index check.
-            let all_present = tiles.iter().all(|t| {
-                let (chunk_row, chunk_col, chunk_zoom) = t.chunk_origin();
-                checker.tile_exists_blocking(chunk_row, chunk_col, chunk_zoom)
-            });
+            // Pass tile coords (not chunk_origin) — the DDS disk cache is
+            // keyed by tile coords `tile:{tile_zoom}:{tile_row}:{tile_col}`.
+            // Using chunk coords here silently returned false for every
+            // tile, preventing promotion.
+            let all_present = tiles
+                .iter()
+                .all(|t| checker.tile_exists_blocking(t.row, t.col, t.zoom));
             if all_present {
                 geo_index.insert::<PrefetchedRegion>(*region, PrefetchedRegion::prefetched());
                 promoted += 1;
@@ -363,8 +366,8 @@ mod tests {
     // =========================================================================
 
     /// Mock [`DdsDiskCacheChecker`] backed by an in-memory set of tile
-    /// chunk coordinates. Used by `promote_completed_regions` tests to
-    /// simulate tiles present / absent on the DDS disk cache.
+    /// coordinates. Stores by tile coords (not chunk) to match how the
+    /// DDS disk cache is actually keyed.
     struct MockDiskChecker {
         tiles: std::sync::Mutex<HashSet<(u32, u32, u8)>>,
     }
@@ -376,16 +379,13 @@ mod tests {
             }
         }
 
-        /// Populate from a set of [`TileCoord`]s, converting each to its
-        /// chunk-origin triple before storing (matches what
-        /// `promote_completed_regions` queries).
+        /// Populate from a set of [`TileCoord`]s.
         fn with_tile_coords(iter: impl IntoIterator<Item = TileCoord>) -> Arc<Self> {
             let me = Self::new();
             {
                 let mut set = me.tiles.lock().unwrap();
                 for tile in iter {
-                    let (r, c, z) = tile.chunk_origin();
-                    set.insert((r, c, z));
+                    set.insert((tile.row, tile.col, tile.zoom));
                 }
             }
             Arc::new(me)

@@ -57,19 +57,6 @@ pub struct AdaptivePrefetchConfig {
     /// `calibration.opportunistic_threshold` during calibration.
     pub low_performance_killswitch: KillswitchMode,
 
-    /// Maximum tiles per prefetch cycle.
-    ///
-    /// Caps tiles submitted in a single prefetch operation.
-    /// Controls queue depth, not processing rate (see `ResourcePool` prefetch fraction).
-    /// Range: 50 - 500
-    pub max_tiles_per_cycle: u32,
-
-    /// Ground strategy ring radius (degrees).
-    ///
-    /// Radius of prefetch ring when aircraft is on ground.
-    /// Range: 0.5 - 2.0
-    pub ground_ring_radius: f64,
-
     /// Calibration thresholds and parameters.
     pub calibration: CalibrationConfig,
 
@@ -105,25 +92,16 @@ pub struct AdaptivePrefetchConfig {
     /// How long a region can stay InProgress before being considered stale.
     pub stale_region_timeout: Duration,
 
-    /// Assumed window height in DSF tiles.
-    ///
-    /// Used when the actual window size is unknown.
-    /// Range: 2 - 12
-    pub default_window_rows: usize,
-
-    /// Longitude extent in degrees for dynamic column computation.
-    ///
-    /// Columns computed as `ceil(lon_extent / cos(latitude))`.
-    /// Range: 1.0 - 10.0
-    pub window_lon_extent: f64,
-
-    // Sliding prefetch box settings
+    // Prefetch box settings (used by both ground and cruise phases)
     /// Total prefetch box extent per axis in degrees.
     ///
-    /// X-Plane loads a ~6×6 DSF area around the aircraft. 9° covers
-    /// this with 1.5° overlap on all sides, ensuring tiles are ready
-    /// before X-Plane crosses into the next DSF region.
-    /// Range: 7.0 - 15.0
+    /// - On the ground: used directly (symmetric bias 0.5, square box).
+    /// - In cruise: the maximum of a speed-proportional ramp from
+    ///   `box_min_extent` up to this value, with forward heading bias.
+    ///
+    /// Default 7.0° produces a 7×7 DSF grid (49 tiles) at full extent —
+    /// comfortably beyond X-Plane's ~3° scenery window.
+    /// Range: 3.0 - 15.0
     pub box_extent: f64,
 
     /// Maximum forward bias fraction (0.5 = symmetric, 0.8 = 80/20).
@@ -157,8 +135,6 @@ impl Default for AdaptivePrefetchConfig {
             enabled: true,
             mode: PrefetchMode::Auto,
             low_performance_killswitch: KillswitchMode::Auto,
-            max_tiles_per_cycle: 200,
-            ground_ring_radius: 1.0,
             calibration: CalibrationConfig::default(),
             ground_speed_threshold_kt: 40.0,
             takeoff_climb_ft: 1000.0,
@@ -168,9 +144,7 @@ impl Default for AdaptivePrefetchConfig {
             ramp_start_fraction: 0.25,
             window_buffer: 1,
             stale_region_timeout: Duration::from_secs(120),
-            default_window_rows: 3,
-            window_lon_extent: 3.0,
-            box_extent: 6.5,
+            box_extent: 7.0,
             box_max_bias: 0.8,
             box_min_extent: DEFAULT_BOX_MIN_EXTENT,
             box_min_speed: DEFAULT_BOX_MIN_SPEED,
@@ -191,7 +165,6 @@ impl AdaptivePrefetchConfig {
         Self {
             enabled: settings.enabled,
             mode,
-            max_tiles_per_cycle: settings.max_tiles_per_cycle as u32,
             calibration: CalibrationConfig {
                 aggressive_threshold: settings.calibration_aggressive_threshold,
                 opportunistic_threshold: settings.calibration_opportunistic_threshold,
@@ -205,8 +178,6 @@ impl AdaptivePrefetchConfig {
             ramp_start_fraction: settings.ramp_start_fraction,
             window_buffer: settings.window_buffer,
             stale_region_timeout: Duration::from_secs(settings.stale_region_timeout),
-            default_window_rows: settings.default_window_rows,
-            window_lon_extent: settings.window_lon_extent,
             box_extent: settings.box_extent,
             box_max_bias: settings.box_max_bias,
             ..Default::default()
@@ -222,7 +193,6 @@ impl AdaptivePrefetchConfig {
         Self {
             enabled: config.enabled,
             mode,
-            max_tiles_per_cycle: config.max_tiles_per_cycle as u32,
             calibration: CalibrationConfig {
                 aggressive_threshold: config.calibration_aggressive_threshold,
                 opportunistic_threshold: config.calibration_opportunistic_threshold,
@@ -236,8 +206,6 @@ impl AdaptivePrefetchConfig {
             ramp_start_fraction: config.ramp_start_fraction,
             window_buffer: config.window_buffer,
             stale_region_timeout: Duration::from_secs(config.stale_region_timeout),
-            default_window_rows: config.default_window_rows,
-            window_lon_extent: config.window_lon_extent,
             box_extent: config.box_extent,
             box_max_bias: config.box_max_bias,
             ..Default::default()
@@ -419,7 +387,7 @@ mod tests {
         let config = AdaptivePrefetchConfig::default();
         assert!(config.enabled);
         assert_eq!(config.mode, PrefetchMode::Auto);
-        assert_eq!(config.max_tiles_per_cycle, 200);
+        assert_eq!(config.box_extent, 7.0);
     }
 
     #[test]
@@ -489,8 +457,6 @@ mod tests {
         let config = AdaptivePrefetchConfig::default();
         assert_eq!(config.window_buffer, 1);
         assert_eq!(config.stale_region_timeout, Duration::from_secs(120));
-        assert_eq!(config.default_window_rows, 3);
-        assert_eq!(config.window_lon_extent, 3.0);
     }
 
     #[test]
@@ -499,7 +465,6 @@ mod tests {
             enabled: true,
             mode: "auto".to_string(),
             web_api_port: 8086,
-            max_tiles_per_cycle: 200,
             cycle_interval_ms: 2000,
             calibration_aggressive_threshold: 30.0,
             calibration_opportunistic_threshold: 10.0,
@@ -511,8 +476,6 @@ mod tests {
             ramp_start_fraction: 0.25,
             window_buffer: 2,
             stale_region_timeout: 300,
-            default_window_rows: 4,
-            window_lon_extent: 4.0,
             box_extent: 11.0,
             box_max_bias: 0.7,
         };
@@ -520,8 +483,7 @@ mod tests {
         let config = AdaptivePrefetchConfig::from_prefetch_settings(&settings);
         assert_eq!(config.window_buffer, 2);
         assert_eq!(config.stale_region_timeout, Duration::from_secs(300));
-        assert_eq!(config.default_window_rows, 4);
-        assert_eq!(config.window_lon_extent, 4.0);
+        assert_eq!(config.box_extent, 11.0);
     }
 
     #[test]

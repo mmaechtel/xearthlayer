@@ -71,7 +71,6 @@ pub enum ConfigKey {
     PrefetchEnabled,
     PrefetchMode,
     PrefetchWebApiPort,
-    PrefetchMaxTilesPerCycle,
     PrefetchCycleIntervalMs,
 
     // Adaptive prefetch calibration settings
@@ -89,8 +88,6 @@ pub enum ConfigKey {
     // Boundary-driven prefetch settings
     PrefetchWindowBuffer,
     PrefetchStaleRegionTimeout,
-    PrefetchDefaultWindowRows,
-    PrefetchWindowLonExtent,
     PrefetchBoxExtent,
     PrefetchBoxMaxBias,
 
@@ -154,7 +151,6 @@ impl FromStr for ConfigKey {
             "prefetch.enabled" => Ok(ConfigKey::PrefetchEnabled),
             "prefetch.mode" => Ok(ConfigKey::PrefetchMode),
             "prefetch.web_api_port" => Ok(ConfigKey::PrefetchWebApiPort),
-            "prefetch.max_tiles_per_cycle" => Ok(ConfigKey::PrefetchMaxTilesPerCycle),
             "prefetch.cycle_interval_ms" => Ok(ConfigKey::PrefetchCycleIntervalMs),
             "prefetch.calibration_aggressive_threshold" => {
                 Ok(ConfigKey::PrefetchCalibrationAggressiveThreshold)
@@ -172,8 +168,6 @@ impl FromStr for ConfigKey {
             "prefetch.ramp_start_fraction" => Ok(ConfigKey::PrefetchRampStartFraction),
             "prefetch.window_buffer" => Ok(ConfigKey::PrefetchWindowBuffer),
             "prefetch.stale_region_timeout" => Ok(ConfigKey::PrefetchStaleRegionTimeout),
-            "prefetch.default_window_rows" => Ok(ConfigKey::PrefetchDefaultWindowRows),
-            "prefetch.window_lon_extent" => Ok(ConfigKey::PrefetchWindowLonExtent),
             "prefetch.box_extent" => Ok(ConfigKey::PrefetchBoxExtent),
             "prefetch.box_max_bias" => Ok(ConfigKey::PrefetchBoxMaxBias),
 
@@ -232,7 +226,6 @@ impl ConfigKey {
             ConfigKey::PrefetchEnabled => "prefetch.enabled",
             ConfigKey::PrefetchMode => "prefetch.mode",
             ConfigKey::PrefetchWebApiPort => "prefetch.web_api_port",
-            ConfigKey::PrefetchMaxTilesPerCycle => "prefetch.max_tiles_per_cycle",
             ConfigKey::PrefetchCycleIntervalMs => "prefetch.cycle_interval_ms",
             ConfigKey::PrefetchCalibrationAggressiveThreshold => {
                 "prefetch.calibration_aggressive_threshold"
@@ -248,8 +241,6 @@ impl ConfigKey {
             ConfigKey::PrefetchRampStartFraction => "prefetch.ramp_start_fraction",
             ConfigKey::PrefetchWindowBuffer => "prefetch.window_buffer",
             ConfigKey::PrefetchStaleRegionTimeout => "prefetch.stale_region_timeout",
-            ConfigKey::PrefetchDefaultWindowRows => "prefetch.default_window_rows",
-            ConfigKey::PrefetchWindowLonExtent => "prefetch.window_lon_extent",
             ConfigKey::PrefetchBoxExtent => "prefetch.box_extent",
             ConfigKey::PrefetchBoxMaxBias => "prefetch.box_max_bias",
             // Prewarm settings
@@ -345,7 +336,6 @@ impl ConfigKey {
             ConfigKey::PrefetchEnabled => config.prefetch.enabled.to_string(),
             ConfigKey::PrefetchMode => config.prefetch.mode.clone(),
             ConfigKey::PrefetchWebApiPort => config.prefetch.web_api_port.to_string(),
-            ConfigKey::PrefetchMaxTilesPerCycle => config.prefetch.max_tiles_per_cycle.to_string(),
             ConfigKey::PrefetchCycleIntervalMs => config.prefetch.cycle_interval_ms.to_string(),
             ConfigKey::PrefetchCalibrationAggressiveThreshold => {
                 config.prefetch.calibration_aggressive_threshold.to_string()
@@ -370,8 +360,6 @@ impl ConfigKey {
             ConfigKey::PrefetchStaleRegionTimeout => {
                 config.prefetch.stale_region_timeout.to_string()
             }
-            ConfigKey::PrefetchDefaultWindowRows => config.prefetch.default_window_rows.to_string(),
-            ConfigKey::PrefetchWindowLonExtent => config.prefetch.window_lon_extent.to_string(),
             ConfigKey::PrefetchBoxExtent => config.prefetch.box_extent.to_string(),
             ConfigKey::PrefetchBoxMaxBias => config.prefetch.box_max_bias.to_string(),
             // Prewarm settings
@@ -502,9 +490,6 @@ impl ConfigKey {
             ConfigKey::PrefetchWebApiPort => {
                 config.prefetch.web_api_port = value.parse().unwrap();
             }
-            ConfigKey::PrefetchMaxTilesPerCycle => {
-                config.prefetch.max_tiles_per_cycle = value.parse().unwrap();
-            }
             ConfigKey::PrefetchCycleIntervalMs => {
                 config.prefetch.cycle_interval_ms = value.parse().unwrap();
             }
@@ -537,12 +522,6 @@ impl ConfigKey {
             }
             ConfigKey::PrefetchStaleRegionTimeout => {
                 config.prefetch.stale_region_timeout = value.parse().unwrap();
-            }
-            ConfigKey::PrefetchDefaultWindowRows => {
-                config.prefetch.default_window_rows = value.parse().unwrap();
-            }
-            ConfigKey::PrefetchWindowLonExtent => {
-                config.prefetch.window_lon_extent = value.parse().unwrap();
             }
             ConfigKey::PrefetchBoxExtent => {
                 config.prefetch.box_extent = value.parse().unwrap();
@@ -647,7 +626,6 @@ impl ConfigKey {
                 "disabled",
             ])),
             ConfigKey::PrefetchWebApiPort => Box::new(IntegerRangeSpec::new(1024, 65535)),
-            ConfigKey::PrefetchMaxTilesPerCycle => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCycleIntervalMs => Box::new(PositiveIntegerSpec),
             ConfigKey::PrefetchCalibrationAggressiveThreshold => Box::new(PositiveNumberSpec),
             ConfigKey::PrefetchCalibrationOpportunisticThreshold => Box::new(PositiveNumberSpec),
@@ -659,8 +637,6 @@ impl ConfigKey {
             ConfigKey::PrefetchRampStartFraction => Box::new(FloatRangeSpec::new(0.1, 0.5)),
             ConfigKey::PrefetchWindowBuffer => Box::new(IntegerRangeSpec::new(0, 3)),
             ConfigKey::PrefetchStaleRegionTimeout => Box::new(IntegerRangeSpec::new(30, 600)),
-            ConfigKey::PrefetchDefaultWindowRows => Box::new(IntegerRangeSpec::new(2, 12)),
-            ConfigKey::PrefetchWindowLonExtent => Box::new(FloatRangeSpec::new(1.0, 10.0)),
             ConfigKey::PrefetchBoxExtent => Box::new(FloatRangeSpec::new(7.0, 15.0)),
             ConfigKey::PrefetchBoxMaxBias => Box::new(FloatRangeSpec::new(0.5, 0.9)),
             // Prewarm settings
@@ -718,7 +694,6 @@ impl ConfigKey {
             ConfigKey::PrefetchEnabled,
             ConfigKey::PrefetchMode,
             ConfigKey::PrefetchWebApiPort,
-            ConfigKey::PrefetchMaxTilesPerCycle,
             ConfigKey::PrefetchCycleIntervalMs,
             ConfigKey::PrefetchCalibrationAggressiveThreshold,
             ConfigKey::PrefetchCalibrationOpportunisticThreshold,
@@ -730,8 +705,6 @@ impl ConfigKey {
             ConfigKey::PrefetchRampStartFraction,
             ConfigKey::PrefetchWindowBuffer,
             ConfigKey::PrefetchStaleRegionTimeout,
-            ConfigKey::PrefetchDefaultWindowRows,
-            ConfigKey::PrefetchWindowLonExtent,
             ConfigKey::PrefetchBoxExtent,
             ConfigKey::PrefetchBoxMaxBias,
             // Prewarm settings
@@ -1206,34 +1179,10 @@ mod tests {
     }
 
     #[test]
-    fn test_default_window_rows_config_key() {
-        let key = ConfigKey::from_str("prefetch.default_window_rows").unwrap();
-        assert_eq!(key.name(), "prefetch.default_window_rows");
-        assert!(key.validate("3").is_ok());
-        assert!(key.validate("12").is_ok());
-        assert!(key.validate("2").is_ok());
-        assert!(key.validate("1").is_err());
-        assert!(key.validate("13").is_err());
-    }
-
-    #[test]
-    fn test_window_lon_extent_config_key() {
-        let key = ConfigKey::from_str("prefetch.window_lon_extent").unwrap();
-        assert_eq!(key.name(), "prefetch.window_lon_extent");
-        assert!(key.validate("3.0").is_ok());
-        assert!(key.validate("1.0").is_ok());
-        assert!(key.validate("10.0").is_ok());
-        assert!(key.validate("0.5").is_err());
-        assert!(key.validate("11.0").is_err());
-    }
-
-    #[test]
     fn test_new_prefetch_keys_in_all() {
         let all = ConfigKey::all();
         assert!(all.contains(&ConfigKey::PrefetchWindowBuffer));
         assert!(all.contains(&ConfigKey::PrefetchStaleRegionTimeout));
-        assert!(all.contains(&ConfigKey::PrefetchDefaultWindowRows));
-        assert!(all.contains(&ConfigKey::PrefetchWindowLonExtent));
     }
 
     #[test]
@@ -1249,16 +1198,6 @@ mod tests {
             .set(&mut config, "300")
             .unwrap();
         assert_eq!(ConfigKey::PrefetchStaleRegionTimeout.get(&config), "300");
-
-        ConfigKey::PrefetchDefaultWindowRows
-            .set(&mut config, "8")
-            .unwrap();
-        assert_eq!(ConfigKey::PrefetchDefaultWindowRows.get(&config), "8");
-
-        ConfigKey::PrefetchWindowLonExtent
-            .set(&mut config, "4.0")
-            .unwrap();
-        assert_eq!(ConfigKey::PrefetchWindowLonExtent.get(&config), "4");
     }
 
     #[test]

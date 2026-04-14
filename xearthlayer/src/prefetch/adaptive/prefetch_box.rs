@@ -21,6 +21,26 @@ use tracing::debug;
 
 use crate::geo_index::{DsfRegion, GeoIndex, PrefetchedRegion, RetainedRegion};
 
+/// Geometric parameters that define the shape of a prefetch box.
+///
+/// `extent` and `max_bias` always travel together through the box API —
+/// bundling them here makes per-call overrides explicit (ground uses
+/// symmetric 0.5 bias; cruise uses heading-biased 0.8) without expanding
+/// method signatures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShape {
+    /// Total extent per axis in degrees.
+    pub extent: f64,
+    /// Maximum forward bias fraction (0.5 = symmetric, 0.8 = 80/20).
+    pub max_bias: f64,
+}
+
+impl BoxShape {
+    pub fn new(extent: f64, max_bias: f64) -> Self {
+        Self { extent, max_bias }
+    }
+}
+
 /// A heading-aware prefetch region around the aircraft.
 ///
 /// The box has a fixed total extent per axis but biases the distribution
@@ -120,13 +140,30 @@ impl PrefetchBox {
         track: f64,
         extent: f64,
     ) -> (f64, f64, f64, f64) {
+        self.bounds_with_shape(lat, lon, track, BoxShape::new(extent, self.max_bias))
+    }
+
+    /// Compute bounds with a per-call `BoxShape` (extent + max_bias).
+    ///
+    /// This is the primitive behind `bounds()` / `bounds_with_extent()`.
+    /// Accepts both parameters bundled so the coordinator can use a
+    /// symmetric shape (bias=0.5) on the ground and a forward-biased one
+    /// (bias=0.8) in cruise, without mutating the `PrefetchBox`.
+    pub fn bounds_with_shape(
+        &self,
+        lat: f64,
+        lon: f64,
+        track: f64,
+        shape: BoxShape,
+    ) -> (f64, f64, f64, f64) {
+        let BoxShape { extent, max_bias } = shape;
         let track_rad = track.to_radians();
         let lat_component = track_rad.cos(); // positive = north
         let lon_component = track_rad.sin(); // positive = east
 
         // Proportional forward fraction: 0.5 (symmetric) to max_bias (fully biased)
-        let lat_fwd_frac = 0.5 + (self.max_bias - 0.5) * lat_component.abs();
-        let lon_fwd_frac = 0.5 + (self.max_bias - 0.5) * lon_component.abs();
+        let lat_fwd_frac = 0.5 + (max_bias - 0.5) * lat_component.abs();
+        let lon_fwd_frac = 0.5 + (max_bias - 0.5) * lon_component.abs();
 
         // Apply direction: forward fraction goes in the direction of travel
         let (lat_min, lat_max) = if lat_component >= 0.0 {
@@ -171,7 +208,18 @@ impl PrefetchBox {
         track: f64,
         extent: f64,
     ) -> Vec<DsfRegion> {
-        let (lat_min, lat_max, lon_min, lon_max) = self.bounds_with_extent(lat, lon, track, extent);
+        self.regions_with_shape(lat, lon, track, BoxShape::new(extent, self.max_bias))
+    }
+
+    /// Regions with a per-call `BoxShape`.
+    pub fn regions_with_shape(
+        &self,
+        lat: f64,
+        lon: f64,
+        track: f64,
+        shape: BoxShape,
+    ) -> Vec<DsfRegion> {
+        let (lat_min, lat_max, lon_min, lon_max) = self.bounds_with_shape(lat, lon, track, shape);
 
         let dsf_lat_min = lat_min.floor() as i32;
         let dsf_lat_max = (lat_max - 1e-9).floor() as i32;
@@ -203,7 +251,25 @@ impl PrefetchBox {
         geo_index: &GeoIndex,
         extent: f64,
     ) -> Vec<DsfRegion> {
-        self.regions_with_extent(lat, lon, track, extent)
+        self.new_regions_with_shape(
+            lat,
+            lon,
+            track,
+            geo_index,
+            BoxShape::new(extent, self.max_bias),
+        )
+    }
+
+    /// New regions with a per-call `BoxShape`.
+    pub fn new_regions_with_shape(
+        &self,
+        lat: f64,
+        lon: f64,
+        track: f64,
+        geo_index: &GeoIndex,
+        shape: BoxShape,
+    ) -> Vec<DsfRegion> {
+        self.regions_with_shape(lat, lon, track, shape)
             .into_iter()
             .filter(|r| PrefetchedRegion::should_prefetch(geo_index, r))
             .collect()
@@ -222,7 +288,27 @@ impl PrefetchBox {
         geo_index: &GeoIndex,
         extent: f64,
     ) {
-        let (lat_min, lat_max, lon_min, lon_max) = self.bounds_with_extent(lat, lon, track, extent);
+        self.update_retention_with_shape(
+            lat,
+            lon,
+            track,
+            buffer,
+            geo_index,
+            BoxShape::new(extent, self.max_bias),
+        );
+    }
+
+    /// Update retention with a per-call `BoxShape`.
+    pub fn update_retention_with_shape(
+        &self,
+        lat: f64,
+        lon: f64,
+        track: f64,
+        buffer: i32,
+        geo_index: &GeoIndex,
+        shape: BoxShape,
+    ) {
+        let (lat_min, lat_max, lon_min, lon_max) = self.bounds_with_shape(lat, lon, track, shape);
 
         let dsf_lat_min = lat_min.floor() as i32 - buffer;
         let dsf_lat_max = (lat_max - 1e-9).floor() as i32 + buffer;

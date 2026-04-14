@@ -161,11 +161,6 @@ pub const DEFAULT_GENERATION_TIMEOUT_SECS: u64 = 10;
 /// Default Web API port for X-Plane SimState polling.
 pub const DEFAULT_WEB_API_PORT: u16 = 8086;
 
-/// Default maximum tiles to submit per prefetch cycle.
-/// This controls queue depth, not processing rate — actual CPU consumption
-/// is governed by the prefetch fraction in `ResourcePool`.
-pub const DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE: usize = 200;
-
 /// Default interval between prefetch cycles in milliseconds.
 pub const DEFAULT_PREFETCH_CYCLE_INTERVAL_MS: u64 = 2000;
 
@@ -215,18 +210,11 @@ pub const DEFAULT_PREFETCH_WINDOW_BUFFER: u8 = 1;
 /// Default InProgress staleness timeout in seconds.
 pub const DEFAULT_PREFETCH_STALE_REGION_TIMEOUT: u64 = 120;
 
-/// Default assumed window height in DSF tiles.
-/// Empirically measured at EDDF, YPAD, WSSS: ~3° latitude (constant worldwide).
-pub const DEFAULT_PREFETCH_DEFAULT_WINDOW_ROWS: usize = 3;
-
-/// Default longitude extent in degrees for scenery window computation.
-/// X-Plane loads ~330km × 330km; cols = ceil(this / cos(lat)).
-/// Actual column count varies by latitude via `lon_tiles_for_latitude()`.
-pub const DEFAULT_PREFETCH_WINDOW_LON_EXTENT: f64 = 3.0;
-
 /// Default prefetch box extent per axis in degrees.
-/// X-Plane loads a ~6×6 DSF area; 6.5° covers this with 0.5° overlap.
-pub const DEFAULT_BOX_EXTENT: f64 = 6.5;
+/// Used both as the ground-phase fixed extent and as the maximum of the
+/// cruise-phase speed-proportional ramp. 7° produces a 7×7 DSF grid
+/// (49 tiles) — comfortably beyond X-Plane's ~3° scenery window.
+pub const DEFAULT_BOX_EXTENT: f64 = 7.0;
 
 /// Default maximum forward bias fraction for the sliding prefetch box.
 /// 0.8 means 80% ahead / 20% behind on the primary axis.
@@ -396,7 +384,6 @@ impl Default for ConfigFile {
                 enabled: true,
                 mode: "auto".to_string(),
                 web_api_port: DEFAULT_WEB_API_PORT,
-                max_tiles_per_cycle: DEFAULT_PREFETCH_MAX_TILES_PER_CYCLE,
                 cycle_interval_ms: DEFAULT_PREFETCH_CYCLE_INTERVAL_MS,
                 calibration_aggressive_threshold: DEFAULT_CALIBRATION_AGGRESSIVE_THRESHOLD,
                 calibration_opportunistic_threshold: DEFAULT_CALIBRATION_OPPORTUNISTIC_THRESHOLD,
@@ -408,8 +395,6 @@ impl Default for ConfigFile {
                 ramp_start_fraction: DEFAULT_RAMP_START_FRACTION,
                 window_buffer: DEFAULT_PREFETCH_WINDOW_BUFFER,
                 stale_region_timeout: DEFAULT_PREFETCH_STALE_REGION_TIMEOUT,
-                default_window_rows: DEFAULT_PREFETCH_DEFAULT_WINDOW_ROWS,
-                window_lon_extent: DEFAULT_PREFETCH_WINDOW_LON_EXTENT,
                 box_extent: DEFAULT_BOX_EXTENT,
                 box_max_bias: DEFAULT_BOX_MAX_BIAS,
             },

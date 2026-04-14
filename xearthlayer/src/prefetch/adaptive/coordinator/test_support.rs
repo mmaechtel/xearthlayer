@@ -147,9 +147,10 @@ impl crate::executor::DaemonMemoryCache for AlwaysMissMemoryCache {
 /// Mock [`DdsDiskCacheChecker`] for coordinator tests.
 ///
 /// Holds an in-memory `HashSet<(row, col, zoom)>` of chunk-origin triples.
-/// Use [`MockDiskChecker::with_tile_coords`] to seed it with [`TileCoord`]s
-/// (each is converted via `chunk_origin()` before storage, matching what
-/// `promote_completed_regions` queries).
+/// Use [`MockDiskChecker::with_tile_coords`] to seed it with [`TileCoord`]s.
+/// Stores the tile coords directly — the DDS disk cache is keyed by tile
+/// coords (`tile:{tile_zoom}:{tile_row}:{tile_col}`) and the filter's
+/// `tile_exists_blocking(row, col, zoom)` calls use those same values.
 pub(crate) struct MockDiskChecker {
     tiles: std::sync::Mutex<HashSet<(u32, u32, u8)>>,
 }
@@ -167,8 +168,7 @@ impl MockDiskChecker {
         {
             let mut set = me.tiles.lock().unwrap();
             for tile in iter {
-                let (r, c, z) = tile.chunk_origin();
-                set.insert((r, c, z));
+                set.insert((tile.row, tile.col, tile.zoom));
             }
         }
         Arc::new(me)

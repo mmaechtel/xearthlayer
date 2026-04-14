@@ -165,12 +165,19 @@ pub(crate) fn filter_dds_disk_cache(
     checker: &Arc<dyn DdsDiskCacheChecker>,
 ) -> (Vec<TileCoord>, usize) {
     let before = tiles.len();
+    // IMPORTANT: pass tile coords, not chunk coords. The DDS disk cache
+    // stores tiles keyed by `tile:{tile_zoom}:{tile_row}:{tile_col}`
+    // (e.g. `tile:12:1441:2237`). An earlier version of this code copied
+    // the `chunk_origin()` pattern from `filter_disk_tiles` (which checks
+    // the OrthoUnionIndex for package .dds files — those ARE named by
+    // chunk coords). The coordinate systems differ; passing chunk coords
+    // here means the lookup never matches, the filter always returns
+    // "not cached", and every previously-prefetched tile gets re-submitted
+    // to the executor — which then reads the 10MB DDS off disk to return
+    // it as a cache hit. Symptom: constant disk reads during drain cycles.
     let filtered: Vec<TileCoord> = tiles
         .into_iter()
-        .filter(|tile| {
-            let (chunk_row, chunk_col, chunk_zoom) = tile.chunk_origin();
-            !checker.tile_exists_blocking(chunk_row, chunk_col, chunk_zoom)
-        })
+        .filter(|tile| !checker.tile_exists_blocking(tile.row, tile.col, tile.zoom))
         .collect();
     let hits = before - filtered.len();
 
@@ -495,13 +502,14 @@ mod tests {
 
     #[test]
     fn test_filter_dds_disk_cache_removes_tiles_in_cache() {
-        // Populate checker with 5 of 10 tiles' chunk-origin coords.
-        // Filter should strip exactly those 5.
+        // Populate checker with the tile coords of the first 5 of 10 tiles.
+        // Filter should strip exactly those 5. The DDS disk cache is keyed
+        // by tile coords (not chunk coords — those are a separate cache
+        // tier for pre-assembly chunks).
         let tiles = test_tiles(10);
         let mut in_cache = HashSet::new();
         for tile in tiles.iter().take(5) {
-            let (r, c, z) = tile.chunk_origin();
-            in_cache.insert((r, c, z));
+            in_cache.insert((tile.row, tile.col, tile.zoom));
         }
         let checker: Arc<dyn crate::executor::DdsDiskCacheChecker> =
             Arc::new(ChunkSetDiskChecker(in_cache));
@@ -509,7 +517,6 @@ mod tests {
         let (filtered, hits) = filter_dds_disk_cache(tiles.clone(), &checker);
         assert_eq!(hits, 5);
         assert_eq!(filtered.len(), 5);
-        // Survivors should be the last 5 tiles (which weren't in the cache)
         assert_eq!(filtered, tiles[5..]);
     }
 
@@ -524,6 +531,30 @@ mod tests {
         assert_eq!(filtered, tiles);
     }
 
+    #[test]
+    fn test_filter_dds_disk_cache_uses_tile_coords_not_chunk_coords() {
+        // Regression guard: the DDS disk cache is keyed by tile coords.
+        // Populating the checker with chunk coords must NOT match the
+        // tile-coord lookups — filter returns 0 hits. This prevents
+        // reintroducing the bug where the filter was silently matching
+        // nothing because it passed chunk_origin().
+        let tiles = test_tiles(10);
+        let mut chunk_keys = HashSet::new();
+        for tile in tiles.iter() {
+            let (cr, cc, cz) = tile.chunk_origin();
+            chunk_keys.insert((cr, cc, cz));
+        }
+        let checker: Arc<dyn crate::executor::DdsDiskCacheChecker> =
+            Arc::new(ChunkSetDiskChecker(chunk_keys));
+
+        let (filtered, hits) = filter_dds_disk_cache(tiles.clone(), &checker);
+        assert_eq!(
+            hits, 0,
+            "Filter must query by tile coords, so chunk-coord-populated checker finds nothing"
+        );
+        assert_eq!(filtered, tiles);
+    }
+
     #[tokio::test]
     async fn test_run_filter_pipeline_includes_dds_disk_stage() {
         // End-to-end: pipeline with all filters OFF except DDS disk.
@@ -532,8 +563,7 @@ mod tests {
         let mut tracked = HashSet::new();
         let mut in_cache = HashSet::new();
         for tile in tiles.iter().take(3) {
-            let (r, c, z) = tile.chunk_origin();
-            in_cache.insert((r, c, z));
+            in_cache.insert((tile.row, tile.col, tile.zoom));
         }
         let checker: Arc<dyn crate::executor::DdsDiskCacheChecker> =
             Arc::new(ChunkSetDiskChecker(in_cache));

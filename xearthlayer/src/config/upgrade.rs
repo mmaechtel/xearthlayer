@@ -95,6 +95,14 @@ pub const DEPRECATED_KEYS: &[&str] = &[
     // Removed in #58 - per-axis load depth and dynamic window columns
     "prefetch.load_depth",
     "prefetch.default_window_cols",
+    // Removed post-#172 - unified prefetch box replaces ring-based ground
+    // strategy and removes the max_tiles_per_cycle cap entirely. Scenery
+    // window assumptions (default_window_rows, window_lon_extent) are no
+    // longer used — the box is specified directly via `box_extent`.
+    "prefetch.max_tiles_per_cycle",
+    "prefetch.default_window_rows",
+    "prefetch.window_lon_extent",
+    "prefetch.ground_ring_radius",
     // Removed in #58 - prewarm uses separate grid_rows/grid_cols
     "prewarm.grid_size",
     // Removed - online network module deleted from aircraft_position

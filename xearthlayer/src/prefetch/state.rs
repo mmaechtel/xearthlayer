@@ -223,6 +223,20 @@ impl SharedPrefetchStatus {
         }
     }
 
+    /// Update the current prefetch box bounds.
+    ///
+    /// Called by the coordinator with the actual geographic bounds used
+    /// for region enumeration. The debug map consumes these directly
+    /// rather than recomputing, ensuring the overlay matches reality
+    /// (including phase-specific bias: symmetric on ground, heading-biased
+    /// in cruise). `None` means no active box this cycle (Transition,
+    /// disabled, or no position).
+    pub fn update_box_bounds(&self, bounds: Option<BoxBoundsSnapshot>) {
+        if let Ok(mut inner) = self.inner.write() {
+            inner.box_bounds = bounds;
+        }
+    }
+
     /// Get a snapshot of the current status.
     pub fn snapshot(&self) -> PrefetchStatusSnapshot {
         self.inner.read().map(|r| r.clone()).unwrap_or_default()
@@ -244,6 +258,25 @@ pub struct PrefetchStatusSnapshot {
     pub detailed_stats: Option<DetailedPrefetchStats>,
     /// Current prefetch box extent in degrees (speed-proportional; 0.0 when unknown).
     pub box_extent: f64,
+    /// Current prefetch box bounds as used by the coordinator this cycle.
+    ///
+    /// Populated directly from the coordinator's computed bounds — the
+    /// debug map reads this to render the overlay, which guarantees the
+    /// UI matches the actual prefetch geometry (no drift, no recomputation).
+    pub box_bounds: Option<BoxBoundsSnapshot>,
+}
+
+/// Geographic bounds of the current prefetch box.
+///
+/// Published by the coordinator each cycle so UI consumers (debug map,
+/// dashboard) render the *actual* box used for region enumeration rather
+/// than reconstructing one from config.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxBoundsSnapshot {
+    pub lat_min: f64,
+    pub lat_max: f64,
+    pub lon_min: f64,
+    pub lon_max: f64,
 }
 
 /// Aircraft state snapshot for display (without Instant which can't be cloned easily).
