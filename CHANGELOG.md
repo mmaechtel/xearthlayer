@@ -7,13 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **TUI cache hit rates reflect X-Plane experience, not prefetch traffic** ([#171](https://github.com/samsoir/xearthlayer/issues/171)): The Memory and DDS Disk tiers in the cache widget now render FUSE-only hit rates and counts, so the percentages reflect how well the cache is serving X-Plane's actual requests. Previously, aggregate counters included prefetch and prewarm traffic — a long-haul flight with a 100%-full memory cache would show ~47% hit rate because prefetch misses dominated the denominator. Added `is_fuse` discriminator to `DdsDiskCacheHit`/`DdsDiskCacheMiss` events, paired FUSE-only counters in state and snapshot, and wired the executor daemon to tag events based on `RequestOrigin`. The Chunks tier continues to use aggregate (there's only one chunk-read path, so aggregate equals FUSE there). Also fixed a latent bug in `manager/mounts.rs` where `fuse_memory_cache_hit_rate` was never recalculated during multi-service aggregation.
+## [0.4.4] - 2026-04-16
 
 ### Changed
 
+- **Unified ground/cruise prefetch under single PrefetchBox** ([#172](https://github.com/samsoir/xearthlayer/issues/172)): Replaced the ring-based `GroundStrategy` (746 lines) with symmetric `PrefetchBox` (bias 0.5). Ground and cruise phases now share the same code path — ground uses a fixed extent with symmetric bias, cruise uses speed-proportional extent with heading bias (0.8). Eliminated dead `scene_tracker.loaded_bounds()` wiring that was never called in production.
+
+- **Debug map renders actual prefetch box (SSOT)** ([#172](https://github.com/samsoir/xearthlayer/issues/172)): The coordinator now computes bounds once per cycle and publishes them as `BoxBoundsSnapshot` via `SharedPrefetchStatus`. The debug map reads these verbatim — no recomputation, no drift between display and reality. Region colours are now GeoIndex-authoritative: regions stay yellow (InProgress) until every tile is verified on disk, then flip green (Prefetched). New orange (Mixed) state shows when FUSE has served tiles from a prefetched region.
+
 - **Three-tier cache metrics in TUI** ([#166](https://github.com/samsoir/xearthlayer/issues/166)): Split the combined "Disk" cache display into separate DDS Disk and Chunks tiers with independent hit rates. The TUI now shows a 3-column layout (Memory, DDS Disk, Chunks) with per-tier progress bars and hit/miss counters. DDS disk hit rate (93%+ in flight tests) is no longer hidden by chunk-level event volume.
+
+- **Default `executor.max_concurrent_jobs` tuned to `num_cpus / 2`** ([#172](https://github.com/samsoir/xearthlayer/issues/172)): Reduced from `ceil(num_cpus × 0.75)` to halve CPU pressure on X-Plane during heavy prefetch. Flight-tested as the best compromise between prefetch throughput and simulator frame rate.
+
+### Fixed
+
+- **Prefetch coverage degrades on long-haul flights** ([#172](https://github.com/samsoir/xearthlayer/issues/172)): Multiple interacting defects caused prefetched regions to enter permanent dead states on flights over ~2 hours. Regions were marked `InProgress` before submission results were known, the `cached_tiles` shadow set tracked only ~6% of actually-cached tiles, and DDS disk cache lookups used chunk coordinates instead of tile coordinates (silently returning `false` every time). Fixed by deferring `mark_in_progress` until after successful submission, replacing the shadow set with authoritative DDS disk cache queries, and correcting the coordinate mismatch. Verified against a 9-hour LOWW flight log.
+
+- **TUI cache hit rates reflect X-Plane experience, not prefetch traffic** ([#171](https://github.com/samsoir/xearthlayer/issues/171)): The Memory and DDS Disk tiers in the cache widget now render FUSE-only hit rates and counts, so the percentages reflect how well the cache is serving X-Plane's actual requests. Previously, aggregate counters included prefetch and prewarm traffic — a long-haul flight with a 100%-full memory cache would show ~47% hit rate because prefetch misses dominated the denominator. Added `is_fuse` discriminator to `DdsDiskCacheHit`/`DdsDiskCacheMiss` events, paired FUSE-only counters in state and snapshot, and wired the executor daemon to tag events based on `RequestOrigin`. The Chunks tier continues to use aggregate (there's only one chunk-read path, so aggregate equals FUSE there). Also fixed a latent bug in `manager/mounts.rs` where `fuse_memory_cache_hit_rate` was never recalculated during multi-service aggregation.
+
+- **TUI queue display order reversed** ([#165](https://github.com/samsoir/xearthlayer/issues/165)): Queue column now shows oldest (completing) jobs at the top with new jobs appended at the bottom, matching the natural reading order for a processing pipeline.
 
 ## [0.4.3] - 2026-04-07
 
@@ -981,7 +993,8 @@ Run `xearthlayer config upgrade` to automatically add new settings with defaults
 - Linux support only (Windows and macOS planned for future releases)
 - Requires FUSE3 for filesystem mounting
 
-[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/samsoir/xearthlayer/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/samsoir/xearthlayer/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/samsoir/xearthlayer/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/samsoir/xearthlayer/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/samsoir/xearthlayer/compare/v0.4.0...v0.4.1
