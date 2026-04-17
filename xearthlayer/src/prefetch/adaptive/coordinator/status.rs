@@ -4,6 +4,8 @@
 //! a snapshot of the coordinator's current state for display in the TUI
 //! and logging.
 
+use crate::prefetch::state::BoxBoundsSnapshot;
+
 use super::super::calibration::StrategyMode;
 use super::super::phase_detector::FlightPhase;
 
@@ -44,6 +46,14 @@ pub struct CoordinatorStatus {
 
     /// Current prefetch box extent in degrees (Cruise phase only; 0.0 otherwise).
     pub box_extent: f64,
+
+    /// Current prefetch box bounds (as actually used this cycle).
+    ///
+    /// `None` when prefetch is inactive (disabled, Transition, no position).
+    /// The debug map reads this via `SharedPrefetchStatus` to render the
+    /// overlay without recomputing — guaranteeing the UI matches reality
+    /// even when bias/extent diverge between ground and cruise phases.
+    pub box_bounds: Option<BoxBoundsSnapshot>,
 }
 
 impl Default for CoordinatorStatus {
@@ -56,6 +66,7 @@ impl Default for CoordinatorStatus {
             last_prefetch_count: 0,
             throttled: false,
             box_extent: 0.0,
+            box_bounds: None,
         }
     }
 }
@@ -86,6 +97,7 @@ mod tests {
             last_prefetch_count: 10,
             throttled: true,
             box_extent: 5.5,
+            box_bounds: None,
         };
 
         let cloned = status.clone();

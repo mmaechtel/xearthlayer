@@ -585,6 +585,15 @@ where
         }
 
         // Fast path: check memory cache first
+        let cache_key = format!("tile:{}:{}:{}", tile.zoom, tile.row, tile.col);
+        debug!(
+            cache_key = %cache_key,
+            tile_row = tile.row,
+            tile_col = tile.col,
+            tile_zoom = tile.zoom,
+            origin = %origin,
+            "Executor: checking cache tiers"
+        );
         let cache_result = memory_cache
             .get(tile.row, tile.col, tile.zoom)
             .instrument(tracing::trace_span!(target: "profiling", "cache_check"))

@@ -122,7 +122,7 @@ network_concurrent = {}
 cpu_concurrent = {}
 ; Disk I/O: Cache read/write operations (default: 64 for SSD)
 disk_io_concurrent = {}
-; Maximum concurrent DDS tile jobs (default: ceil(num_cpus × 0.75))
+; Maximum concurrent DDS tile jobs (default: num_cpus / 2)
 max_concurrent_jobs = {}
 
 ; Download behavior
@@ -174,10 +174,6 @@ mode = {}
 ; Web API port for X-Plane SimState polling (default: 8086, range: 1024-65535)
 web_api_port = {}
 
-; Cycle limits
-; Maximum tiles to submit per prefetch cycle (default: 200)
-; Lower values leave more bandwidth for on-demand requests
-max_tiles_per_cycle = {}
 ; Interval between prefetch cycles in milliseconds (default: 2000)
 ; Higher values reduce prefetch aggressiveness
 cycle_interval_ms = {}
@@ -210,15 +206,11 @@ ramp_start_fraction = {}
 window_buffer = {}
 ; InProgress staleness timeout in seconds (default: 120, range: 30-600)
 stale_region_timeout = {}
-; Assumed window height in DSF tiles (default: 3, range: 2-12)
-default_window_rows = {}
-; Longitude extent in degrees for window column computation (default: 3.0, range: 1.0-10.0)
-; Columns computed dynamically: ceil(lon_extent / cos(latitude))
-window_lon_extent = {}
 
-; Sliding prefetch box settings
-; Total prefetch box extent per axis in degrees (default: 9.0, range: 7.0-15.0)
-; X-Plane loads ~6x6 DSF area; 9 degrees covers this with 1.5 degree overlap on all sides
+; Prefetch box settings (used by both ground and cruise phases)
+; Total prefetch box extent per axis in degrees (default: 7.0, range: 3.0-15.0)
+; On the ground: used directly with symmetric bias, producing a square box centered on the aircraft.
+; In cruise: the maximum of a speed-proportional ramp from box_min_extent, with heading bias.
 box_extent = {}
 ; Maximum forward bias fraction (default: 0.8, range: 0.5-0.9)
 ; Controls how much the prefetch box shifts forward in the direction of travel
@@ -294,7 +286,6 @@ congestion_threshold = {}
         config.prefetch.enabled,
         config.prefetch.mode,
         config.prefetch.web_api_port,
-        config.prefetch.max_tiles_per_cycle,
         config.prefetch.cycle_interval_ms,
         config.prefetch.calibration_aggressive_threshold,
         config.prefetch.calibration_opportunistic_threshold,
@@ -306,8 +297,6 @@ congestion_threshold = {}
         config.prefetch.ramp_start_fraction,
         config.prefetch.window_buffer,
         config.prefetch.stale_region_timeout,
-        config.prefetch.default_window_rows,
-        config.prefetch.window_lon_extent,
         config.prefetch.box_extent,
         config.prefetch.box_max_bias,
         config.prewarm.grid_rows,

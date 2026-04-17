@@ -327,16 +327,9 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                 })?;
         }
         // Legacy settings cone_angle, inner_radius_nm, outer_radius_nm are deprecated (v0.4.0)
+        // `max_tiles_per_cycle` deprecated post-#172 (no longer used — the filter
+        // pipeline + executor backpressure + pending queue handle rate limiting).
         // They are ignored if present in config file (use 'xearthlayer config upgrade')
-        if let Some(v) = section.get("max_tiles_per_cycle") {
-            config.prefetch.max_tiles_per_cycle =
-                v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                    section: "prefetch".to_string(),
-                    key: "max_tiles_per_cycle".to_string(),
-                    value: v.to_string(),
-                    reason: "must be a positive integer".to_string(),
-                })?;
-        }
         if let Some(v) = section.get("cycle_interval_ms") {
             config.prefetch.cycle_interval_ms =
                 v.parse().map_err(|_| ConfigFileError::InvalidValue {
@@ -440,24 +433,10 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                     reason: "must be an integer between 30 and 600".to_string(),
                 })?;
         }
-        if let Some(v) = section.get("default_window_rows") {
-            config.prefetch.default_window_rows =
-                v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                    section: "prefetch".to_string(),
-                    key: "default_window_rows".to_string(),
-                    value: v.to_string(),
-                    reason: "must be an integer between 3 and 12".to_string(),
-                })?;
-        }
-        if let Some(v) = section.get("window_lon_extent") {
-            config.prefetch.window_lon_extent =
-                v.parse().map_err(|_| ConfigFileError::InvalidValue {
-                    section: "prefetch".to_string(),
-                    key: "window_lon_extent".to_string(),
-                    value: v.to_string(),
-                    reason: "must be a number between 1.0 and 10.0".to_string(),
-                })?;
-        }
+        // `default_window_rows` and `window_lon_extent` deprecated post-#172
+        // (scenery window computation no longer used; unified prefetch box
+        // replaces ground/cruise distinct logic). Ignored if present in
+        // config file (use 'xearthlayer config upgrade').
         // Sliding prefetch box settings
         if let Some(v) = section.get("box_extent") {
             config.prefetch.box_extent = v.parse().map_err(|_| ConfigFileError::InvalidValue {

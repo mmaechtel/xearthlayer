@@ -38,7 +38,6 @@
 //! │   └── rolling.rs          # Rolling recalibration
 //! ├── strategy.rs             # AdaptivePrefetchStrategy trait
 //! ├── boundary_strategy.rs    # Region lifecycle management (#58)
-//! ├── ground_strategy.rs      # Ground operations prefetch
 //! ├── phase_detector.rs       # Ground/cruise detection
 //! ├── scenery_window.rs       # X-Plane scenery window model
 //! ├── transition_throttle.rs  # Takeoff ramp-up throttle (#62)
@@ -75,7 +74,6 @@ mod calibration;
 mod config;
 mod coordinator;
 pub mod extent;
-mod ground_strategy;
 mod phase_detector;
 mod prefetch_box;
 mod scenery_window;
@@ -92,7 +90,6 @@ pub use calibration::{
 pub use config::{AdaptivePrefetchConfig, CalibrationConfig, KillswitchMode, PrefetchMode};
 pub use coordinator::{AdaptivePrefetchCoordinator, CoordinatorStatus};
 pub use extent::compute_extent;
-pub use ground_strategy::{GroundStrategy, LoadedAreaBounds};
 pub use phase_detector::{FlightPhase, PhaseDetector};
 pub use prefetch_box::PrefetchBox;
 pub use scenery_window::{SceneryWindow, SceneryWindowConfig};

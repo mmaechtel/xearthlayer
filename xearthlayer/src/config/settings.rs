@@ -187,9 +187,6 @@ pub struct PrefetchSettings {
     pub mode: String,
     /// Web API port for X-Plane SimState polling (default: 8086)
     pub web_api_port: u16,
-    /// Maximum tiles to submit per prefetch cycle. Default: 200.
-    /// Lower values reduce bandwidth competition with on-demand requests.
-    pub max_tiles_per_cycle: usize,
     /// Interval between prefetch cycles in milliseconds. Default: 2000ms.
     /// Higher values reduce prefetch aggressiveness.
     pub cycle_interval_ms: u64,
@@ -234,14 +231,6 @@ pub struct PrefetchSettings {
     /// How long a region can stay InProgress before being considered stale.
     /// Default: 120, Range: 30-600
     pub stale_region_timeout: u64,
-    /// Assumed window height in DSF tiles.
-    /// Default: 3, Range: 2-12
-    pub default_window_rows: usize,
-    /// Longitude extent in degrees for scenery window computation.
-    /// Columns are computed dynamically: ceil(lon_extent / cos(lat)).
-    /// Default: 3.0, Range: 1.0-10.0
-    pub window_lon_extent: f64,
-
     // Sliding prefetch box settings
     /// Total prefetch box extent per axis in degrees.
     /// X-Plane loads a ~6x6 DSF area around the aircraft. 9 degrees covers

@@ -77,9 +77,6 @@ pub struct PrefetchConfig {
     /// Web API port for X-Plane SimState polling.
     pub web_api_port: u16,
 
-    /// Maximum tiles to prefetch per cycle.
-    pub max_tiles_per_cycle: usize,
-
     /// Cycle interval (milliseconds).
     pub cycle_interval_ms: u64,
 
@@ -112,12 +109,6 @@ pub struct PrefetchConfig {
 
     /// InProgress staleness timeout in seconds.
     pub stale_region_timeout: u64,
-
-    /// Assumed window height in DSF tiles.
-    pub default_window_rows: usize,
-
-    /// Longitude extent in degrees for dynamic column computation.
-    pub window_lon_extent: f64,
 
     /// Total prefetch box extent per axis in degrees.
     pub box_extent: f64,
@@ -189,7 +180,6 @@ impl OrchestratorConfig {
             enabled: config.prefetch.enabled,
             mode: config.prefetch.mode.clone(),
             web_api_port: config.prefetch.web_api_port,
-            max_tiles_per_cycle: config.prefetch.max_tiles_per_cycle,
             cycle_interval_ms: config.prefetch.cycle_interval_ms,
             calibration_aggressive_threshold: config.prefetch.calibration_aggressive_threshold,
             calibration_opportunistic_threshold: config
@@ -203,8 +193,6 @@ impl OrchestratorConfig {
             ramp_start_fraction: config.prefetch.ramp_start_fraction,
             window_buffer: config.prefetch.window_buffer,
             stale_region_timeout: config.prefetch.stale_region_timeout,
-            default_window_rows: config.prefetch.default_window_rows,
-            window_lon_extent: config.prefetch.window_lon_extent,
             box_extent: config.prefetch.box_extent,
             box_max_bias: config.prefetch.box_max_bias,
         };

@@ -41,6 +41,7 @@ pub(crate) fn update_status_with_plan(
     let prefetch_mode = phase_to_prefetch_mode(coordinator_status.phase);
     shared_status.update_prefetch_mode(prefetch_mode);
     shared_status.update_box_extent(coordinator_status.box_extent);
+    shared_status.update_box_bounds(coordinator_status.box_bounds);
 
     let circuit_state = None;
 
@@ -96,6 +97,7 @@ pub(crate) fn update_status_no_plan(
     };
     shared_status.update_prefetch_mode(prefetch_mode);
     shared_status.update_box_extent(coordinator_status.box_extent);
+    shared_status.update_box_bounds(coordinator_status.box_bounds);
 
     let circuit_state = None;
 
