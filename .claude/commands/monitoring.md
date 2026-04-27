@@ -64,31 +64,34 @@ mkdir -p "$RUN_DIR"
 
 ### 1.3 sudo-Befehle ausgeben
 
-**ZUERST** dem User ALLE sudo-Befehle kompakt auflisten, die er in einem separaten Terminal ausfuehren muss:
+**ZUERST** dem User ALLE sudo-Befehle kompakt auflisten, die er in einem separaten Terminal ausfuehren muss.
+
+**Format-Regeln (siehe `memory/feedback_cd_prefix.md`):**
+- **Jede Zeile mit `cd /home/maechtel/Work/Git/x-plane/xearthlayer && ` prefixen** — User-Terminal ist nicht immer im Projekt-Verzeichnis.
+- **Reihenfolge:** Einmal-Aktionen + Background-Befehle (mit `&`) ZUERST, blockierender Foreground-Befehl ZULETZT. Sonst startet der erste blockende Befehl und alle folgenden in der Zwischenablage werden nie ausgefuehrt.
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SUDO-BEFEHLE (bitte im separaten Terminal ausfuehren)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Layer 2: bpftrace tracer (Direct Reclaim, Slow IO, DMA Fence)
-sudo bash monitoring/sysmon_trace.sh -o <RUN_DIR>
+# 1. Pre-flight kernel dmesg snapshot (one-shot, schnell durch)
+cd /home/maechtel/Work/Git/x-plane/xearthlayer && sudo dmesg | tee <RUN_DIR>/dmesg_pre.log > /dev/null
 
-# Pre-flight kernel dmesg snapshot
-sudo dmesg | tee <RUN_DIR>/dmesg_pre.log > /dev/null
-
-# D-state thread sampler (kernel stack traces of blocked threads)
+# 2. D-state thread sampler (background, lebt 90 Min selbststaendig)
 # CRITICAL for diagnosing X-Plane / FUSE hangs (Run AF-3 lesson)
-sudo bash monitoring/dstate_sampler.sh -o <RUN_DIR> -d <SEKUNDEN> &
+cd /home/maechtel/Work/Git/x-plane/xearthlayer && sudo bash monitoring/dstate_sampler.sh -o <RUN_DIR> -d <SEKUNDEN> &
 
-# Rolling dmesg snapshot (catches mid-flight kernel hung-task warnings,
-# NVMe errors, BTRFS warnings — invisible from pre-only snapshot)
-sudo bash monitoring/dmesg_rolling.sh -o <RUN_DIR> -d <SEKUNDEN> &
+# 3. Rolling dmesg snapshot (background, catches mid-flight kernel events)
+cd /home/maechtel/Work/Git/x-plane/xearthlayer && sudo bash monitoring/dmesg_rolling.sh -o <RUN_DIR> -d <SEKUNDEN> &
+
+# 4. Layer 2: bpftrace tracer (FOREGROUND — blockiert Terminal bis Ctrl+C, daher zuletzt)
+cd /home/maechtel/Work/Git/x-plane/xearthlayer && sudo bash monitoring/sysmon_trace.sh -o <RUN_DIR>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Hinweis: Die `&` am Ende bei dstate_sampler und dmesg_rolling sind essenziell, sonst blockiert das Terminal. Der User kann sie alle in einem `sudo bash`-Block hintereinander starten.
+**Beim Stoppen:** Im Terminal Ctrl+C druecken — beendet `sysmon_trace.sh`. Die `&`-Befehle (dstate_sampler, dmesg_rolling) laufen ihre Dauer aus oder werden mit ihren PIDs separat gestoppt.
 
 ### 1.4 Nicht-sudo-Skripte selber starten
 
