@@ -264,9 +264,10 @@ ci-full: verify coverage-check audit deps-check ## Run comprehensive CI checks
 ##@ Installation
 
 # Installation directory configuration
-# Default: ~/.local/bin (user-local, XDG compliant, no sudo needed)
-# Override: make install PREFIX=/usr/local (system-wide, needs sudo)
-PREFIX ?= $(HOME)/.local
+# Default: ~/.cargo/bin (cargo's user bin, typically already in PATH)
+# Override: make install BINDIR=$HOME/.local/bin   (XDG user-local)
+# Override: make install PREFIX=/usr/local         (system-wide, needs sudo)
+PREFIX ?= $(HOME)/.cargo
 BINDIR ?= $(PREFIX)/bin
 
 .PHONY: install
