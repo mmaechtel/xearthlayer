@@ -115,11 +115,14 @@ tracepoint:vmscan:mm_vmscan_kswapd_sleep {
 PIDS+=($!)
 echo "  PID $! -> trace_reclaim.log"
 
-# ─── Trace 2: Slow IO (>5ms block request latency) ───────────────────
-# Filters for completed block requests whose total latency exceeds 5 ms.
-# NVMe power-state exit typically shows up as 10-11 ms clusters.
+# ─── Trace 2: Slow IO (>20ms block request latency) ──────────────────
+# Filters for completed block requests whose total latency exceeds 20 ms.
+# Raised from 5ms to 20ms after Run AF-3 (2026-04-27): the 5ms threshold
+# produced a 1.7 GB log over 57 minutes (28.7M events) which was
+# unusable for analysis. 20ms isolates true tail-latency events
+# (NVMe power-state exit ≈ 10-11ms is now filtered out as expected).
 
-echo "[2/3] Starting slow IO tracer..."
+echo "[2/3] Starting slow IO tracer (>20ms)..."
 bpftrace -e '
 tracepoint:block:block_rq_issue {
     @io_start[args->sector, args->dev] = nsecs;
@@ -129,7 +132,7 @@ tracepoint:block:block_rq_complete {
     $start = @io_start[args->sector, args->dev];
     if ($start > 0) {
         $ms = (nsecs - $start) / 1000000;
-        if ($ms > 5) {
+        if ($ms > 20) {
             printf("%s dev=%d sector=%llu lat_ms=%llu nr_sector=%u\n",
                    strftime("%H:%M:%S", nsecs), args->dev,
                    (uint64)args->sector, $ms, args->nr_sector);

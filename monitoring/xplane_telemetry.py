@@ -149,7 +149,18 @@ class XPlaneUDP:
         self._recv_one()
 
     def sample(self):
-        """Return formatted dict from current values."""
+        """Return formatted dict from current values.
+
+        WARNING — known issue (Run AF-3, 2026-04-27):
+        `cpu_time_ms` is DERIVED as `frame_time - gpu_time`. This is only
+        correct if CPU and GPU work serially; X-Plane pipelines them, so
+        the derived value UNDERSTATES real CPU time. For example a frame
+        with CPU=40ms, GPU=20ms, frame_period=50ms (vsync@30 dropping to
+        20fps half-rate) yields a derived cpu_time of 30ms instead of the
+        true 40ms. Use the X-Plane Stats Overlay (Settings > Show frame
+        rate) for authoritative CPU time. The derived value is kept for
+        backward compatibility with existing CSV consumers.
+        """
         frame_time = self.values.get(0, 0)
         gpu_time = self.values.get(1, 0)
         fps = (1.0 / frame_time) if frame_time > 0.001 else 0

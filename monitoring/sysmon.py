@@ -547,12 +547,17 @@ def find_tracked_procs(patterns):
     return result
 
 def read_proc_stats(pid):
-    """Read CPU times, IO counters, RSS for a single PID."""
+    """Read CPU times, IO counters, RSS, anon/file split, major faults for a single PID."""
     try:
         raw = read_file(f"/proc/{pid}/stat")
         start = raw.index("(")
         end = raw.rindex(")")
         fields = raw[end + 2:].split()
+        # Indexes are 0-based starting at "state" (proc(5) field 3).
+        # state=0, ppid=1, pgrp=2, session=3, tty_nr=4, tpgid=5, flags=6,
+        # minflt=7, cminflt=8, majflt=9, cmajflt=10, utime=11, stime=12,
+        # cutime=13, cstime=14, priority=15, nice=16, num_threads=17
+        majflt = int(fields[9])
         utime = int(fields[11])
         stime = int(fields[12])
         num_threads = int(fields[17])
@@ -574,18 +579,26 @@ def read_proc_stats(pid):
 
     rss_kb = 0
     swap_kb = 0
+    rss_anon_kb = 0
+    rss_file_kb = 0
     try:
         for line in read_file(f"/proc/{pid}/status").splitlines():
             if line.startswith("VmRSS:"):
                 rss_kb = int(line.split()[1])
             elif line.startswith("VmSwap:"):
                 swap_kb = int(line.split()[1])
+            elif line.startswith("RssAnon:"):
+                rss_anon_kb = int(line.split()[1])
+            elif line.startswith("RssFile:"):
+                rss_file_kb = int(line.split()[1])
     except (FileNotFoundError, PermissionError):
         pass  # OK: process may have exited
 
     return {"utime": utime, "stime": stime, "num_threads": num_threads,
             "read_bytes": read_bytes, "write_bytes": write_bytes,
-            "rss_kb": rss_kb, "swap_kb": swap_kb}
+            "rss_kb": rss_kb, "swap_kb": swap_kb,
+            "rss_anon_kb": rss_anon_kb, "rss_file_kb": rss_file_kb,
+            "majflt": majflt}
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Stats — replaces 50+ individual accumulator lists
@@ -641,7 +654,8 @@ class CSVWriters:
             + ",".join(f"cpu{i}" for i in range(NUM_CPUS)))
         self.proc = self._open(outdir / "proc.csv",
             "timestamp,pid,name,cpu_pct,rss_mb,swap_mb,"
-            "io_read_mbs,io_write_mbs,threads")
+            "io_read_mbs,io_write_mbs,threads,"
+            "rss_anon_mb,rss_file_mb,majflt_s")
         self.vmstat = self._open(outdir / "vmstat.csv",
             "timestamp,ctxt_s,pgfault_s,pgmajfault_s,"
             "pgscan_kswapd_s,pgscan_direct_s,"
@@ -733,10 +747,12 @@ class CSVWriters:
         self.freq.write(f"{ts:.3f},"
                         + ",".join(f"{f:.0f}" for f in freqs) + "\n")
 
-    def write_proc(self, ts, pid, name, cpu_pct, rss_mb, swap_mb, io_r, io_w, threads):
+    def write_proc(self, ts, pid, name, cpu_pct, rss_mb, swap_mb, io_r, io_w, threads,
+                   rss_anon_mb, rss_file_mb, majflt_s):
         self.proc.write(
             f"{ts:.3f},{pid},{name},{cpu_pct:.1f},"
-            f"{rss_mb:.0f},{swap_mb:.0f},{io_r:.2f},{io_w:.2f},{threads}\n")
+            f"{rss_mb:.0f},{swap_mb:.0f},{io_r:.2f},{io_w:.2f},{threads},"
+            f"{rss_anon_mb:.0f},{rss_file_mb:.0f},{majflt_s:.1f}\n")
 
 # ═══════════════════════════════════════════════════════════════════════
 #  collect — main sampling loop
@@ -980,10 +996,16 @@ def collect(writers, stats):
                             d_wb = pstats["write_bytes"] - pp["write_bytes"]
                             io_r = d_rb / 1024 / 1024 / slow_dt
                             io_w = d_wb / 1024 / 1024 / slow_dt
+                            d_majflt = pstats["majflt"] - pp["majflt"]
+                            majflt_s = d_majflt / slow_dt
+                            rss_anon_mb = pstats["rss_anon_kb"] / 1024
+                            rss_file_mb = pstats["rss_file_kb"] / 1024
 
                             writers.write_proc(ts, pid, name, cpu_pct, rss_mb,
                                                swap_mb, io_r, io_w,
-                                               pstats["num_threads"])
+                                               pstats["num_threads"],
+                                               rss_anon_mb, rss_file_mb,
+                                               majflt_s)
 
                             stats.proc[name]["cpu"].append(cpu_pct)
                             stats.proc[name]["rss"].append(rss_mb)

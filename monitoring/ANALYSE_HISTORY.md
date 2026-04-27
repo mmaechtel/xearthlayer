@@ -339,6 +339,97 @@ irqbalance              = aktiv
 XEL memory_size         = 4          (beibehalten, fairer Vergleich steht aus)
 ```
 
-## Naechster Schritt
+## Naechster Schritt (urspruenglich nach Run AE)
 
 **Run AF:** Gleiche Route (LSZH→EHAM oder aehnlich europaeisch), Run-AD-Stack (min_free_kbytes=3GB, wsf=125), memory_size=4GB beibehalten. Ziel: Bestaetigen dass nur die Watermark-Aenderung die Regression verursacht hat.
+
+---
+
+# Run AF-3 (2026-04-27, 57 min OMDB Cruise + Re-Fly, 2 Hangs)
+
+**Workload:** OMDB → Persian Gulf Cruise, X-Plane 12.4.2-r2 + xearthlayer (post-PR #178)
+**Tuning:** min_free_kbytes=1GB, wsf=500, swappiness=8 (User-aktueller Stack, NICHT Run-AD-Stack)
+**Sidecar:** Aktiv (3 bpftrace-Prozesse), 1.7 GB trace_io_slow.log
+
+**Wesentliche Ereignisse:**
+- 2 X-Plane-Hangs unrecoverable, beide manuell gekillt
+- Hang 1 (17:13:30, ~2 min): Read-bound Swap-Recovery, pgmajfault peak 8997/s, pswpin 7292/s
+- Hang 2 (17:45–17:49): Write-bound nach btrfs balance, allocstall peak 70/s
+- 17:35–17:40: btrfs balance -dusage=20 lief während Run (kontaminierter Datenbereich)
+
+**Smoking Guns:**
+- BTRFS xplane_data: Data RAID0 **95.53 %** full, Metadata RAID1 **98.25 %** full
+- nvme1n1p1 Stripe: nur 1 MB unallocated
+- Swap 18.34 GB schon beim Run-Start (kumuliert aus Vor-Session, ~2 h Vorlauf)
+- xearthlayer alleinig **12.1 GB Anonymous-Memory in Swap** (cache.memory_size=4GB Config wirkungslos)
+- **28.7 Mio Slow-IO-Events > 5 ms**; 37.4 % davon > 1000 ms (BTRFS-Allocator-Tail-Latency)
+
+**Diagnose:**
+- Watermark-Tuning (allocstall ≈ 0) **wirkt** — Direct Reclaim eliminiert
+- Aber Schmerzpunkt verlagert: jetzt **BTRFS-Allocator-Druck bei 95/98 % Auslastung**
+- XEL haengt NIE — X-Plane-Hauptthread haengt im FUSE-Read auf saturierter NVMe-Queue
+- XEL erkennt selbst "DDS generation exceeded 30s - possible executor stall"
+
+**Aktion:**
+- Filesystem-Hygiene Prio 1: Cleanup (User hat 1.2 TB freigegeben, 90 → 81 %), fstrim, btrfs balance
+- swappiness 8 → 1 (oder swap=off bei 96 GB RAM)
+- cache.memory_size 4 GB → 512 MB (Anonymous-Footprint reduzieren)
+- prefetch.box_extent 9 → 6, executor.cpu_concurrent 8 → 4
+- Code: FUSE-Read-Timeout senken auf 5 s + Magenta-Placeholder; O_DIRECT fuer Disk-Cache-Reads
+
+→ Details: `ANALYSE_RUN_AF-3_2026-04-27.md`
+
+---
+
+## Aktueller Tuning-Stack (KORREKTUR 2026-04-27 Abend, gilt fuer Run AG)
+
+**Sysctls:** unveraendert (matchen Author-Baseline xplane-on-linux/sysctl-xearthlayer.md exakt)
+
+```
+vm.min_free_kbytes      = 1048576    (1 GB) — AF-3 mit allocstall=0, wirkt
+vm.watermark_scale_factor = 500
+vm.swappiness           = 8           — Author-Baseline, NICHT aendern
+vm.vfs_cache_pressure   = 100         — Default, NICHT aendern
+vm.page-cluster         = 0           — Author-Baseline
+vm.dirty_background_ratio = 3
+vm.dirty_ratio          = 10
+```
+
+**XEL Config-Aenderungen (5 Stueck, vor Run AG, dokumentiert in `CONFIG_CHANGES_pre-AG.md`):**
+
+```ini
+[executor]
+cpu_concurrent = 16              # war 8 (zu niedrig, starved Pipeline)
+
+[prefetch]
+cycle_interval_ms = 4000         # war 2000 (Burst-Frequenz halbieren)
+box_extent = 6.5                 # war 9 (-48 % Plan-Volume pro Cycle)
+
+[fuse]
+max_background = 128             # war 256 (matcht reale RAID0-Capacity)
+congestion_threshold = 96        # war 192 (75 % von 128, Backpressure frueher)
+```
+
+**Bewusst NICHT geaendert** (vorige Empfehlungen waren falsch):
+- `cache.memory_size = 4 GB` bleibt (auf 96 GB RAM irrelevant)
+- `executor.network_concurrent = 128` (Downloads kein Bottleneck)
+- `executor.disk_io_concurrent = 128` (echter Fix waere O_DIRECT im Code)
+- `vm.swappiness = 8` (Author-Baseline, nicht ohne Grund abweichen)
+
+## Naechster Schritt nach AF-3
+
+**Run AG** — Detail-Plan in `RUN_AG_PLAN.md`.
+
+Pre-Conditions:
+- Filesystem-Hygiene komplett (Data < 90 %, Metadata < 95 %, idealerweise < 85 / 85)
+- 5 Config-Aenderungen aktiv (siehe oben)
+- xearthlayer + X-Plane neu gestartet, Pre-Run Swap-Inhalt < 2 GB
+
+Erfolgskriterien (4 von 5 erforderlich):
+1. 0 unrecoverable Hangs in 90 Min
+2. iowait Run-Mittel < 30 % (vs 42 % AF-3)
+3. Tile-Throughput stabil ≥ 600/Min
+4. Bei DSF-Boundary-Crossings keine FPS-Drops > 2 s
+5. Slow-IO Tail-Latency (>1000 ms) reduziert um ≥ 50 %
+
+Bei < 4 Kriterien erfuellt → **Run AH mit O_DIRECT-Code-Aenderung** in `xearthlayer/src/cache/providers/disk.rs`.
