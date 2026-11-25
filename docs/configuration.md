@@ -196,7 +196,7 @@ On a machine with one GPU, X-Plane renders on that GPU, so `gpu` or `hybrid` enc
 **Sharpening (`sharpen`):** Streamed imagery looks soft close to the ground, where X-Plane shows each texture at full resolution: roads, field edges and roofs lack crispness. `sharpen` applies an unsharp mask to that level only, with every compressor. Distant terrain is drawn from the smaller levels, which are built from the unsharpened image and look as before. The outermost 4 pixels of every tile are never changed, so no seam can appear between tiles.
 
 - `0.5` was chosen on Apple imagery: about a third crisper, no visible halos, and brightness unchanged. `1.0` is visibly oversharpened there. Values for Bing and Google have not been measured.
-- Sharpened tiles are cached under their own name in the disk cache. After changing `sharpen`, tiles are built again from the downloaded imagery as X-Plane asks for them, without downloading again, and the old ones are cleared by the cache's normal cleanup.
+- Sharpened tiles are cached under their own name in the disk cache. After changing `sharpen`, tiles of the new strength are built as X-Plane asks for them, from the imagery chunks still in the disk cache (only missing chunks are downloaded again), and the old ones are cleared by the cache's normal cleanup.
 - Cost: about 24 ms of CPU per tile (on top of roughly 40 ms to encode and 80 ms to assemble it).
 
 **GPU Device Selection:**

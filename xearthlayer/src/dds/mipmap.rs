@@ -109,7 +109,7 @@ impl MipmapGenerator {
     /// is taken to 16-bit linear light (IEC 61966-2-1, rounded to nearest),
     /// the four are averaged and the mean is taken back to the nearest sRGB
     /// byte. Averaging the stored values instead loses light wherever
-    /// neighbours differ (black beside white gives 127, about a fifth of the
+    /// neighbours differ (black beside white gives 128, about a fifth of the
     /// light, where half the light is 188), so towns, rock, coast and snow
     /// grew darker with every level (mmaechtel/xearthlayer#5). Alpha is
     /// coverage, not light, and keeps the mean of its stored values. Each
@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(levels, 13);
     }
 
-    /// Half black and half white is half the light, sRGB 188, not the 127
+    /// Half black and half white is half the light, sRGB 188, not the 128
     /// that averaging the stored values gives (about a fifth of the light).
     #[test]
     fn a_black_and_white_block_averages_to_half_the_light() {
@@ -821,8 +821,7 @@ mod tests {
         let downsampled = MipmapGenerator::downsample_box_2x(&source);
 
         // Each pixel should be gray (average of black and white)
-        // Some pixels have 2 black + 2 white = gray (127-128)
-        // Others might have different ratios
+        // 2 black + 2 white is half the light, sRGB 188
         for pixel in downsampled.pixels() {
             // Should be some shade of gray
             assert_eq!(pixel[0], pixel[1]);

@@ -183,7 +183,7 @@ values, rounded the same way. An odd last row or column of the source is
 dropped.
 
 **Why linear light** (mmaechtel/xearthlayer#5): averaging the stored sRGB
-values loses light wherever neighbours differ. Black beside white gave 127,
+values loses light wherever neighbours differ. Black beside white gave 128,
 about a fifth of the light, where half the light is 188. Measured on Apple
 imagery (five ZL12 tiles, levels 2 to 4), towns came out 1.5 percentage points
 of luminance darker, coast 1.4, mountains 1.2 and farmland 1.0; at level 4 a
@@ -211,13 +211,15 @@ average and about 42 ms for the ISPC encode of the tile. Every encoder backend
 uses it through `MipmapStream`: ISPC and software, the GPU worker, where it
 runs on the single worker thread for every tile, and hybrid's ISPC overflow.
 Night lighting does not: its levels are averaged by `lit_chain` (see
-`night-lighting-design.md`), which holds the whole chain in f32 and uses a 2.2
+`night-lighting-design.md`), which averages each level from the f32 light of
+the whole level above and uses a 2.2
 gamma, and whose bytes are versioned with the generator.
 
 Tiles already in the DDS disk cache keep the levels they were encoded with
 until the cache's GC replaces them. Deleting the DDS tier
-(`{cache_dir}/{provider}/dds/`) rebuilds them from the chunk cache without new
-downloads; `cache clear` deletes the chunk tier too.
+(`{cache_dir}/{provider}/dds/`) rebuilds them from the chunk cache, downloading
+only chunks it no longer holds (the chunk tier has its own budget); `cache
+clear` deletes the chunk tier too.
 
 ### Level 0 Sharpening
 `texture.sharpen` (mmaechtel/xearthlayer#6, `dds/sharpen.rs`) is an unsharp
@@ -229,7 +231,7 @@ exactly and names a cache key without floating point.
 
 - **Level 0 only.** `MipmapStream::with_sharpen` downsamples level 1 from the
   original first and sharpens level 0 in place just before yielding it, so no
-  copy of the tile is made. The mask adds and removes equal amounts in sRGB,
+  copy of the tile is made. The mask adds and removes about equal amounts in sRGB,
   but in linear light the brightening outweighs the darkening: levels built
   from a sharpened level 0 measured up to 0.6 percentage points brighter at
   level 4 at 0.5.
@@ -243,10 +245,12 @@ exactly and names a cache key without floating point.
   hold the strength (`with_sharpen`, both set by `create_encoder` from
   `TextureConfig::sharpen`). The channel puts it on every `GpuEncodeRequest`
   for the worker's `TileProcessor` and passes it to `encoder::compress_chain`
-  for hybrid's ISPC overflow. A test compares the worker and the overflow with
-  the CPU encoder byte for byte.
-- **Memory.** A ring of seven rows of luma and their horizontal blur, about
-  230 KB for a 4096 tile, never a second full-size image (#227).
+  for hybrid's ISPC overflow. A test compares the overflow, and the real worker
+  loop around a software `TileProcessor`, with the CPU encoder byte for byte;
+  `WgpuTileProcessor` hands the strength to `MipmapStream` like that processor,
+  and needs a GPU to test.
+- **Memory.** A ring of seven rows of luma and their horizontal blur, with the
+  per-row scratch about 330 KB for a 4096 tile, never a second full-size image (#227).
 - **Same bytes everywhere.** The arithmetic is f32 and every sum runs in a
   fixed order; Rust never fuses or reorders float operations, so x86-64 and
   aarch64 give the same bytes. Rounding uses the 1.5 × 2^23 trick, which
@@ -264,7 +268,8 @@ exactly and names a cache key without floating point.
   keys it apart: `tile:{z}:{row}:{col}:s{tenths}` (`TileCacheClient::with_sharpen`,
   set by `CacheLayer` on the DDS disk bridge); unsharpened tiles keep
   `tile:{z}:{row}:{col}`. After the setting changes, tiles of the other
-  strength are not found and are built again from the chunk cache, and the
+  strength are not found; a tile already cached at the new strength is served,
+  any other is built from the chunk cache (missing chunks are downloaded), and the
   GC ages the old ones out. `key_to_region` accepts the fifth field, so
   sharpened tiles live in their region directory. The memory tier needs no
   suffix: it lives as long as the process, which encodes with one strength.
