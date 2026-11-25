@@ -217,8 +217,9 @@ gamma, and whose bytes are versioned with the generator.
 
 Tiles already in the DDS disk cache keep the levels they were encoded with
 until the cache's GC replaces them. Deleting the DDS tier
-(`{cache_dir}/{provider}/dds/`) rebuilds them from the chunk cache, downloading
-only chunks it no longer holds (the chunk tier has its own budget); `cache
+(`{cache_dir}/{provider}/dds/`) while XEarthLayer is stopped has them rebuilt
+as they are next needed, from the chunk cache, downloading only chunks it no
+longer holds (the chunk tier has its own budget); `cache
 clear` deletes the chunk tier too.
 
 ### Level 0 Sharpening
