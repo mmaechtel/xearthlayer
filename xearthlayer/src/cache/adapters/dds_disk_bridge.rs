@@ -36,6 +36,14 @@ impl DdsDiskCacheBridge {
             client: TileCacheClient::new(cache),
         }
     }
+
+    /// Key tiles by their sharpening (`texture.sharpen`): the DDS disk cache
+    /// outlives the process, so a tile encoded with another strength must
+    /// not be found.
+    pub fn with_sharpen(mut self, sharpen: crate::dds::Sharpen) -> Self {
+        self.client = self.client.with_sharpen(sharpen);
+        self
+    }
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -119,6 +127,33 @@ mod tests {
         assert_eq!(result, Some(Bytes::from(data)));
 
         service.shutdown().await;
+    }
+
+    /// A tile encoded with another `texture.sharpen` is not found, and a
+    /// sharpened tile is stored in its region directory like any other.
+    #[tokio::test]
+    async fn a_sharpened_tile_is_keyed_apart_and_stored_in_its_region() {
+        let (plain, service, dir) = create_disk_bridge().await;
+        let sharp = DdsDiskCacheBridge::new(service.cache())
+            .with_sharpen(crate::dds::Sharpen::from_strength(0.5));
+
+        sharp
+            .put(12754, 5279, 15, Bytes::from_static(&[7; 8]))
+            .await;
+
+        assert!(plain.get(12754, 5279, 15).await.is_none());
+        assert_eq!(
+            sharp.get(12754, 5279, 15).await,
+            Some(Bytes::from_static(&[7; 8]))
+        );
+        service.shutdown().await;
+
+        let region = crate::cache::key_to_region("tile:15:12754:5279").unwrap();
+        assert!(dir
+            .path()
+            .join(region)
+            .join("tile_15_12754_5279_s5.cache")
+            .is_file());
     }
 
     #[tokio::test]

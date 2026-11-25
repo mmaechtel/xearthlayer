@@ -24,7 +24,7 @@ mod inner {
     use crate::dds::compressor::MipmapCompressor;
     use crate::dds::gpu_stats::GpuEncodeStats;
     use crate::dds::layout;
-    use crate::dds::{DdsError, DdsFormat, IspcCompressor};
+    use crate::dds::{DdsError, DdsFormat, IspcCompressor, Sharpen};
 
     /// Bounded channel capacity for GPU encode requests.
     pub const CHANNEL_CAPACITY: usize = 32;
@@ -82,6 +82,8 @@ mod inner {
         pub format: DdsFormat,
         /// Number of mipmap levels to generate (including original).
         pub mipmap_count: usize,
+        /// Sharpening of level 0 (`texture.sharpen`).
+        pub sharpen: Sharpen,
         /// When the caller started to send: the start of the queue wait.
         pub sent_at: Instant,
         /// One-shot channel for returning the compressed data (or error).
@@ -119,6 +121,7 @@ mod inner {
             image: RgbaImage,
             format: DdsFormat,
             levels: usize,
+            sharpen: Sharpen,
             timing: &mut GpuTileTiming,
         ) -> Result<Vec<u8>, DdsError>;
     }
@@ -131,6 +134,7 @@ mod inner {
     pub struct GpuEncoderChannel {
         sender: Option<mpsc::Sender<GpuEncodeRequest>>,
         when_busy: WhenBusy,
+        sharpen: Sharpen,
         stats: Arc<GpuEncodeStats>,
     }
 
@@ -142,8 +146,16 @@ mod inner {
             Self {
                 sender: Some(sender),
                 when_busy: WhenBusy::Wait,
+                sharpen: Sharpen::OFF,
                 stats: Arc::default(),
             }
+        }
+
+        /// Sharpen level 0 of every tile (`texture.sharpen`), on the worker
+        /// and on hybrid's ISPC overflow alike.
+        pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+            self.sharpen = sharpen;
+            self
         }
 
         /// A handle following `when_busy` and the receiver for its worker,
@@ -216,6 +228,7 @@ mod inner {
                 request.image,
                 request.format,
                 request.mipmap_count,
+                request.sharpen,
             );
             if result.is_ok() {
                 self.stats.record_overflowed();
@@ -258,6 +271,7 @@ mod inner {
                 image, // moved, zero clones
                 format,
                 mipmap_count,
+                sharpen: self.sharpen,
                 sent_at,
                 response: resp_tx,
             };
@@ -368,6 +382,8 @@ mod inner {
     /// for smaller levels. Each stage's wall time is added to `timing`.
     ///
     /// [`MipmapStream`]: crate::dds::MipmapStream
+    // The worker's resources and one request's fields, passed as they are.
+    #[allow(clippy::too_many_arguments)]
     fn process_tile(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -375,6 +391,7 @@ mod inner {
         image: RgbaImage,
         format: DdsFormat,
         mipmap_count: usize,
+        sharpen: Sharpen,
         timing: &mut GpuTileTiming,
     ) -> Result<Vec<u8>, DdsError> {
         let width = image.width();
@@ -405,7 +422,8 @@ mod inner {
             },
         );
 
-        let mut stream = crate::dds::mipmap::MipmapStream::new(image, mipmap_count);
+        let mut stream =
+            crate::dds::mipmap::MipmapStream::new(image, mipmap_count).with_sharpen(sharpen);
         let mut result = Vec::new();
 
         // At most `mipmap_count` takes, so a full chain makes no extra call
@@ -604,6 +622,7 @@ mod inner {
             image: RgbaImage,
             format: DdsFormat,
             levels: usize,
+            sharpen: Sharpen,
             timing: &mut GpuTileTiming,
         ) -> Result<Vec<u8>, DdsError> {
             process_tile(
@@ -613,6 +632,7 @@ mod inner {
                 image,
                 format,
                 levels,
+                sharpen,
                 timing,
             )
         }
@@ -648,6 +668,7 @@ mod inner {
                 image,
                 format,
                 mipmap_count,
+                sharpen,
                 sent_at,
                 response,
             } = request;
@@ -675,7 +696,7 @@ mod inner {
             .entered();
             let started = Instant::now();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                processor.process(image, format, mipmap_count, &mut timing)
+                processor.process(image, format, mipmap_count, sharpen, &mut timing)
             }));
             timing.process = started.elapsed();
             drop(tile_span);
@@ -809,7 +830,9 @@ mod tests {
     use crate::dds::compressor::tests::varied;
     use crate::dds::compressor::{ImageCompressor, MipmapCompressor};
     use crate::dds::gpu_stats::GpuEncodeStats;
-    use crate::dds::{DdsError, DdsFormat, IspcCompressor, MipmapStream, SoftwareCompressor};
+    use crate::dds::{
+        DdsError, DdsFormat, IspcCompressor, MipmapStream, Sharpen, SoftwareCompressor,
+    };
     use image::RgbaImage;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -830,14 +853,17 @@ mod tests {
             image: RgbaImage,
             format: DdsFormat,
             levels: usize,
+            sharpen: Sharpen,
             _timing: &mut GpuTileTiming,
         ) -> Result<Vec<u8>, DdsError> {
-            MipmapStream::new(image, levels).try_fold(Vec::new(), |mut acc, level| {
-                SoftwareCompressor.compress(&level, format).map(|data| {
-                    acc.extend_from_slice(&data);
-                    acc
+            MipmapStream::new(image, levels)
+                .with_sharpen(sharpen)
+                .try_fold(Vec::new(), |mut acc, level| {
+                    SoftwareCompressor.compress(&level, format).map(|data| {
+                        acc.extend_from_slice(&data);
+                        acc
+                    })
                 })
-            })
         }
     }
 
@@ -854,6 +880,7 @@ mod tests {
             image: RgbaImage,
             _format: DdsFormat,
             _levels: usize,
+            _sharpen: Sharpen,
             timing: &mut GpuTileTiming,
         ) -> Result<Vec<u8>, DdsError> {
             (self.0)(image, timing)
@@ -868,6 +895,7 @@ mod tests {
             image: RgbaImage::new(width, 4),
             format: DdsFormat::BC1,
             mipmap_count: 1,
+            sharpen: Sharpen::OFF,
             sent_at: Instant::now(),
             response,
         };
@@ -1216,6 +1244,44 @@ mod tests {
             (0, 0),
             "an overflowed tile is never in the queue depth"
         );
+    }
+
+    /// `texture.sharpen` reaches both ways a GPU channel encodes: the
+    /// worker, through the request, and hybrid's ISPC overflow. Each gives
+    /// the bytes the CPU encoder writes with the same strength and kernel.
+    #[tokio::test]
+    async fn a_sharpened_channel_sharpens_on_the_worker_and_the_overflow() {
+        let sharpen = Sharpen::from_strength(0.5);
+        let image = varied(64, 64);
+        let cpu = |compressor: &dyn crate::dds::ImageCompressor, levels| {
+            crate::dds::encoder::compress_chain(
+                compressor,
+                image.clone(),
+                DdsFormat::BC1,
+                levels,
+                sharpen,
+            )
+            .unwrap()
+        };
+
+        let (channel, _worker) = channel_with(SoftwareProcessor);
+        let channel = channel.with_sharpen(sharpen);
+        let source = image.clone();
+        let on_worker = tokio::task::spawn_blocking(move || {
+            channel.compress_mipmap_chain(source, DdsFormat::BC1, 5)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(on_worker, cpu(&SoftwareCompressor, 5));
+
+        let (channel, _rx) = taken_overflow_channel();
+        let overflowed = channel
+            .with_sharpen(sharpen)
+            .compress_mipmap_chain(image.clone(), DdsFormat::BC1, 7)
+            .unwrap();
+        assert_eq!(overflowed, cpu(&IspcCompressor, 7));
+        assert_ne!(overflowed, ispc_payload(image, 7), "it is sharpened");
     }
 
     #[test]

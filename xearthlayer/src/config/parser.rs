@@ -124,6 +124,18 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
         if let Some(v) = section.get("gpu_device") {
             config.texture.gpu_device = v.to_string();
         }
+        // Its range is held by `check_ranges`.
+        if let Some(v) = section.get("sharpen") {
+            config.texture.sharpen =
+                v.trim()
+                    .parse()
+                    .map_err(|_| ConfigFileError::InvalidValue {
+                        section: "texture".to_string(),
+                        key: "sharpen".to_string(),
+                        value: v.to_string(),
+                        reason: "must be a number from 0.0 to 1.0".to_string(),
+                    })?;
+        }
     }
 
     // [generation] section
@@ -647,6 +659,32 @@ mod tests {
                 .brightness,
             0.75
         );
+    }
+
+    #[test]
+    fn texture_sharpen_round_trips_and_defaults_to_off() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("config.ini");
+        let mut config = ConfigFile::default();
+        assert_eq!(config.texture.sharpen, 0.0);
+        config.texture.sharpen = 0.5;
+        config.save_to(&path).unwrap();
+        assert_eq!(ConfigFile::load_from(&path).unwrap().texture.sharpen, 0.5);
+    }
+
+    #[test]
+    fn texture_sharpen_out_of_range_is_rejected_on_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("config.ini");
+        for bad in ["1.5", "-0.1", "NaN", "abc"] {
+            std::fs::write(&path, format!("[texture]\nsharpen = {bad}\n")).unwrap();
+            assert!(
+                ConfigFile::load_from(&path).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        std::fs::write(&path, "[texture]\nsharpen = 0.5\n").unwrap();
+        assert_eq!(ConfigFile::load_from(&path).unwrap().texture.sharpen, 0.5);
     }
 
     #[test]

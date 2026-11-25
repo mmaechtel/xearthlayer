@@ -95,6 +95,8 @@ pub struct TextureSettings {
     pub compressor: String,
     /// GPU device selector: "integrated", "discrete", or adapter name substring
     pub gpu_device: String,
+    /// Sharpening of level 0, 0.0 (off) to 1.0, read in tenths
+    pub sharpen: f64,
 }
 
 /// Generation configuration.

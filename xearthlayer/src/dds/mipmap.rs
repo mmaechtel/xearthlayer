@@ -4,6 +4,8 @@ use std::sync::LazyLock;
 
 use image::RgbaImage;
 
+use super::sharpen::Sharpen;
+
 /// White in the 16-bit linear light the filter averages in.
 const LINEAR_WHITE: f64 = u16::MAX as f64;
 
@@ -213,6 +215,8 @@ pub struct MipmapStream {
     remaining: usize,
     /// Whether the first (original) image has been yielded.
     yielded_first: bool,
+    /// Sharpening of level 0, applied after level 1 is downsampled from it.
+    sharpen: Sharpen,
 }
 
 impl MipmapStream {
@@ -227,7 +231,15 @@ impl MipmapStream {
             current: if count > 0 { Some(image) } else { None },
             remaining: count,
             yielded_first: false,
+            sharpen: Sharpen::OFF,
         }
+    }
+
+    /// Sharpen level 0 (`texture.sharpen`). Level 1 is downsampled from the
+    /// unsharpened image first, so no level below 0 is affected.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
     }
 }
 
@@ -239,7 +251,7 @@ impl Iterator for MipmapStream {
             return None;
         }
 
-        let current = self.current.take()?;
+        let mut current = self.current.take()?;
 
         if !self.yielded_first {
             // First call: yield the original image (moved, not cloned)
@@ -250,6 +262,7 @@ impl Iterator for MipmapStream {
             if self.remaining > 0 && current.width() > 1 && current.height() > 1 {
                 self.current = Some(MipmapGenerator::downsample_box_2x(&current));
             }
+            self.sharpen.apply(&mut current);
 
             return Some(current);
         }

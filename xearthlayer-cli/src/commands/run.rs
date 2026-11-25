@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use xearthlayer::config::{format_size, ControlPlaneSettings, TextureConfig};
-use xearthlayer::dds::DdsFormat;
+use xearthlayer::dds::{DdsFormat, Sharpen};
 use xearthlayer::manager::LocalPackageStore;
 use xearthlayer::panic as panic_handler;
 use xearthlayer::service::{
@@ -93,7 +93,8 @@ pub fn run(args: RunArgs, ctx: &BootstrapContext) -> Result<(), CliError> {
     // BC1 is the only format XEarthLayer encodes (#395).
     let texture_config = TextureConfig::new(DdsFormat::BC1)
         .with_compressor(config.texture.compressor.clone())
-        .with_gpu_device(config.texture.gpu_device.clone());
+        .with_gpu_device(config.texture.gpu_device.clone())
+        .with_sharpen(Sharpen::from_strength(config.texture.sharpen));
     let dds_format = texture_config.format();
 
     // Check if we'll use TUI (need to know before creating services)

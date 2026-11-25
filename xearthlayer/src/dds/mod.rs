@@ -87,6 +87,7 @@ pub mod gpu_stats;
 mod header;
 pub mod layout;
 mod mipmap;
+mod sharpen;
 mod types;
 
 // Public API
@@ -100,3 +101,4 @@ pub use types::{DdsError, DdsFormat, DdsHeader};
 
 // Re-export for advanced usage
 pub use mipmap::{MipmapGenerator, MipmapStream};
+pub use sharpen::Sharpen;

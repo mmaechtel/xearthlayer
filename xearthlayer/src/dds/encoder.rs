@@ -13,6 +13,7 @@ use crate::dds::compressor::{
 };
 use crate::dds::layout;
 use crate::dds::mipmap::MipmapStream;
+use crate::dds::sharpen::Sharpen;
 use crate::dds::types::{DdsError, DdsFormat, DdsHeader};
 use image::RgbaImage;
 use std::sync::Arc;
@@ -32,6 +33,7 @@ pub struct DdsEncoder {
     generate_mipmaps: bool,
     mipmap_count: Option<usize>,
     backend: CompressorBackend,
+    sharpen: Sharpen,
 }
 
 impl DdsEncoder {
@@ -45,7 +47,16 @@ impl DdsEncoder {
             generate_mipmaps: true,
             mipmap_count: None,
             backend: CompressorBackend::Image(default_compressor()),
+            sharpen: Sharpen::OFF,
         }
+    }
+
+    /// Sharpen level 0 (`texture.sharpen`) with an [`ImageCompressor`]
+    /// backend. A [`MipmapCompressor`] owns its mipmap pipeline and is
+    /// given the strength itself (`GpuEncoderChannel::with_sharpen`).
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
     }
 
     /// Use a specific image compressor backend (ISPC, Software).
@@ -171,7 +182,7 @@ impl DdsEncoder {
 
         compress_chain_into(
             compressor,
-            MipmapStream::new(image, count),
+            MipmapStream::new(image, count).with_sharpen(self.sharpen),
             self.format,
             payload,
         )?;
@@ -256,6 +267,7 @@ pub(crate) fn compress_chain(
     image: RgbaImage,
     format: DdsFormat,
     mipmap_count: usize,
+    sharpen: Sharpen,
 ) -> Result<Vec<u8>, DdsError> {
     let (width, height) = image.dimensions();
     let requested = u32::try_from(mipmap_count).unwrap_or(u32::MAX);
@@ -263,7 +275,7 @@ pub(crate) fn compress_chain(
     let mut payload = vec![0; layout::chain_len(width, height, levels, format)];
     compress_chain_into(
         compressor,
-        MipmapStream::new(image, levels as usize),
+        MipmapStream::new(image, levels as usize).with_sharpen(sharpen),
         format,
         &mut payload,
     )?;

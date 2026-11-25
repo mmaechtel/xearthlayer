@@ -3,7 +3,7 @@
 //! Provides a `TextureEncoder` implementation that encodes RGBA images
 //! to DirectDraw Surface (DDS) format with BC1 compression.
 
-use crate::dds::{default_compressor, layout, DdsEncoder, DdsFormat, ImageCompressor};
+use crate::dds::{default_compressor, layout, DdsEncoder, DdsFormat, ImageCompressor, Sharpen};
 use crate::texture::{TextureEncoder, TextureError};
 use image::RgbaImage;
 use std::sync::Arc;
@@ -36,6 +36,9 @@ pub struct DdsTextureEncoder {
     /// When set, `encode()` delegates the full mipmap chain to this backend
     /// instead of iterating levels via `MipmapStream` + `compressor`.
     mipmap_compressor: Option<Arc<dyn crate::dds::MipmapCompressor>>,
+    /// Sharpening of level 0 for the image compressor path; a mipmap
+    /// compressor is given it itself.
+    sharpen: Sharpen,
 }
 
 impl Clone for DdsTextureEncoder {
@@ -45,6 +48,7 @@ impl Clone for DdsTextureEncoder {
             mipmap_count: self.mipmap_count,
             compressor: Arc::clone(&self.compressor),
             mipmap_compressor: self.mipmap_compressor.as_ref().map(Arc::clone),
+            sharpen: self.sharpen,
         }
     }
 }
@@ -80,7 +84,16 @@ impl DdsTextureEncoder {
             mipmap_count: None,
             compressor: default_compressor(),
             mipmap_compressor: None,
+            sharpen: Sharpen::OFF,
         }
+    }
+
+    /// Sharpen level 0 (`texture.sharpen`) when encoding with the image
+    /// compressor. A mipmap compressor (the GPU channel) is given the
+    /// strength when it is built.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
     }
 
     /// Truncate the mipmap chain to a fixed number of levels.
@@ -156,7 +169,7 @@ impl DdsTextureEncoder {
 
 impl TextureEncoder for DdsTextureEncoder {
     fn encode(&self, image: RgbaImage) -> Result<Vec<u8>, TextureError> {
-        let mut encoder = DdsEncoder::new(self.format);
+        let mut encoder = DdsEncoder::new(self.format).with_sharpen(self.sharpen);
 
         if let Some(count) = self.mipmap_count {
             encoder = encoder.with_mipmap_count(count);

@@ -247,7 +247,10 @@ impl DiskTiers {
             None => None,
         };
 
-        let dds_disk_bridge = Arc::new(DdsDiskCacheBridge::new(dds_disk_service.cache()));
+        let dds_disk_bridge = Arc::new(
+            DdsDiskCacheBridge::new(dds_disk_service.cache())
+                .with_sharpen(config.texture().sharpen()),
+        );
         let disk_bridge = Arc::new(DiskCacheBridge::with_metrics(
             chunk_disk_service.cache(),
             metrics,

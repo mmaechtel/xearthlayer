@@ -1,7 +1,8 @@
 //! Tile cache client for DDS tile storage.
 //!
 //! This client wraps a generic `Cache` with:
-//! - Key translation: `TileCoord` → `"tile:{zoom}:{row}:{col}"`
+//! - Key translation: `TileCoord` → `"tile:{zoom}:{row}:{col}"`, with
+//!   `:{suffix}` for a sharpened tile (`tile:15:12754:5279:s5`)
 //! - Metrics injection: cache hit/miss reporting
 //!
 //! # Key Format
@@ -16,6 +17,7 @@ use tracing::warn;
 
 use crate::cache::traits::Cache;
 use crate::coord::TileCoord;
+use crate::dds::Sharpen;
 
 /// Cache client for DDS tile storage.
 ///
@@ -26,6 +28,9 @@ use crate::coord::TileCoord;
 pub struct TileCacheClient {
     /// The underlying generic cache.
     cache: Arc<dyn Cache>,
+    /// What every key carries after the coordinates, e.g. `:s5`; empty for
+    /// tiles as delivered.
+    key_suffix: String,
 }
 
 impl TileCacheClient {
@@ -35,7 +40,21 @@ impl TileCacheClient {
     ///
     /// * `cache` - The underlying cache implementation
     pub fn new(cache: Arc<dyn Cache>) -> Self {
-        Self { cache }
+        Self {
+            cache,
+            key_suffix: String::new(),
+        }
+    }
+
+    /// Key tiles by their sharpening, so a tile encoded with another
+    /// `texture.sharpen` is not found and is built again. Unsharpened tiles
+    /// keep the key they always had.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.key_suffix = sharpen
+            .key_suffix()
+            .map(|suffix| format!(":{suffix}"))
+            .unwrap_or_default();
+        self
     }
 
     /// Get a tile from the cache.
@@ -50,7 +69,7 @@ impl TileCacheClient {
     ///
     /// `Some(data)` if cached, `None` otherwise
     pub async fn get(&self, tile: &TileCoord) -> Option<Bytes> {
-        let key = Self::tile_to_key(tile);
+        let key = self.tile_to_key(tile);
         match self.cache.get(&key).await {
             Ok(Some(data)) => Some(data),
             Ok(None) => None,
@@ -68,7 +87,7 @@ impl TileCacheClient {
     /// * `tile` - The tile coordinates
     /// * `data` - The DDS tile data
     pub async fn set(&self, tile: &TileCoord, data: Bytes) {
-        let key = Self::tile_to_key(tile);
+        let key = self.tile_to_key(tile);
         if let Err(e) = self.cache.set(&key, data).await {
             warn!(error = %e, key = %key, "Tile cache set failed");
         }
@@ -80,13 +99,13 @@ impl TileCacheClient {
     ///
     /// * `tile` - The tile coordinates
     pub async fn contains(&self, tile: &TileCoord) -> bool {
-        let key = Self::tile_to_key(tile);
+        let key = self.tile_to_key(tile);
         self.cache.contains(&key).await.unwrap_or(false)
     }
 
     /// Check whether a tile exists, synchronously. See `Cache::contains_sync`.
     pub fn contains_sync(&self, tile: &TileCoord) -> bool {
-        let key = Self::tile_to_key(tile);
+        let key = self.tile_to_key(tile);
         self.cache.contains_sync(&key)
     }
 
@@ -100,7 +119,7 @@ impl TileCacheClient {
     ///
     /// `true` if the tile was deleted, `false` if it didn't exist
     pub async fn delete(&self, tile: &TileCoord) -> bool {
-        let key = Self::tile_to_key(tile);
+        let key = self.tile_to_key(tile);
         self.cache.delete(&key).await.unwrap_or(false)
     }
 
@@ -116,9 +135,12 @@ impl TileCacheClient {
 
     /// Convert tile coordinates to a cache key.
     ///
-    /// Format: `tile:{zoom}:{row}:{col}`
-    fn tile_to_key(tile: &TileCoord) -> String {
-        format!("tile:{}:{}:{}", tile.zoom, tile.row, tile.col)
+    /// Format: `tile:{zoom}:{row}:{col}`, then the client's suffix.
+    fn tile_to_key(&self, tile: &TileCoord) -> String {
+        format!(
+            "tile:{}:{}:{}{}",
+            tile.zoom, tile.row, tile.col, self.key_suffix
+        )
     }
 }
 
@@ -134,8 +156,15 @@ mod tests {
             col: 5279,
             zoom: 15,
         };
-        let key = TileCacheClient::tile_to_key(&tile);
-        assert_eq!(key, "tile:15:12754:5279");
+        let service = CacheService::start(ServiceCacheConfig::memory(1_000, None))
+            .await
+            .unwrap();
+        let client = TileCacheClient::new(service.cache());
+        assert_eq!(client.tile_to_key(&tile), "tile:15:12754:5279");
+        let off = TileCacheClient::new(service.cache()).with_sharpen(Sharpen::OFF);
+        assert_eq!(off.tile_to_key(&tile), "tile:15:12754:5279");
+        let sharp = TileCacheClient::new(service.cache()).with_sharpen(Sharpen::from_strength(0.5));
+        assert_eq!(sharp.tile_to_key(&tile), "tile:15:12754:5279:s5");
     }
 
     #[tokio::test]

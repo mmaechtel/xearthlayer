@@ -159,12 +159,13 @@ Each provider keeps its own tiles and chunks, so switching provider never mixes 
 
 ### [texture]
 
-Controls the DDS compression backend. XEarthLayer encodes BC1 (DXT1) textures, about 11 MB per 4096x4096 tile with its full mipmap chain. There is no format setting: BC3 was retired, and `texture.format` is no longer read (#395).
+Controls the DDS compression backend and the sharpening of the imagery seen near the ground. XEarthLayer encodes BC1 (DXT1) textures, about 11 MB per 4096x4096 tile with its full mipmap chain. There is no format setting: BC3 was retired, and `texture.format` is no longer read (#395).
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `compressor` | string | `ispc` | Compression backend: `software`, `ispc` (SIMD), `gpu` (wgpu compute), or `hybrid` (`gpu`, with `ispc` for the tiles the GPU cannot take at once) |
 | `gpu_device` | string | `integrated` | GPU adapter: `integrated`, `discrete`, or adapter name substring |
+| `sharpen` | number | `0.0` | Sharpening of the full-resolution texture level, `0.0` (off) to `1.0` in steps of 0.1. `0.5` is recommended for Apple imagery |
 
 **Example:**
 ```ini
@@ -191,6 +192,12 @@ gpu_device = integrated
 The `gpu` backend is ideal for systems with both an integrated and discrete GPU. Configure `gpu_device = integrated` to use the iGPU for encoding while the discrete GPU handles X-Plane rendering. This eliminates CPU contention between encoding and the simulator.
 
 On a machine with one GPU, X-Plane renders on that GPU, so `gpu` or `hybrid` encoding competes with the simulator for it. That covers every Apple Silicon Mac (one unified GPU, and no Apple-native BC1 encoder to make the contention worthwhile) and any PC with only an integrated or only a discrete GPU. XEarthLayer honours the setting, but logs a warning at startup and marks the Tile Processing Engine line on the dashboard's Status pane with an amber `!`; the setup wizard never selects `gpu` on such a machine. The ISPC default ships prebuilt kernels for x86-64 and Apple Silicon, so it needs nothing extra on either.
+
+**Sharpening (`sharpen`):** Streamed imagery looks soft close to the ground, where X-Plane shows each texture at full resolution: roads, field edges and roofs lack crispness. `sharpen` applies an unsharp mask to that level only, with every compressor. Distant terrain is drawn from the smaller levels, which are built from the unsharpened image and look as before. The outermost 4 pixels of every tile are never changed, so no seam can appear between tiles.
+
+- `0.5` was chosen on Apple imagery: about a third crisper, no visible halos, and brightness unchanged. `1.0` is visibly oversharpened there. Values for Bing and Google have not been measured.
+- Sharpened tiles are cached under their own name in the disk cache. After changing `sharpen`, tiles are built again from the downloaded imagery as X-Plane asks for them, without downloading again, and the old ones are cleared by the cache's normal cleanup.
+- Cost: about 24 ms of CPU per tile (on top of roughly 40 ms to encode and 80 ms to assemble it).
 
 **GPU Device Selection:**
 - `integrated` — Use the integrated GPU (e.g., AMD Radeon on Ryzen). Recommended when
@@ -727,6 +734,7 @@ Run 'xearthlayer config upgrade' to update your configuration.
 | `cache.dds_disk_ratio` | float (e.g., `0.6`) | Fraction of disk for DDS tiles (0.0-1.0), after any night lighting share |
 | `texture.compressor` | `software`, `ispc`, `gpu`, `hybrid` | Compression backend |
 | `texture.gpu_device` | `integrated`, `discrete`, or name | GPU adapter selection (used when compressor = gpu or hybrid) |
+| `texture.sharpen` | `0.0` to `1.0` | Sharpening of the full-resolution texture level (0.5 recommended for Apple) |
 | `generation.threads` | positive integer | Worker threads |
 | `generation.timeout` | positive integer | Tile generation timeout (seconds) |
 | `executor.request_timeout_secs` | positive integer | Per-chunk HTTP timeout (seconds) |

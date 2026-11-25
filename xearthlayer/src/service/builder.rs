@@ -122,13 +122,19 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
         ))
     })?;
 
+    let sharpen = config.texture().sharpen();
+    if !sharpen.is_off() {
+        tracing::info!(%sharpen, "Texture sharpening: level 0 of every tile");
+    }
+
     let cpu_components = |compressor: Arc<dyn crate::dds::ImageCompressor>| EncoderComponents {
         encoder: Arc::new(
             apply_mipmap_count(
                 DdsTextureEncoder::new(config.texture().format()),
                 config.texture().mipmap_count(),
             )
-            .with_compressor(compressor),
+            .with_compressor(compressor)
+            .with_sharpen(sharpen),
         ),
         gpu_worker_handle: None,
         gpu_adapter: None,
@@ -172,7 +178,7 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
                         DdsTextureEncoder::new(config.texture().format()),
                         config.texture().mipmap_count(),
                     )
-                    .with_mipmap_compressor(Arc::new(channel)),
+                    .with_mipmap_compressor(Arc::new(channel.with_sharpen(sharpen))),
                 ),
                 gpu_worker_handle: Some(worker_handle),
                 gpu_adapter: Some(selection.adapter),
@@ -205,6 +211,38 @@ mod tests {
             .build();
         let components = create_encoder(&config).unwrap();
         assert_eq!(components.encoder.format(), DdsFormat::BC1);
+    }
+
+    /// `texture.sharpen` reaches the encoder `create_encoder` builds.
+    #[test]
+    fn the_encoder_sharpens_as_the_texture_config_says() {
+        let sharpen = crate::dds::Sharpen::from_strength(0.5);
+        let image = image::RgbaImage::from_fn(64, 64, |x, y| {
+            let v = if (x / 5 + y / 7) % 2 == 0 { 40 } else { 200 };
+            image::Rgba([v, (x * 4) as u8, (y * 4) as u8, 255])
+        });
+        let encode = |sharpen| {
+            let config = ServiceConfig::builder()
+                .texture(
+                    TextureConfig::default()
+                        .with_compressor("software".to_string())
+                        .with_sharpen(sharpen),
+                )
+                .build();
+            use crate::texture::TextureEncoder;
+            create_encoder(&config)
+                .unwrap()
+                .encoder
+                .encode(image.clone())
+                .unwrap()
+        };
+        let expected = crate::dds::DdsEncoder::new(DdsFormat::BC1)
+            .with_compressor(Arc::new(crate::dds::SoftwareCompressor))
+            .with_sharpen(sharpen)
+            .encode(image.clone())
+            .unwrap();
+        assert_eq!(encode(sharpen), expected);
+        assert_ne!(encode(crate::dds::Sharpen::OFF), expected);
     }
 
     /// An unsupported format fails when the encoder is built, for every
