@@ -19,7 +19,7 @@ The wizard auto-detects your X-Plane installation, system hardware (CPU, memory,
 3. **Imagery Provider**: which satellite imagery to stream. Options that need no account are offered first, and the currently configured provider is preselected so re-running setup does not move a working installation. A key or token is requested only for Google Maps and Mapbox, entered without echoing to the terminal, and pressing Enter keeps a credential that is already configured.
 4. **Network Connections**: how many connections XEarthLayer opens at once (`network.connections`). High, the default, is optimized for capable home routers (TP-Link, Netgear, Asus, Eero, Google, Wyze and the like); Max needs prosumer or enterprise hardware (Ubiquiti, Cisco, Juniper, QNAP and the like) and the wizard warns when it is chosen; Low is for older or low spec home routers with limited bandwidth. The configured level is preselected.
 5. **Cache Configuration**: cache directory, disk cache size (defaults to 25% of free space, floored to 10 GB), DDS-to-chunk disk ratio, and memory cache size (defaults to RAM divided by 12, rounded to the nearest whole GB, clamped between 500 MB and a quarter of RAM).
-6. **DDS Encoding**: picks ISPC (CPU) by default, or offers to offload encoding to a secondary GPU when **two or more GPU adapters** are detected. The wizard warns against picking the GPU X-Plane renders on, and after a GPU is chosen asks whether the CPU should take the tiles the GPU is busy with (`hybrid`, the default answer) or not (`gpu`). Single-GPU systems skip the choice and stay on ISPC.
+6. **DDS Encoding**: picks ISPC (CPU) by default, or offers to offload encoding to a secondary GPU when **two or more GPU adapters** are detected. The wizard warns against picking the GPU X-Plane renders on, and after a GPU is chosen asks whether the CPU should take the tiles the GPU is busy with (`hybrid`) or not (`gpu`). Run again, it proposes the GPU and the answer already configured; for a new GPU choice it proposes `hybrid`. Single-GPU systems skip the choice and stay on ISPC.
 7. **Third-party Scenery**: when SimHeaven X-World Pro is detected, whether to give it priority over XEarthLayer's overlays (`packages.xworld_pro`, see [X-World Pro](x-world-pro.md)).
 
 GPU enumeration can take 10–30 seconds on multi-adapter systems while drivers are probed; a spinner shows progress.
@@ -177,7 +177,7 @@ gpu_device = integrated
 - **software**: Pure-Rust block compression. Slowest, no external dependencies.
 - **ispc** (default): Intel ISPC SIMD compression via `intel_tex_2`. 5-10x faster than software. Prebuilt ISPC kernels are included — no special build requirements.
 - **gpu**: wgpu compute shader compression. Built-in — no special build requirements. Offloads encoding to GPU via WGSL compute shaders, freeing CPU for X-Plane.
-- **hybrid**: `gpu`, except that no tile queues up behind the GPU. One GPU worker encodes one tile at a time, and with `gpu` the others queue behind it, so when X-Plane asks for many tiles at once (loading an area, crossing into new scenery) most of their time is spent waiting. With `hybrid`, one tile waits besides the one the GPU is encoding, and every further tile is encoded with ISPC on the CPU instead, as `ispc` would encode it. When tiles come one at a time the GPU takes them all; under a burst the CPU takes the rest. The `GPU encode sample` line in the log counts them as `ispc_overflow`.
+- **hybrid**: `gpu`, except that tiles never wait for room in the GPU's queue. One GPU worker encodes one tile at a time, and with `gpu` the others queue behind it, so when X-Plane asks for many tiles at once (loading an area, crossing into new scenery) most of their time is spent waiting. With `hybrid`, one tile waits besides the one the GPU is encoding, and every further tile is encoded with ISPC on the CPU instead, as `ispc` would encode it. When tiles come one at a time the GPU takes them all; under a burst the CPU takes the rest. The `GPU encode sample` line in the log counts them as `ispc_overflow`.
 
 **Choosing a Compressor:**
 
@@ -186,7 +186,7 @@ gpu_device = integrated
 | `software` | Slowest | High | Fallback when ISPC/GPU unavailable |
 | `ispc` | Fast (5-10x) | High | Default — best overall performance for most users |
 | `gpu` | Fast | Low | When an idle GPU is available (e.g., iGPU while dGPU runs X-Plane) |
-| `hybrid` | GPU when tiles come one at a time, GPU and CPU together under bursts | Low when idle, high under bursts | As `gpu`, when bursts of tiles should not queue up behind the GPU |
+| `hybrid` | GPU when tiles come one at a time, GPU and CPU together under bursts | Low when idle, high under bursts | As `gpu`, when bursts of tiles should not wait for the GPU |
 
 The `gpu` backend is ideal for systems with both an integrated and discrete GPU. Configure `gpu_device = integrated` to use the iGPU for encoding while the discrete GPU handles X-Plane rendering. This eliminates CPU contention between encoding and the simulator.
 

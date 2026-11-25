@@ -250,9 +250,6 @@ mod inner {
             )
             .entered();
 
-            // Counted from before the send (which blocks on a full channel)
-            // until the reply or the failure is back.
-            let in_channel = self.stats.enter();
             let sent_at = Instant::now();
             let (resp_tx, resp_rx) = oneshot::channel();
             let request = GpuEncodeRequest {
@@ -263,14 +260,21 @@ mod inner {
                 response: resp_tx,
             };
 
-            let sent = match self.when_busy {
-                WhenBusy::Wait => sender.blocking_send(request).map_err(|_| {
-                    DdsError::CompressionFailed("GPU worker is not running".to_string())
-                }),
+            // In the queue depth until the reply or the failure is back:
+            // from before a send that waits for room (it blocks on a full
+            // channel), from acceptance for one that overflows, so a tile
+            // handed to ISPC is never counted.
+            let (in_channel, sent) = match self.when_busy {
+                WhenBusy::Wait => {
+                    let in_channel = self.stats.enter();
+                    let sent = sender.blocking_send(request).map_err(|_| {
+                        DdsError::CompressionFailed("GPU worker is not running".to_string())
+                    });
+                    (in_channel, sent)
+                }
                 WhenBusy::EncodeWithIspc => match sender.try_send(request) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => (self.stats.enter(), Ok(())),
                     Err(TrySendError::Full(request) | TrySendError::Closed(request)) => {
-                        drop(in_channel);
                         return self.encode_overflow(request);
                     }
                 },
@@ -1196,7 +1200,11 @@ mod tests {
         assert_eq!(queued, [4], "only the waiting tile reached the queue");
         let s = channel.stats().take_sample().expect("a busy sample");
         assert_eq!((s.tiles(), s.overflowed, s.failed), (0, 1, 0));
-        assert_eq!(s.depth_now, 0, "the overflowed tile left the depth count");
+        assert_eq!(
+            (s.depth_now, s.depth_max),
+            (0, 0),
+            "an overflowed tile is never in the queue depth"
+        );
     }
 
     #[test]

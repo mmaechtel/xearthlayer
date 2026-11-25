@@ -140,7 +140,7 @@ The single worker sets the GPU path's throughput (see [Performance](#performance
 - `WhenBusy::channel_capacity` sizes the channel: `CHANNEL_CAPACITY` (32) to wait in, `OVERFLOW_CHANNEL_CAPACITY` (1) to overflow from, so one tile waits besides the one the worker encodes. A deeper queue only adds queue wait, as ISPC on one thread is about as fast as the worker.
 - With `EncodeWithIspc`, `compress_mipmap_chain` submits with `try_send`. On `Full`, or `Closed` (the worker stopped), it takes its request back and encodes the tile with ISPC on the calling thread, through `encoder::compress_chain`, which runs the same level loop (`compress_chain_into`) `DdsEncoder` runs for `ispc`: the bytes are those `ispc` writes behind its header, which a test checks against `DdsEncoder` itself. A tile the worker accepts is waited for as with `gpu`. ISPC and the GPU kernel give different bytes for the same tile; both are valid BC1, and nothing depends on which one a tile got.
 - The calling thread is a tile task's, which holds a CPU-pool permit, so the CPU pool stays the only limit on concurrent encodes: no second pool, no extra threads.
-- An overflowed tile is counted with `GpuEncodeStats::record_overflowed` when it encodes (as `failed` when it does not) and appears as `ispc_overflow` in the `GPU encode sample` line, apart from the worker's `tiles`. It leaves the queue depth as soon as it is taken back.
+- An overflowed tile is counted with `GpuEncodeStats::record_overflowed` when it encodes (as `failed` when it does not) and appears as `ispc_overflow` in the `GPU encode sample` line, apart from the worker's `tiles`. It never enters the queue depth: with `EncodeWithIspc` a request is counted from its acceptance, with `Wait` from before its send, which blocks on a full channel.
 - A worker that panics closes its queue before draining it, so a tile sent meanwhile overflows rather than failing with the drain.
 
 `gpu` is unchanged: `CHANNEL_CAPACITY` (32), `blocking_send`, and an error when the worker has stopped.
@@ -165,7 +165,7 @@ They appear in three places:
 - **The debug log**: one `GPU encode: tile stages` line per tile. Header assembly, which copies the payload behind the header, is in the encoder's own debug line (`assemble_us`), not in this one or the sample: removing that copy belongs with #423.
 - **A `GPU encode sample` line every 60 s** at info, only when the window saw a tile, an overflowed tile or a failure. It gives p50, p95 and max per stage, tiles, `ispc_overflow` (tiles `hybrid` encoded with ISPC instead), `failed` (every request that came back without a tile: worker errors, a worker not running, a dropped reply) and the queue depth, now and the window's maximum. The service builder starts it, so a channel built in a test has no logger taking its samples. A window keeps at most 10,000 tiles (`WINDOW_CAP`) and counts the rest as `unsampled`.
 
-The queue depth (`GpuEncodeStats`, `dds/gpu_stats.rs`) is raised before `blocking_send` and lowered when the reply or the failure is back, by a guard that drops on every path. It counts callers blocked on a full channel, which the channel's own capacity (32 buffered requests) does not show.
+The queue depth (`GpuEncodeStats`, `dds/gpu_stats.rs`) is raised before `blocking_send` (with `hybrid`, once `try_send` succeeds) and lowered when the reply or the failure is back, by a guard that drops on every path. It counts callers blocked on a full channel, which the channel's own capacity (32 buffered requests) does not show.
 
 ## Memory Optimization
 
