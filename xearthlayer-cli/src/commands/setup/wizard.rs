@@ -28,8 +28,8 @@ use xearthlayer::config::{
 };
 use xearthlayer::provider::catalog::{find as find_provider, PROVIDERS};
 use xearthlayer::system::{
-    enumerate_gpus, CompressorKind, DefaultEncoderPolicy, EncoderPolicy, GpuAdapter,
-    HardwareProfile, SystemInfo, MIN_DISK_CACHE_BYTES, MIN_MEMORY_CACHE_BYTES,
+    enumerate_gpus, select_gpu_index, CompressorKind, DefaultEncoderPolicy, EncoderPolicy,
+    GpuAdapter, HardwareProfile, SystemInfo, MIN_DISK_CACHE_BYTES, MIN_MEMORY_CACHE_BYTES,
 };
 
 use crate::error::CliError;
@@ -896,7 +896,7 @@ fn step_encoding(theme: &ColorfulTheme) -> Result<(String, String), CliError> {
     println!(
         "{}",
         style(
-            "⚠  Do NOT select the GPU that X-Plane uses for rendering — this will\n   cause frame drops. If unsure, keep the default (ISPC)."
+            "⚠  Do NOT select the GPU that X-Plane uses for rendering — this will\n   cause frame drops. If unsure, choose ISPC."
         )
         .yellow()
     );
@@ -955,9 +955,10 @@ fn step_encoding(theme: &ColorfulTheme) -> Result<(String, String), CliError> {
     }
 }
 
-/// The encoding menu's default: the configured GPU (item `1 + i` for
-/// `candidates[i]`) when `gpu` or `hybrid` is set and that GPU is still
-/// offered, ISPC (item 0) otherwise, so a reconfigure keeps the choice.
+/// The encoding menu's default: the GPU `gpu_device` selects (item `1 + i`
+/// for `candidates[i]`), by the rule the encoder selects it with, when
+/// `gpu` or `hybrid` is set and that GPU is offered; ISPC (item 0)
+/// otherwise, so a reconfigure keeps the choice.
 fn default_encoding_index(
     compressor: &str,
     gpu_device: &str,
@@ -967,9 +968,8 @@ fn default_encoding_index(
     if !CompressorKind::parse(compressor).is_some_and(CompressorKind::uses_gpu) {
         return 0;
     }
-    candidates
-        .iter()
-        .position(|adapter| adapter.config_value(adapters) == gpu_device)
+    select_gpu_index(adapters, gpu_device)
+        .and_then(|selected| candidates.iter().position(|c| *c == adapters[selected]))
         .map_or(0, |i| i + 1)
 }
 
@@ -1096,6 +1096,11 @@ mod tests {
         assert_eq!(index("ispc", "integrated"), 0, "a CPU encoder stays ISPC");
         assert_eq!(index("software", "discrete"), 0);
         assert_eq!(index("hybrid", "Intel Arc"), 0, "a GPU no longer offered");
+        assert_eq!(
+            index("gpu", "rtx"),
+            2,
+            "a name substring, as the encoder reads it"
+        );
     }
 
     #[test]
