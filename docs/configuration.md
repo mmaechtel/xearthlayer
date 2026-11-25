@@ -177,7 +177,7 @@ gpu_device = integrated
 - **software**: Pure-Rust block compression. Slowest, no external dependencies.
 - **ispc** (default): Intel ISPC SIMD compression via `intel_tex_2`. 5-10x faster than software. Prebuilt ISPC kernels are included — no special build requirements.
 - **gpu**: wgpu compute shader compression. Built-in — no special build requirements. Offloads encoding to GPU via WGSL compute shaders, freeing CPU for X-Plane.
-- **hybrid**: `gpu`, except that tiles never wait for room in the GPU's queue. One GPU worker encodes one tile at a time, and with `gpu` the others queue behind it, so when X-Plane asks for many tiles at once (loading an area, crossing into new scenery) most of their time is spent waiting. With `hybrid`, one tile waits besides the one the GPU is encoding, and every further tile is encoded with ISPC on the CPU instead, as `ispc` would encode it. When tiles come one at a time the GPU takes them all; under a burst the CPU takes the rest. The `GPU encode sample` line in the log counts them as `ispc_overflow`.
+- **hybrid**: `gpu`, except that tiles never wait for room in the GPU's queue. One GPU worker encodes one tile at a time, and with `gpu` the others queue behind it, so when X-Plane asks for many tiles at once (loading an area, crossing into new scenery) most of their time is spent waiting. With `hybrid`, one tile waits besides the one the GPU is encoding, and every further tile is encoded with ISPC on the CPU instead, as `ispc` would encode it. When tiles come one at a time the GPU takes them all; under a burst the CPU takes the rest. The `GPU encode sample` line in the log counts them as `ispc_overflow`, and the dashboard's Status pane shows the engine as `GPU ... + ISPC`.
 
 **Choosing a Compressor:**
 

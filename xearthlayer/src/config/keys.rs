@@ -608,7 +608,7 @@ impl ConfigKey {
             ConfigKey::CacheDiskSize => Box::new(SizeSpec),
             ConfigKey::CacheDdsDiskRatio => Box::new(FloatRangeSpec::new(0.0, 1.0)),
             ConfigKey::TextureCompressor => {
-                Box::new(OneOfSpec::new(&["software", "ispc", "gpu", "hybrid"]))
+                Box::new(OneOfSpec::new(crate::system::CompressorKind::VALUES))
             }
             ConfigKey::TextureGpuDevice => Box::new(NonEmptyStringSpec),
             ConfigKey::GenerationThreads => Box::new(PositiveIntegerSpec),

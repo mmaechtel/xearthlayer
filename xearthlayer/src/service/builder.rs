@@ -59,16 +59,19 @@ pub async fn create_async_provider(
 pub struct EncoderComponents {
     /// The texture encoder.
     pub encoder: Arc<DdsTextureEncoder>,
-    /// GPU worker handle (present when `texture.compressor = gpu`).
+    /// GPU worker handle (present when `texture.compressor` is `gpu` or
+    /// `hybrid`).
     /// Must be awaited during shutdown to ensure GPU resources are released.
     pub gpu_worker_handle: Option<tokio::task::JoinHandle<()>>,
-    /// The GPU the encoder selected (present when `texture.compressor = gpu`).
+    /// The GPU the encoder selected (present when `texture.compressor` is
+    /// `gpu` or `hybrid`).
     pub gpu_adapter: Option<crate::system::GpuAdapter>,
-    /// The encoder policy's warning when `gpu` was honoured on a host whose
+    /// The encoder policy's warning when `gpu` or `hybrid` was honoured on a host whose
     /// only GPU is the one X-Plane renders with (#203). Logged at creation
     /// and shown on the dashboard's Status pane.
     pub gpu_warning: Option<String>,
-    /// Shutdown token for the GPU worker (present when `texture.compressor = gpu`).
+    /// Shutdown token for the GPU worker (present when `texture.compressor`
+    /// is `gpu` or `hybrid`).
     /// Cancelling this token causes the worker to exit its loop regardless of
     /// the channel state. Required because `spawn_blocking` threads are not
     /// cancelled by tokio runtime shutdown.
@@ -113,8 +116,9 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
 
     let backend = CompressorKind::parse(config.texture().compressor()).ok_or_else(|| {
         ServiceError::ConfigError(format!(
-            "Unknown texture compressor '{}'. Valid options: software, ispc, gpu, hybrid",
-            config.texture().compressor()
+            "Unknown texture compressor '{}'. Valid options: {}",
+            config.texture().compressor(),
+            CompressorKind::VALUES.join(", ")
         ))
     })?;
 

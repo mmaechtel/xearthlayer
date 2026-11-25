@@ -32,6 +32,10 @@ pub enum CompressorKind {
 }
 
 impl CompressorKind {
+    /// Every `texture.compressor` value, the one list the config key, the
+    /// parser and the error messages name.
+    pub const VALUES: &'static [&'static str] = &["software", "ispc", "gpu", "hybrid"];
+
     /// Parse a `texture.compressor` value. `None` for anything unknown.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -185,15 +189,21 @@ mod tests {
 
     #[test]
     fn compressor_kind_round_trips_through_its_config_value() {
-        for kind in [
+        let kinds = [
             CompressorKind::Software,
             CompressorKind::Ispc,
             CompressorKind::Gpu,
             CompressorKind::Hybrid,
-        ] {
+        ];
+        for kind in kinds {
             assert_eq!(CompressorKind::parse(kind.config_value()), Some(kind));
             assert_eq!(kind.to_string(), kind.config_value());
         }
+        assert_eq!(
+            kinds.map(CompressorKind::config_value),
+            CompressorKind::VALUES,
+            "VALUES names every backend"
+        );
         assert_eq!(CompressorKind::parse("gpu"), Some(CompressorKind::Gpu));
         assert_eq!(CompressorKind::parse("cuda"), None);
         assert_eq!(CompressorKind::parse(""), None);
