@@ -49,7 +49,7 @@ pub struct SetupConfig {
     pub disk_cache_size: usize,
     /// Fraction of disk cache budget allocated to encoded DDS tiles
     pub dds_disk_ratio: f64,
-    /// Texture compressor backend: "software", "ispc", or "gpu"
+    /// Texture compressor backend: "software", "ispc", "gpu", or "hybrid"
     pub texture_compressor: String,
     /// GPU device selector when compressor is "gpu". Ignored otherwise but
     /// always written to keep the config file shape consistent.

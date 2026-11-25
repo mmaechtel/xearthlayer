@@ -92,6 +92,8 @@ fn apply_mipmap_count(encoder: DdsTextureEncoder, count: Option<usize>) -> DdsTe
 /// - `"ispc"` — SIMD-optimized via Intel ISPC (default)
 /// - `"software"` — Pure-Rust fallback
 /// - `"gpu"` — GPU compute via wgpu
+/// - `"hybrid"` — the GPU worker, and ISPC on the calling thread for a tile
+///   that finds the worker's one-tile queue taken
 ///
 /// The GPU path runs the choice past the [`EncoderPolicy`] with the
 /// adapters its own enumeration produced, so a host whose only GPU is the
@@ -111,7 +113,7 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
 
     let backend = CompressorKind::parse(config.texture().compressor()).ok_or_else(|| {
         ServiceError::ConfigError(format!(
-            "Unknown texture compressor '{}'. Valid options: software, ispc, gpu",
+            "Unknown texture compressor '{}'. Valid options: software, ispc, gpu, hybrid",
             config.texture().compressor()
         ))
     })?;
@@ -131,15 +133,18 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
     };
 
     match backend {
-        CompressorKind::Gpu => {
+        CompressorKind::Gpu | CompressorKind::Hybrid => {
             use crate::dds::gpu_channel::create_gpu_encoder_channel;
 
             let shutdown_token = tokio_util::sync::CancellationToken::new();
-            let (channel, worker_handle, selection) =
-                create_gpu_encoder_channel(config.texture().gpu_device(), shutdown_token.clone())
-                    .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {e}")))?;
+            let (channel, worker_handle, selection) = create_gpu_encoder_channel(
+                config.texture().gpu_device(),
+                backend == CompressorKind::Hybrid,
+                shutdown_token.clone(),
+            )
+            .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {e}")))?;
 
-            let decision = DefaultEncoderPolicy.select(&selection.host, Some(CompressorKind::Gpu));
+            let decision = DefaultEncoderPolicy.select(&selection.host, Some(backend));
             if let Some(warning) = &decision.warning {
                 tracing::warn!(adapter = %selection.adapter, "{warning}");
             }
@@ -151,7 +156,7 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
                 shutdown_token.clone(),
             );
 
-            tracing::info!("GPU pipeline encoder created with dedicated worker");
+            tracing::info!(compressor = %backend, "GPU pipeline encoder created with dedicated worker");
 
             Ok(EncoderComponents {
                 encoder: Arc::new(
@@ -199,7 +204,7 @@ mod tests {
     /// error names the format whether or not this host has a GPU.
     #[tokio::test]
     async fn test_create_encoder_rejects_unsupported_format() {
-        for compressor in ["software", "ispc", "gpu"] {
+        for compressor in ["software", "ispc", "gpu", "hybrid"] {
             let config = ServiceConfig::builder()
                 .texture(TextureConfig::new(DdsFormat::BC3).with_compressor(compressor.to_string()))
                 .build();
@@ -224,13 +229,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_encoder_gpu_compiles() {
+        for compressor in ["gpu", "hybrid"] {
+            create_gpu_encoder_or_report_why_not(compressor);
+        }
+    }
+
+    /// Verify the GPU code path compiles and handles a missing GPU
+    /// gracefully: on CI without a GPU this is an error, which is fine.
+    /// Needs a Tokio runtime because GpuEncoderChannel spawns a worker task.
+    fn create_gpu_encoder_or_report_why_not(compressor: &str) {
         use crate::texture::TextureEncoder;
 
-        // Verify the GPU code path compiles and handles missing GPU gracefully.
-        // On CI without GPU, this returns an error — that's fine.
-        // Needs a Tokio runtime because GpuEncoderChannel spawns a worker task.
         let config = ServiceConfig::builder()
-            .texture(TextureConfig::default().with_compressor("gpu".to_string()))
+            .texture(TextureConfig::default().with_compressor(compressor.to_string()))
             .build();
         let result = create_encoder(&config);
         match result {
@@ -253,7 +264,7 @@ mod tests {
             }
             Err(e) => assert!(
                 e.to_string().contains("GPU"),
-                "error should mention GPU, got: {e}"
+                "{compressor}: error should mention GPU, got: {e}"
             ),
         }
     }

@@ -109,7 +109,7 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
         if let Some(v) = section.get("compressor") {
             let v = v.to_lowercase();
             match v.as_str() {
-                "software" | "ispc" | "gpu" => {
+                "software" | "ispc" | "gpu" | "hybrid" => {
                     config.texture.compressor = v;
                 }
                 _ => {
@@ -117,7 +117,7 @@ pub(super) fn parse_ini(ini: &Ini) -> Result<ConfigFile, ConfigFileError> {
                         section: "texture".to_string(),
                         key: "compressor".to_string(),
                         value: v,
-                        reason: "must be 'software', 'ispc', or 'gpu'".to_string(),
+                        reason: "must be 'software', 'ispc', 'gpu', or 'hybrid'".to_string(),
                     });
                 }
             }
