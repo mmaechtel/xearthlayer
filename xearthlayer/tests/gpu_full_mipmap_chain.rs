@@ -41,7 +41,7 @@ async fn gpu_emits_full_mipmap_chain_for_4096_tile() {
     let (channel, _worker, _adapter) =
         match xearthlayer::dds::gpu_channel::create_gpu_encoder_channel(
             &gpu_device(),
-            false,
+            xearthlayer::dds::gpu_channel::WhenBusy::Wait,
             shutdown,
         ) {
             Ok(r) => r,
@@ -108,7 +108,7 @@ async fn gpu_worker_survives_sub_block_levels() {
     let (channel, _worker, _adapter) =
         match xearthlayer::dds::gpu_channel::create_gpu_encoder_channel(
             &gpu_device(),
-            false,
+            xearthlayer::dds::gpu_channel::WhenBusy::Wait,
             shutdown,
         ) {
             Ok(r) => r,

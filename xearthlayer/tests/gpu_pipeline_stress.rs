@@ -146,7 +146,7 @@ mod gpu_stress {
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let (channel, _worker, selection) =
-            match create_gpu_encoder_channel(&device, false, shutdown) {
+            match create_gpu_encoder_channel(&device, WhenBusy::Wait, shutdown) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("Skipping stress test: {e}");

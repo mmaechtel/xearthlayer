@@ -135,12 +135,12 @@ VRAM budget: pipeline depth 2 with 4096x4096 tiles ~ 160MB peak.
 
 ### Overflow to ISPC (`hybrid`)
 
-The single worker sets the GPU path's throughput (see [Performance](#performance)): under a burst a `gpu` tile spends almost all its time in the queue. `texture.compressor = hybrid` never lets a tile wait for the worker:
+The single worker sets the GPU path's throughput (see [Performance](#performance)): under a burst a `gpu` tile spends almost all its time in the queue. With `texture.compressor = hybrid` no tile waits for room in the queue. What a tile does when the queue is full is `WhenBusy` (`Wait` for `gpu`, `EncodeWithIspc` for `hybrid`), passed to `create_gpu_encoder_channel` and set on the handle with `GpuEncoderChannel::when_busy`:
 
-- `create_gpu_encoder_channel(device, overflow = true, ..)` builds the channel with `OVERFLOW_CHANNEL_CAPACITY` = 1 and returns `GpuEncoderChannel::with_overflow`: one tile waits besides the one the worker encodes. A deeper queue only adds queue wait, as ISPC on one thread is about as fast as the worker.
-- `compress_mipmap_chain` submits with `try_send`. On `Full`, or `Closed` (the worker stopped), it takes its request back and encodes the tile with ISPC on the calling thread, through `encoder::compress_chain`, the function `DdsEncoder` uses for `ispc`: the bytes are those `ispc` writes. ISPC and the GPU kernel give different bytes for the same tile; both are valid BC1, and nothing depends on which one a tile got.
+- `WhenBusy::channel_capacity` sizes the channel: `CHANNEL_CAPACITY` (32) to wait in, `OVERFLOW_CHANNEL_CAPACITY` (1) to overflow from, so one tile waits besides the one the worker encodes. A deeper queue only adds queue wait, as ISPC on one thread is about as fast as the worker.
+- With `EncodeWithIspc`, `compress_mipmap_chain` submits with `try_send`. On `Full`, or `Closed` (the worker stopped), it takes its request back and encodes the tile with ISPC on the calling thread, through `encoder::compress_chain`, which runs the same level loop (`compress_chain_into`) `DdsEncoder` runs for `ispc`: the bytes are those `ispc` writes behind its header, which a test checks against `DdsEncoder` itself. A tile the worker accepts is waited for as with `gpu`. ISPC and the GPU kernel give different bytes for the same tile; both are valid BC1, and nothing depends on which one a tile got.
 - The calling thread is a tile task's, which holds a CPU-pool permit, so the CPU pool stays the only limit on concurrent encodes: no second pool, no extra threads.
-- The tile is counted with `GpuEncodeStats::record_overflowed` and appears as `ispc_overflow` in the `GPU encode sample` line, apart from the worker's `tiles`. It leaves the queue depth as soon as it is taken back.
+- An overflowed tile is counted with `GpuEncodeStats::record_overflowed` when it encodes (as `failed` when it does not) and appears as `ispc_overflow` in the `GPU encode sample` line, apart from the worker's `tiles`. It leaves the queue depth as soon as it is taken back.
 - A worker that panics closes its queue before draining it, so a tile sent meanwhile overflows rather than failing with the drain.
 
 `gpu` is unchanged: `CHANNEL_CAPACITY` (32), `blocking_send`, and an error when the worker has stopped.
@@ -263,8 +263,10 @@ GPU Adapters:
 
 - `"software"` -> `SoftwareCompressor`
 - `"ispc"` -> `IspcCompressor` (default)
-- `"gpu"` -> `GpuEncoderChannel` via `create_gpu_resources()`; hard error on failure.
-- `"hybrid"` -> the same, built with overflow (`GpuEncoderChannel::with_overflow`). The builder also starts the channel's 60 s `GPU encode sample` logger, which ends with the service's shutdown token or the channel
+- `"gpu"` -> `GpuEncoderChannel` via `create_gpu_resources()` with `WhenBusy::Wait`; hard error on failure.
+- `"hybrid"` -> the same with `WhenBusy::EncodeWithIspc`.
+
+For both, the builder also starts the channel's 60 s `GPU encode sample` logger, which ends with the service's shutdown token or the channel
 
 No changes to task, executor, or job code. The compressor is injected via the existing `DdsEncoder` API.
 

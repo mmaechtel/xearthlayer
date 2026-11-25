@@ -134,12 +134,16 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
 
     match backend {
         CompressorKind::Gpu | CompressorKind::Hybrid => {
-            use crate::dds::gpu_channel::create_gpu_encoder_channel;
+            use crate::dds::gpu_channel::{create_gpu_encoder_channel, WhenBusy};
 
             let shutdown_token = tokio_util::sync::CancellationToken::new();
+            let when_busy = match backend {
+                CompressorKind::Hybrid => WhenBusy::EncodeWithIspc,
+                _ => WhenBusy::Wait,
+            };
             let (channel, worker_handle, selection) = create_gpu_encoder_channel(
                 config.texture().gpu_device(),
-                backend == CompressorKind::Hybrid,
+                when_busy,
                 shutdown_token.clone(),
             )
             .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {e}")))?;

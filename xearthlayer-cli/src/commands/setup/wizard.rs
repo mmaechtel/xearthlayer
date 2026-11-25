@@ -51,8 +51,8 @@ pub struct SetupConfig {
     pub dds_disk_ratio: f64,
     /// Texture compressor backend: "software", "ispc", "gpu", or "hybrid"
     pub texture_compressor: String,
-    /// GPU device selector when compressor is "gpu". Ignored otherwise but
-    /// always written to keep the config file shape consistent.
+    /// GPU device selector when compressor is "gpu" or "hybrid". Ignored
+    /// otherwise but always written to keep the config file shape consistent.
     pub texture_gpu_device: String,
     /// Imagery provider (`provider.type`).
     pub provider_type: String,
@@ -924,13 +924,24 @@ fn step_encoding(theme: &ColorfulTheme) -> Result<(String, String), CliError> {
     } else {
         let adapter = &candidates[idx - 1];
         let gpu_device = adapter.config_value(&hw.adapters);
-        let decision = policy.select(&hw, Some(CompressorKind::Gpu));
+        let overflow = Confirm::with_theme(theme)
+            .with_prompt("Encode tiles on the CPU (ISPC) while the GPU is busy? (hybrid)")
+            .default(true)
+            .interact()
+            .map_err(|e| CliError::Config(format!("Confirm error: {}", e)))?;
+        let kind = if overflow {
+            CompressorKind::Hybrid
+        } else {
+            CompressorKind::Gpu
+        };
+        let decision = policy.select(&hw, Some(kind));
         if let Some(warning) = &decision.warning {
             println!("{}", style(format!("⚠  {warning}")).yellow());
         }
         println!(
-            "  {} GPU: {} (config: {})",
+            "  {} {}: {} (config: {})",
             style("✓").green(),
+            decision.backend,
             adapter,
             gpu_device
         );

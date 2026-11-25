@@ -32,14 +32,6 @@ pub enum CompressorKind {
 }
 
 impl CompressorKind {
-    /// The backend puts tiles on a GPU, so it shares that GPU with X-Plane
-    /// when it is the only one.
-    pub fn uses_gpu(self) -> bool {
-        matches!(self, Self::Gpu | Self::Hybrid)
-    }
-}
-
-impl CompressorKind {
     /// Parse a `texture.compressor` value. `None` for anything unknown.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -59,6 +51,12 @@ impl CompressorKind {
             Self::Gpu => "gpu",
             Self::Hybrid => "hybrid",
         }
+    }
+
+    /// The backend puts tiles on a GPU, so it shares that GPU with X-Plane
+    /// when it is the only one.
+    pub fn uses_gpu(self) -> bool {
+        matches!(self, Self::Gpu | Self::Hybrid)
     }
 }
 
