@@ -623,6 +623,10 @@ mod inner {
         loop {
             if shutdown.is_cancelled() {
                 tracing::info!("GPU pipeline worker: shutdown signal received");
+                // Queued requests are dropped, so their callers see the
+                // response channel closed; drained as after a panic.
+                rx.close();
+                while rx.blocking_recv().is_some() {}
                 break;
             }
 
@@ -691,8 +695,13 @@ mod inner {
                     // Closed first, so no request is sent while the queue
                     // drains: a caller with `WhenBusy::EncodeWithIspc`
                     // encodes with ISPC, one that waits fails at once.
+                    // Drained with `blocking_recv`, which returns `None`
+                    // only once no sender holds a slot: a `try_send` that
+                    // took its slot before the close and sends after it is
+                    // answered too, where `try_recv` would leave its caller
+                    // waiting forever.
                     rx.close();
-                    while let Ok(req) = rx.try_recv() {
+                    while let Some(req) = rx.blocking_recv() {
                         let _ = req.response.send(GpuEncodeReply::failed(
                             "GPU worker terminated after panic",
                             GpuTileTiming::default(),
