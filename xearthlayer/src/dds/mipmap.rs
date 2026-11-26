@@ -4,6 +4,8 @@ use std::sync::LazyLock;
 
 use image::RgbaImage;
 
+use super::sharpen::Sharpen;
+
 /// How a mip level averages each 2×2 block of the level above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MipFilter {
@@ -313,6 +315,12 @@ pub struct MipmapStream {
     remaining: usize,
     /// Whether the first (original) image has been lent.
     lent_first: bool,
+    /// Sharpening of level 0 (`texture.sharpen`).
+    sharpen: Sharpen,
+    /// Level 1, built from the unsharpened level 0 before it was sharpened
+    /// in place; lent by the second call, after which the chain goes on in
+    /// place over it. `None` unless sharpening is on.
+    held: Option<RgbaImage>,
 }
 
 impl MipmapStream {
@@ -327,7 +335,19 @@ impl MipmapStream {
             image,
             remaining: count,
             lent_first: false,
+            sharpen: Sharpen::OFF,
+            held: None,
         }
+    }
+
+    /// Sharpen level 0 (`texture.sharpen`). Level 1 is downsampled from the
+    /// unsharpened image on the first call (the allocating
+    /// [`MipmapGenerator::downsample_box_2x`]) and held for the second, so
+    /// no level below 0 is affected. With sharpening off nothing is held and
+    /// no level is a new allocation.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
     }
 
     /// The next level, largest first: the source on the first call, then
@@ -338,12 +358,20 @@ impl MipmapStream {
         if self.remaining == 0 {
             return None;
         }
-        if self.lent_first {
+        if let Some(level_1) = self.held.take() {
+            self.image = level_1;
+        } else if self.lent_first {
             if self.image.width() <= 1 || self.image.height() <= 1 {
                 self.remaining = 0;
                 return None;
             }
             MipmapGenerator::downsample_box_2x_in_place(&mut self.image);
+        }
+        if !self.lent_first && !self.sharpen.is_off() {
+            if self.remaining > 1 && self.image.width() > 1 && self.image.height() > 1 {
+                self.held = Some(MipmapGenerator::downsample_box_2x(&self.image));
+            }
+            self.sharpen.apply(&mut self.image);
         }
         self.lent_first = true;
         self.remaining -= 1;
@@ -1125,6 +1153,82 @@ mod tests {
     #[test]
     fn a_stream_that_has_ended_stays_ended() {
         let mut stream = MipmapStream::new(RgbaImage::new(2, 2), 5);
+        assert!(stream.next_level().is_some());
+        assert!(stream.next_level().is_some());
+        assert!(stream.next_level().is_none());
+        assert!(stream.next_level().is_none());
+    }
+
+    /// Every level of a sharpening stream, copied out.
+    fn sharpened_levels(image: RgbaImage, count: usize, sharpen: Sharpen) -> Vec<RgbaImage> {
+        let mut stream = MipmapStream::new(image, count).with_sharpen(sharpen);
+        let mut levels = Vec::new();
+        while let Some(level) = stream.next_level() {
+            levels.push(level.clone());
+        }
+        levels
+    }
+
+    #[test]
+    fn sharpening_changes_level_0_only_and_levels_below_are_the_unsharpened_chain() {
+        let sharpen = Sharpen::from_strength(0.5);
+        for (w, h, count) in [(64, 64, 7), (48, 40, 6), (33, 17, 6), (9, 9, 5)] {
+            let source = noise(w, h, 7);
+            let plain = stream_levels(source.clone(), count);
+            let sharpened = sharpened_levels(source.clone(), count, sharpen);
+
+            assert_eq!(sharpened.len(), plain.len(), "{w}x{h}: level count");
+            let mut expected_0 = source;
+            sharpen.apply(&mut expected_0);
+            assert_same_image(&sharpened[0], &expected_0, &format!("{w}x{h} level 0"));
+            for level in 1..plain.len() {
+                assert_same_image(
+                    &sharpened[level],
+                    &plain[level],
+                    &format!("{w}x{h} level {level}"),
+                );
+            }
+        }
+        // The mask has to have done something on the 64x64 noise.
+        let source = noise(64, 64, 7);
+        assert_ne!(
+            sharpened_levels(source.clone(), 1, sharpen)[0].as_raw(),
+            source.as_raw()
+        );
+    }
+
+    #[test]
+    fn sharpening_off_is_the_plain_stream() {
+        let source = noise(64, 64, 3);
+        let plain = stream_levels(source.clone(), 7);
+        let off = sharpened_levels(source, 7, Sharpen::OFF);
+        for (level, (a, b)) in off.iter().zip(&plain).enumerate() {
+            assert_same_image(a, b, &format!("level {level}"));
+        }
+    }
+
+    #[test]
+    fn a_sharpened_single_level_has_no_level_1_to_hold() {
+        let sharpen = Sharpen::from_strength(0.5);
+        let source = noise(64, 64, 5);
+        let mut expected = source.clone();
+        sharpen.apply(&mut expected);
+        let mut stream = MipmapStream::new(source, 1).with_sharpen(sharpen);
+        assert_same_image(stream.next_level().unwrap(), &expected, "level 0");
+        assert!(stream.held.is_none(), "nothing held for a one-level chain");
+        assert!(stream.next_level().is_none());
+    }
+
+    #[test]
+    fn a_sharpened_one_pixel_wide_image_ends_after_level_0() {
+        let levels = sharpened_levels(noise(1, 8, 2), 4, Sharpen::from_strength(1.0));
+        assert_eq!(levels.len(), 1);
+    }
+
+    #[test]
+    fn a_sharpened_stream_that_has_ended_stays_ended() {
+        let mut stream =
+            MipmapStream::new(RgbaImage::new(2, 2), 5).with_sharpen(Sharpen::from_strength(0.5));
         assert!(stream.next_level().is_some());
         assert!(stream.next_level().is_some());
         assert!(stream.next_level().is_none());

@@ -702,8 +702,12 @@ mod tests {
             SharedGpuHealth::new(),
             tokio_util::sync::CancellationToken::new(),
         );
-        let encoders =
-            crate::service::builder::gpu_lane_encoders(channels, DdsFormat::BC1, Some(1));
+        let encoders = crate::service::builder::gpu_lane_encoders(
+            channels,
+            DdsFormat::BC1,
+            Some(1),
+            crate::dds::Sharpen::OFF,
+        );
         let temp_dir = tempfile::tempdir().unwrap();
         let config = crate::service::ServiceConfig::builder()
             .cache_directory(temp_dir.path().join("cache"))

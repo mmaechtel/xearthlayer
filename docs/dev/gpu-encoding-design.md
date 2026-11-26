@@ -30,6 +30,22 @@ gpu_device = integrated     # integrated | discrete | <name substring>
   - `discrete` -> `DeviceType::DiscreteGpu`
   - Any other string -> case-insensitive substring match against `AdapterInfo::name`
 
+### Sharpening (`texture.sharpen`)
+
+The worker builds a tile's mips on the GPU from the level 0 it uploads, so it
+cannot sharpen level 0 without sharpening every level below it, which must
+stay unsharpened (`MipmapStream::with_sharpen`, [DDS
+implementation](dds-implementation.md#level-0-sharpening)). This is a
+provisional rule rather than sharpening in the shader: with `texture.sharpen`
+on (`0.05` and up, rounded to tenths) the GPU encodes no tile. `DdsEncoder` never submits to the
+channel (`encode_awaiting` answers `AwaitedEncode::Cpu` at once, `encode`
+uses the fallback) and the tile is encoded on the CPU with ISPC, the same
+bytes as `texture.compressor = ispc` and the cache key `:s{tenths}`.
+`create_encoder` warns once at start; the Status pane and the single-GPU
+contention warning still describe the GPU as the encoder (a known gap of the
+provisional rule). No sharpening code is in the channel,
+the worker or the shader.
+
 ### Error Behaviour
 
 All GPU configuration errors are fatal at startup (exit non-zero with actionable message):
@@ -328,6 +344,10 @@ impl MipmapStream {
 
 - Owns the source image; the first call lends it, each later call writes the
   next level over it (`MipmapGenerator::downsample_box_2x_in_place`)
+- `with_sharpen` (CPU encodes only, see [Sharpening](#sharpening-texturesharpen))
+  builds level 1 from the unsharpened source before the first call lends the
+  sharpened level 0, holds it, and lends it second; one extra quarter-size
+  level, only with sharpening on
 - The level is valid until the next call; it is not an `Iterator`
 - Memory footprint: the base image's buffer (~64 MB for a 4096 tile), held
   until the stream is dropped, plus a copy of two source rows per step

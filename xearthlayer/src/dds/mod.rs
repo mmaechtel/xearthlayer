@@ -97,6 +97,7 @@ pub mod gpu_timestamps;
 mod header;
 pub mod layout;
 mod mipmap;
+mod sharpen;
 mod types;
 
 // Public API
@@ -110,3 +111,4 @@ pub use types::{DdsError, DdsFormat, DdsHeader};
 
 // Re-export for advanced usage
 pub use mipmap::{MipFilter, MipmapGenerator, MipmapStream};
+pub use sharpen::Sharpen;

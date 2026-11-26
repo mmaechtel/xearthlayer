@@ -55,6 +55,7 @@ pub enum ConfigKey {
     // Texture settings
     TextureCompressor,
     TextureGpuDevice,
+    TextureSharpen,
 
     // Generation settings
     GenerationThreads,
@@ -141,6 +142,7 @@ impl FromStr for ConfigKey {
 
             "texture.compressor" => Ok(ConfigKey::TextureCompressor),
             "texture.gpu_device" => Ok(ConfigKey::TextureGpuDevice),
+            "texture.sharpen" => Ok(ConfigKey::TextureSharpen),
 
             "generation.threads" => Ok(ConfigKey::GenerationThreads),
             "generation.timeout" => Ok(ConfigKey::GenerationTimeout),
@@ -212,6 +214,7 @@ impl ConfigKey {
             ConfigKey::CacheDdsDiskRatio => "cache.dds_disk_ratio",
             ConfigKey::TextureCompressor => "texture.compressor",
             ConfigKey::TextureGpuDevice => "texture.gpu_device",
+            ConfigKey::TextureSharpen => "texture.sharpen",
             ConfigKey::GenerationThreads => "generation.threads",
             ConfigKey::GenerationTimeout => "generation.timeout",
             ConfigKey::XplaneSceneryDir => "xplane.scenery_dir",
@@ -305,6 +308,7 @@ impl ConfigKey {
             ConfigKey::CacheDdsDiskRatio => config.cache.dds_disk_ratio.to_string(),
             ConfigKey::TextureCompressor => config.texture.compressor.clone(),
             ConfigKey::TextureGpuDevice => config.texture.gpu_device.clone(),
+            ConfigKey::TextureSharpen => config.texture.sharpen.to_string(),
             ConfigKey::GenerationThreads => config.generation.threads.to_string(),
             ConfigKey::GenerationTimeout => config.generation.timeout.to_string(),
             ConfigKey::XplaneSceneryDir => config
@@ -439,6 +443,9 @@ impl ConfigKey {
             }
             ConfigKey::TextureGpuDevice => {
                 config.texture.gpu_device = value.to_string();
+            }
+            ConfigKey::TextureSharpen => {
+                config.texture.sharpen = value.parse().unwrap();
             }
             ConfigKey::GenerationThreads => {
                 config.generation.threads = value.parse().unwrap();
@@ -609,6 +616,7 @@ impl ConfigKey {
             ConfigKey::CacheDdsDiskRatio => Box::new(FloatRangeSpec::new(0.0, 1.0)),
             ConfigKey::TextureCompressor => Box::new(OneOfSpec::new(&["software", "ispc", "gpu"])),
             ConfigKey::TextureGpuDevice => Box::new(NonEmptyStringSpec),
+            ConfigKey::TextureSharpen => Box::new(FloatRangeSpec::new(0.0, 1.0)),
             ConfigKey::GenerationThreads => Box::new(PositiveIntegerSpec),
             ConfigKey::GenerationTimeout => Box::new(PositiveIntegerSpec),
             ConfigKey::XplaneSceneryDir => Box::new(OptionalPathSpec),
@@ -679,6 +687,7 @@ impl ConfigKey {
             ConfigKey::CacheDdsDiskRatio,
             ConfigKey::TextureCompressor,
             ConfigKey::TextureGpuDevice,
+            ConfigKey::TextureSharpen,
             ConfigKey::GenerationThreads,
             ConfigKey::GenerationTimeout,
             ConfigKey::XplaneSceneryDir,
@@ -1030,6 +1039,25 @@ mod tests {
         assert_eq!(ConfigKey::NightEnabled.get(&config), "false");
         assert!(ConfigKey::NightEnabled.set(&mut config, "maybe").is_err());
         assert!(!config.night.enabled, "a rejected value changes nothing");
+    }
+
+    #[test]
+    fn texture_sharpen_parses_enumerates_and_validates() {
+        let key: ConfigKey = "texture.sharpen".parse().unwrap();
+        assert_eq!(key, ConfigKey::TextureSharpen);
+        assert_eq!(key.name(), "texture.sharpen");
+        assert!(ConfigKey::all().contains(&key));
+        assert!(key.is_range_checked());
+        let mut config = ConfigFile::default();
+        assert_eq!(key.get(&config), "0");
+        key.set(&mut config, "0.5").unwrap();
+        assert_eq!(config.texture.sharpen, 0.5);
+        assert!(key.set(&mut config, "1.1").is_err());
+        assert!(key.set(&mut config, "-0.1").is_err());
+        assert_eq!(
+            config.texture.sharpen, 0.5,
+            "a refused value changes nothing"
+        );
     }
 
     #[test]

@@ -112,6 +112,9 @@ dds_disk_ratio = {}
 compressor = {}
 ; GPU device selector for gpu compressor: integrated, discrete, or adapter name substring
 gpu_device = {}
+; Sharpen the full-resolution texture level seen near the ground: 0.0 (off) to 1.0,
+; rounded to the nearest 0.1. Distant levels are never sharpened. 0.5 is recommended for Apple imagery
+sharpen = {}
 
 [generation]
 ; Number of threads for parallel tile generation (default: num_cpus / 2)
@@ -268,6 +271,7 @@ connections = {}
         config.cache.dds_disk_ratio,
         config.texture.compressor,
         config.texture.gpu_device,
+        config.texture.sharpen,
         config.generation.threads,
         config.generation.timeout,
         // Executor settings

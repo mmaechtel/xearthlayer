@@ -72,13 +72,15 @@ pub struct EvictionCandidate {
 /// # Examples
 ///
 /// - `"tile:15:12754:5279"` → region based on tile center lat/lon
+/// - `"tile:15:12754:5279:s5"` → the same region (a sharpened tile, see
+///   [`Sharpen::key_suffix`](crate::dds::Sharpen::key_suffix))
 /// - `"chunk:15:12754:5279:8:12"` → same region as parent tile
 /// - `"lit:16:25312:10528"` → region of that texture at its own zoom
 /// - `"roads:46:6:0123456789abcdef"` → `+46+006`, the DSF tile it names
 pub fn key_to_region(key: &str) -> Option<String> {
     let parts: Vec<&str> = key.split(':').collect();
     let (zoom, row, col) = match parts.as_slice() {
-        ["tile", zoom, row, col] => (*zoom, *row, *col),
+        ["tile", zoom, row, col] | ["tile", zoom, row, col, _] => (*zoom, *row, *col),
         ["lit", zoom, row, col] => (*zoom, *row, *col),
         ["chunk", zoom, tile_row, tile_col, _, _] => (*zoom, *tile_row, *tile_col),
         ["roads", lat, lon, _] => {
@@ -898,6 +900,15 @@ mod tests {
         // Should be a valid DSF name format (+NN-NNN or similar)
         assert!(region.len() >= 5);
         assert!(region.starts_with('+') || region.starts_with('-'));
+    }
+
+    #[test]
+    fn a_sharpened_tile_key_has_the_region_of_its_tile() {
+        assert_eq!(
+            key_to_region("tile:15:12754:5279:s5"),
+            key_to_region("tile:15:12754:5279")
+        );
+        assert!(key_to_region("tile:15:12754:5279:s5").is_some());
     }
 
     #[test]

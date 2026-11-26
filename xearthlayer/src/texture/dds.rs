@@ -4,7 +4,7 @@
 //! to DirectDraw Surface (DDS) format with BC1 compression.
 
 use crate::dds::{
-    default_compressor, layout, AwaitedEncode, DdsEncoder, DdsFormat, ImageCompressor,
+    default_compressor, layout, AwaitedEncode, DdsEncoder, DdsFormat, ImageCompressor, Sharpen,
 };
 use crate::texture::{TextureEncoder, TextureError};
 use futures::future::BoxFuture;
@@ -42,6 +42,9 @@ pub struct DdsTextureEncoder {
     /// instead of iterating levels via `MipmapStream` + `compressor`, which
     /// encodes only what the backend hands back.
     mipmap_compressor: Option<Arc<dyn crate::dds::MipmapCompressor>>,
+    /// Sharpening of level 0. With a mipmap compressor (the GPU channel)
+    /// it sends every tile to the image compressor.
+    sharpen: Sharpen,
 }
 
 impl Clone for DdsTextureEncoder {
@@ -51,6 +54,7 @@ impl Clone for DdsTextureEncoder {
             mipmap_count: self.mipmap_count,
             compressor: Arc::clone(&self.compressor),
             mipmap_compressor: self.mipmap_compressor.as_ref().map(Arc::clone),
+            sharpen: self.sharpen,
         }
     }
 }
@@ -87,7 +91,16 @@ impl DdsTextureEncoder {
             mipmap_count: None,
             compressor: default_compressor(),
             mipmap_compressor: None,
+            sharpen: Sharpen::OFF,
         }
+    }
+
+    /// Sharpen level 0 (`texture.sharpen`). With a mipmap compressor (the
+    /// GPU channel) set, every tile is encoded by the image compressor
+    /// instead, which sharpens it.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
     }
 
     /// Truncate the mipmap chain to a fixed number of levels.
@@ -165,7 +178,7 @@ impl DdsTextureEncoder {
 impl DdsTextureEncoder {
     /// The DDS encoder for one encode, on this encoder's backends.
     fn dds_encoder(&self) -> DdsEncoder {
-        let mut encoder = DdsEncoder::new(self.format);
+        let mut encoder = DdsEncoder::new(self.format).with_sharpen(self.sharpen);
 
         if let Some(count) = self.mipmap_count {
             encoder = encoder.with_mipmap_count(count);

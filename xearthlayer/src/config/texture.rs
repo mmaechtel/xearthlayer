@@ -1,6 +1,6 @@
 //! Texture encoding configuration.
 
-use crate::dds::DdsFormat;
+use crate::dds::{DdsFormat, Sharpen};
 
 /// Configuration for texture encoding.
 ///
@@ -45,6 +45,9 @@ pub struct TextureConfig {
     compressor: String,
     /// GPU device selector: "integrated", "discrete", or adapter name substring
     gpu_device: String,
+    /// Sharpening of level 0 (`texture.sharpen`). It changes the bytes, so
+    /// the DDS disk cache keys tiles by it too.
+    sharpen: Sharpen,
 }
 
 impl TextureConfig {
@@ -57,6 +60,7 @@ impl TextureConfig {
             mipmap_count: None,
             compressor: crate::config::defaults::DEFAULT_COMPRESSOR.to_string(),
             gpu_device: crate::config::defaults::DEFAULT_GPU_DEVICE.to_string(),
+            sharpen: Sharpen::OFF,
         }
     }
 
@@ -102,6 +106,18 @@ impl TextureConfig {
     pub fn gpu_device(&self) -> &str {
         &self.gpu_device
     }
+
+    /// Set the sharpening of level 0.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
+    }
+
+    /// The sharpening of level 0: for the encoder, and for the DDS disk
+    /// cache's keys.
+    pub fn sharpen(&self) -> Sharpen {
+        self.sharpen
+    }
 }
 
 impl Default for TextureConfig {
@@ -111,6 +127,7 @@ impl Default for TextureConfig {
             mipmap_count: None,
             compressor: crate::config::defaults::DEFAULT_COMPRESSOR.to_string(),
             gpu_device: crate::config::defaults::DEFAULT_GPU_DEVICE.to_string(),
+            sharpen: Sharpen::OFF,
         }
     }
 }

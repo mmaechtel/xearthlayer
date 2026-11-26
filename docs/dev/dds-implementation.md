@@ -25,6 +25,7 @@ xearthlayer/src/dds/
 │                     blocks, compress it into a new buffer or a given slice)
 ├── gpu_channel.rs  - GpuEncoderChannel (GPU worker)
 ├── mipmap.rs       - Mipmap chain generation, box filter in linear light
+├── sharpen.rs      - Sharpen: level 0 unsharp mask (`texture.sharpen`)
 ├── encoder.rs      - Main DDS encoder API
 └── mod.rs          - Public API exports
 ```
@@ -262,6 +263,74 @@ until the cache's GC replaces them. Deleting the DDS tier
 as they are next needed, from the chunk cache, downloading only chunks it no
 longer holds (the chunk tier has its own budget); `cache
 clear` deletes the chunk tier too.
+
+### Level 0 Sharpening
+`texture.sharpen` (mmaechtel/xearthlayer#6, `dds/sharpen.rs`) is an unsharp
+mask on luma: Y' is Rec. 709 on the stored sRGB values, blurred with a
+normalised Gaussian (σ = 1 px, radius 3), and R, G and B each get
+`strength × (Y' − blur(Y'))`, rounded to nearest and clamped to 0..255. Alpha
+is unchanged. `Sharpen` holds the strength in tenths (0 to 10), so it compares
+exactly and names a cache key without floating point.
+
+- **Level 0 only.** `MipmapStream::with_sharpen` (a stream lends its levels,
+  each built in place over the last) builds level 1 on the first `next_level`
+  from the unsharpened level 0 with the allocating `downsample_box_2x` and
+  holds it, then sharpens level 0 in place and lends it. The second call lends
+  the held level 1 (level 0's buffer is released) and the chain goes on in
+  place over it. The one extra allocation is level 1 (a quarter of the tile),
+  only with sharpening on: off, or with a single level, nothing is held and no
+  level is a new allocation. The mask adds and removes about equal amounts in sRGB,
+  but in linear light the brightening outweighs the darkening: levels built
+  from a sharpened level 0 measured up to 0.6 percentage points brighter at
+  level 4 at 0.5.
+- **Seams.** A tile is sharpened on its own. The outer 4 px (`BORDER`, one BC1
+  block) are never changed and the strength ramps 1/3, 2/3, full over the next
+  three, so every changed pixel reads only real pixels, and the edge blocks of
+  two neighbouring tiles are byte for byte those of the unsharpened tile
+  (`the_border_is_unchanged_and_its_bc1_blocks_too`). A 3 px border is not
+  enough: BC1 picks a block's two colours from all 16 pixels.
+- **CPU backends, never the GPU worker.** `DdsEncoder` is the one place the
+  strength is held (`with_sharpen`, set by `create_encoder` from
+  `TextureConfig::sharpen`; `DdsTextureEncoder` passes its own on). The GPU
+  worker builds its mips in a shader from the level 0 it uploads, so it
+  cannot keep a sharpened level 0 out of them, and no sharpening is built into
+  the channel, the worker or the shader (a provisional rule). With sharpening
+  on, a `MipmapCompressor` (`texture.compressor = gpu`) is therefore never
+  asked: `DdsEncoder::encode` encodes on the fallback, and `encode_awaiting`
+  answers `AwaitedEncode::Cpu` with the image at once, the way it does for a
+  tile the GPU hands back, so the task's `encode_on_cpu` runs the fallback's
+  `MipmapStream::with_sharpen` encode on a blocking thread. Every tile encoded
+  this way is the tile `texture.compressor = ispc` makes with the same
+  strength (`with_sharpen_on_a_mipmap_backend_is_never_asked_...` compares
+  them, with a backend that counts its calls). The cache key `:s{tenths}`
+  names the strength, not the compressor, as the unsharpened key always has:
+  a tile `software` cached is served as it is. `create_encoder` warns
+  once at start that the GPU encodes nothing. A GPU that is on but idle is the
+  cost; a sharpening shader would end it.
+- **Memory.** A ring of seven rows of luma and their horizontal blur, with the
+  per-row scratch about 330 KB for a 4096 tile, never a second full-size image (#227).
+- **Same bytes everywhere.** The arithmetic is f32 and every sum runs in a
+  fixed order; Rust never fuses or reorders float operations, so x86-64 and
+  aarch64 give the same bytes. Rounding uses the 1.5 × 2^23 trick, which
+  vectorises where `round()` and `as` casts do not. The result is within one
+  step of the f64 mask (`matches_the_f64_mask_within_one_step`). Integer
+  arithmetic was tried first and took 41 ms: SSE2, the x86-64 baseline, has no
+  32-bit integer multiply, so its loops did not vectorise.
+- **Cost.** About 24 ms per 4096 tile at any strength above 0 (release build,
+  Ryzen 7 9800X3D, one thread, `time_sharpening_a_4096_tile`), against about
+  42 ms for the ISPC encode and 80 ms to assemble the 256 chunks. There is no
+  CPU-specific variant: with 16 threads encoding, the encode is bound by memory
+  bandwidth, and a variant a few ms faster on one thread measured the same
+  tiles per second on the earlier branch. Nothing when off.
+- **Cache key.** A sharpened tile is a different file, so the DDS disk cache
+  keys it apart: `tile:{z}:{row}:{col}:s{tenths}` (`TileCacheClient::with_sharpen`,
+  set by `CacheLayer` on the DDS disk bridge); unsharpened tiles keep
+  `tile:{z}:{row}:{col}`. After the setting changes, tiles of the other
+  strength are not found; a tile already cached at the new strength is served,
+  any other is built from the chunk cache (missing chunks are downloaded), and the
+  GC ages the old ones out. `key_to_region` accepts the fifth field, so
+  sharpened tiles live in their region directory. The memory tier needs no
+  suffix: it lives as long as the process, which encodes with one strength.
 
 ### Compression Algorithm
 - **Endpoint Selection**: Bounding box method (min/max per channel)

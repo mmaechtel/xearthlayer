@@ -252,6 +252,7 @@ impl Default for ConfigFile {
             texture: TextureSettings {
                 compressor: DEFAULT_COMPRESSOR.to_string(),
                 gpu_device: DEFAULT_GPU_DEVICE.to_string(),
+                sharpen: 0.0,
             },
             generation: GenerationSettings {
                 threads: (num_cpus() / 2).max(2),

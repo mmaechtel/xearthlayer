@@ -26,6 +26,7 @@ use crate::dds::compressor::{
 };
 use crate::dds::layout;
 use crate::dds::mipmap::MipmapStream;
+use crate::dds::sharpen::Sharpen;
 use crate::dds::types::{DdsError, DdsFormat, DdsHeader};
 use image::RgbaImage;
 use std::sync::Arc;
@@ -81,6 +82,7 @@ pub struct DdsEncoder {
     generate_mipmaps: bool,
     mipmap_count: Option<usize>,
     backend: CompressorBackend,
+    sharpen: Sharpen,
 }
 
 impl DdsEncoder {
@@ -94,7 +96,19 @@ impl DdsEncoder {
             generate_mipmaps: true,
             mipmap_count: None,
             backend: CompressorBackend::Image(default_compressor()),
+            sharpen: Sharpen::OFF,
         }
+    }
+
+    /// Sharpen level 0 (`texture.sharpen`). A [`MipmapCompressor`] builds
+    /// its mips from the level 0 it is given and cannot keep a sharpened
+    /// level 0 out of them, so with sharpening on it is never asked: every
+    /// tile is encoded by the fallback [`ImageCompressor`]
+    /// ([`encode`](Self::encode), [`encode_awaiting`](Self::encode_awaiting)),
+    /// byte for byte what `ispc` alone makes.
+    pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
+        self.sharpen = sharpen;
+        self
     }
 
     /// Use a specific image compressor backend (ISPC, Software).
@@ -172,6 +186,9 @@ impl DdsEncoder {
         let (width, height) = image.dimensions();
         let count = self.levels_for(width, height)?;
         match &self.backend {
+            CompressorBackend::Mipmap { fallback, .. } if !self.sharpen.is_off() => {
+                self.encode_mipmap_stream(fallback.as_ref(), image, width, height, count)
+            }
             CompressorBackend::Mipmap {
                 compressor,
                 fallback,
@@ -198,8 +215,10 @@ impl DdsEncoder {
     /// cancelled job, or handed it back after the job was cancelled, when
     /// the CPU encode it would need is not paid for either.
     ///
-    /// With an image backend nothing is checked here: [`encode_on_cpu`]
-    /// checks as [`encode`](Self::encode) does.
+    /// With an image backend, or with sharpening on (`texture.sharpen`, see
+    /// [`with_sharpen`](Self::with_sharpen)), nothing is checked here and the
+    /// backend is not asked: [`encode_on_cpu`] checks as
+    /// [`encode`](Self::encode) does.
     ///
     /// [`encode_on_cpu`]: Self::encode_on_cpu
     pub async fn encode_awaiting(
@@ -210,6 +229,11 @@ impl DdsEncoder {
         let CompressorBackend::Mipmap { compressor, .. } = &self.backend else {
             return Ok(AwaitedEncode::Cpu(image));
         };
+        // Sharpened: the backend would put level 0's sharpening into its
+        // mips, so it never sees the image; `encode_on_cpu` sharpens it.
+        if !self.sharpen.is_off() {
+            return Ok(AwaitedEncode::Cpu(image));
+        }
         let (width, height) = image.dimensions();
         let count = self.levels_for(width, height)?;
         debug!(
@@ -320,7 +344,7 @@ impl DdsEncoder {
 
         compress_chain_into(
             compressor,
-            MipmapStream::new(image, count),
+            MipmapStream::new(image, count).with_sharpen(self.sharpen),
             self.format,
             payload,
         )?;
@@ -916,6 +940,70 @@ mod tests {
             asked,
             "the backend was asked first every time"
         );
+    }
+
+    /// With sharpening on, a mipmap backend is never asked: it would build
+    /// its mips from a sharpened level 0. The tile is the ISPC encode with
+    /// the same sharpening, byte for byte (the bytes the cache key
+    /// `:s{tenths}` names), on every way in: `encode`, `encode_awaiting`
+    /// with `encode_on_cpu`.
+    #[test]
+    fn with_sharpen_on_a_mipmap_backend_is_never_asked_and_the_tile_is_the_sharpened_ispc_encode() {
+        let sharpen = Sharpen::from_strength(0.5);
+        let ispc: Arc<dyn ImageCompressor> = Arc::new(IspcCompressor);
+        for (w, h) in [(64, 64), (37, 21), (4, 4)] {
+            let image = varied(w, h);
+            let expected = DdsEncoder::new(DdsFormat::BC1)
+                .with_compressor(Arc::clone(&ispc))
+                .with_sharpen(sharpen)
+                .encode(image.clone())
+                .unwrap();
+            let unsharpened = encoder_for(&ispc, None).encode(image.clone()).unwrap();
+            if w == 64 {
+                assert_ne!(expected, unsharpened, "it is sharpened");
+            }
+
+            let backend = Arc::new(HandsBack(Default::default()));
+            let encoder = DdsEncoder::new(DdsFormat::BC1)
+                .with_mipmap_compressor(
+                    Arc::clone(&backend) as Arc<dyn MipmapCompressor>,
+                    Arc::clone(&ispc),
+                )
+                .with_sharpen(sharpen);
+
+            assert_eq!(encoder.encode(image.clone()).unwrap(), expected, "{w}x{h}");
+
+            let cancel = CancellationToken::new();
+            let awaited =
+                futures::executor::block_on(encoder.encode_awaiting(image.clone(), &cancel))
+                    .unwrap();
+            let AwaitedEncode::Cpu(handed) = awaited else {
+                panic!("{w}x{h}: the image goes to the CPU");
+            };
+            assert_eq!(handed, image, "{w}x{h}: the image is untouched");
+            assert_eq!(encoder.encode_on_cpu(handed).unwrap(), expected, "{w}x{h}");
+
+            assert_eq!(
+                backend.0.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{w}x{h}: the backend was never asked"
+            );
+        }
+    }
+
+    /// Sharpening off leaves the backend first in line, as before.
+    #[test]
+    fn without_sharpen_the_mipmap_backend_is_still_asked() {
+        let backend = Arc::new(HandsBack(Default::default()));
+        let encoder = DdsEncoder::new(DdsFormat::BC1).with_mipmap_compressor(
+            Arc::clone(&backend) as Arc<dyn MipmapCompressor>,
+            Arc::new(IspcCompressor),
+        );
+        let cancel = CancellationToken::new();
+        let awaited =
+            futures::executor::block_on(encoder.encode_awaiting(varied(16, 16), &cancel)).unwrap();
+        assert!(matches!(awaited, AwaitedEncode::Cpu(_)));
+        assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// The production tile through the ISPC fallback.
