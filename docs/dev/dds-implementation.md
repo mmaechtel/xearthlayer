@@ -316,12 +316,28 @@ exactly and names a cache key without floating point.
   step of the f64 mask (`matches_the_f64_mask_within_one_step`). Integer
   arithmetic was tried first and took 41 ms: SSE2, the x86-64 baseline, has no
   32-bit integer multiply, so its loops did not vectorise.
-- **Cost.** About 24 ms per 4096 tile at any strength above 0 (release build,
-  Ryzen 7 9800X3D, one thread, `time_sharpening_a_4096_tile`), against about
-  42 ms for the ISPC encode and 80 ms to assemble the 256 chunks. There is no
-  CPU-specific variant: with 16 threads encoding, the encode is bound by memory
-  bandwidth, and a variant a few ms faster on one thread measured the same
-  tiles per second on the earlier branch. Nothing when off.
+- **Cost.** Per 4096 tile at any strength above 0 (release build, Ryzen 7
+  9800X3D, one thread, `time_sharpening_a_4096_tile`): about 9 ms with
+  AVX-512, 14 ms with AVX2 and 24 ms on the x86-64 baseline (SSE2), against
+  about 42 ms for the ISPC encode and 80 ms to assemble the 256 chunks.
+  Nothing when off.
+- **CPU paths.** `Sharpen::apply` picks the widest instruction set the CPU
+  has, once (`CpuPath::detect`: AVX-512, AVX2 or the baseline; aarch64 has
+  only its NEON baseline). The paths are one body (`apply_body`): the baseline
+  calls it as compiled, and AVX2 and AVX-512 each inline it into a
+  `#[target_feature]` function. No `target-cpu` flag is involved, so the
+  binary runs on every CPU. Rust never fuses a multiply and an add into an
+  FMA, whatever the instruction set offers, and the order of operations is
+  the body's, so every path gives the baseline's bytes
+  (`every_cpu_path_gives_the_baseline_bytes`), and those are pinned by digest
+  (`the_sharpened_bytes_are_pinned`): the cache key names the strength, not
+  the CPU. The gain depends on how many tiles are sharpened at once, because
+  memory bandwidth is shared: per tile, baseline against AVX-512, 24 against
+  11 ms with two threads, 24 against 12 with four, 24 against 14 with six, 25
+  against 17 with eight, and 54 against 48 with sixteen (a standalone copy of
+  the code, 2026-11-26). An earlier variant was dropped for measuring the
+  same tiles per second with 16 threads; with fewer encodes in flight, the
+  usual case outside a scene load, most of the gain stays.
 - **Cache key.** A sharpened tile is a different file, so the DDS disk cache
   keys it apart: `tile:{z}:{row}:{col}:s{tenths}` (`TileCacheClient::with_sharpen`,
   set by `CacheLayer` on the DDS disk bridge); unsharpened tiles keep

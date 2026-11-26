@@ -82,17 +82,43 @@ impl Sharpen {
         (!self.is_off()).then(|| format!("s{}", self.0))
     }
 
-    /// Sharpens `image` in place.
+    /// Sharpens `image` in place, with the widest vector instructions this
+    /// CPU has (`CpuPath::detect`). Every path gives the same bytes (see
+    /// `apply_on`).
+    pub fn apply(self, image: &mut RgbaImage) {
+        self.apply_on(CpuPath::detect(), image);
+    }
+
+    /// `apply` on one CPU path. The paths are one body compiled
+    /// for different instruction sets: the operations and their order are
+    /// the same, and Rust never fuses a multiply and an add into an FMA,
+    /// whatever the instruction set offers, so the bytes are the same on
+    /// every path.
+    fn apply_on(self, path: CpuPath, image: &mut RgbaImage) {
+        match path {
+            CpuPath::Baseline => self.apply_body(image),
+            // SAFETY: `CpuPath::available` is the only constructor of these
+            // variants and gives each only when the CPU has its features.
+            #[cfg(target_arch = "x86_64")]
+            CpuPath::Avx2 => unsafe { apply_avx2(self, image) },
+            #[cfg(target_arch = "x86_64")]
+            CpuPath::Avx512 => unsafe { apply_avx512(self, image) },
+        }
+    }
+
+    /// The sharpening itself, inlined into each CPU path.
     ///
     /// The outer [`BORDER`] pixels are unchanged and the strength ramps up
     /// over the next [`RAMP`]. Works over a ring of seven rows of luma and
     /// their horizontal blur, each computed from its row before the row is
     /// changed, so no second full-size image is made. Every pass is a loop
     /// over a whole row, which the compiler vectorises on every target's
-    /// baseline (f32: SSE2 has no 32-bit integer multiply). The order of
+    /// baseline (f32: SSE2 has no 32-bit integer multiply) and wider where
+    /// a path enables more. The order of
     /// every sum is fixed by the code and Rust never fuses or reorders
     /// float operations, so every CPU gives the same bytes.
-    pub fn apply(self, image: &mut RgbaImage) {
+    #[inline(always)]
+    fn apply_body(self, image: &mut RgbaImage) {
         let (w, h) = (image.width() as usize, image.height() as usize);
         if self.is_off() || w <= 2 * BORDER || h <= 2 * BORDER {
             return;
@@ -155,14 +181,72 @@ impl Sharpen {
     }
 }
 
+/// The instruction set [`Sharpen::apply`] is compiled for. x86-64 only
+/// guarantees SSE2, four f32 at a time; with AVX2 a 4096 tile takes about
+/// 14 ms instead of 24, with AVX-512 about 9 (one thread, Ryzen 7 9800X3D).
+/// Most of the gain holds up to about six tiles sharpened at once (24
+/// against 14 ms) and little is left at sixteen (54 against 48 ms), where
+/// memory bandwidth binds. aarch64 has NEON as its baseline
+/// and nothing wider to pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuPath {
+    Baseline,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
+}
+
+impl CpuPath {
+    /// Every path this CPU can run, the widest instruction set last.
+    fn available() -> Vec<Self> {
+        #[allow(unused_mut)]
+        let mut paths = vec![Self::Baseline];
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                paths.push(Self::Avx2);
+            }
+            if is_x86_feature_detected!("avx512f")
+                && is_x86_feature_detected!("avx512bw")
+                && is_x86_feature_detected!("avx512dq")
+                && is_x86_feature_detected!("avx512vl")
+            {
+                paths.push(Self::Avx512);
+            }
+        }
+        paths
+    }
+
+    /// The path of the widest instruction set this CPU has, found once.
+    fn detect() -> Self {
+        static PATH: std::sync::OnceLock<CpuPath> = std::sync::OnceLock::new();
+        *PATH.get_or_init(|| *Self::available().last().expect("baseline"))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn apply_avx2(sharpen: Sharpen, image: &mut RgbaImage) {
+    sharpen.apply_body(image);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512dq,avx512vl")]
+fn apply_avx512(sharpen: Sharpen, image: &mut RgbaImage) {
+    sharpen.apply_body(image);
+}
+
 /// How far up the ramp coordinate `i` of `len` is: 1, 2 or [`RAMP`] for
 /// the first, second and every further pixel inside the border.
+#[inline(always)]
 fn edge_ramp(i: usize, len: usize) -> usize {
     (i.min(len - 1 - i) + 1 - BORDER).min(RAMP)
 }
 
 /// One row's luma into `luma`, and its horizontal blur over the changed
 /// columns into `out`.
+#[inline(always)]
 fn blur_row(row: &[u8], luma: &mut [f32], out: &mut [f32]) {
     for (l, px) in luma.iter_mut().zip(row.chunks_exact(4)) {
         *l = LUMA[0] * f32::from(px[0]) + LUMA[1] * f32::from(px[1]) + LUMA[2] * f32::from(px[2]);
@@ -388,6 +472,51 @@ mod tests {
         }
     }
 
+    fn sha256(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn every_cpu_path_gives_the_baseline_bytes() {
+        // Widths that leave every vector width a remainder, and one a
+        // multiple of 64.
+        let sources = [
+            noise(96, 80, 11),
+            noise(133, 57, 12),
+            noise(256, 64, 13),
+            scene(203, 131),
+        ];
+        for path in CpuPath::available() {
+            for (n, source) in sources.iter().enumerate() {
+                for tenths in [1, 2, 5, 10] {
+                    let mut want = source.clone();
+                    Sharpen(tenths).apply_on(CpuPath::Baseline, &mut want);
+                    let mut got = source.clone();
+                    Sharpen(tenths).apply_on(path, &mut got);
+                    assert!(got == want, "{path:?}, source {n}, strength {tenths}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_sharpened_bytes_are_pinned() {
+        // Sharpened tiles are on disk under a key that names the strength
+        // only: these bytes must not change without the key changing.
+        // Pinned from the code before the CPU paths, the same on every CPU.
+        for path in CpuPath::available() {
+            let mut image = noise(256, 192, 21);
+            Sharpen(2).apply_on(path, &mut image);
+            assert_eq!(sha256(image.as_raw()), PINNED_SHA256, "{path:?}");
+        }
+    }
+
+    const PINNED_SHA256: &str = "cc441e7678def541c68ec46d9c3df82b7eeaa7ffa9714d411bd5c5f00dd6b5bf";
+
     #[test]
     fn mipmap_stream_sharpens_level_0_only() {
         let source = scene(64, 64);
@@ -424,8 +553,10 @@ mod tests {
             .collect();
         runs.sort();
         println!(
-            "sharpen 4096 at 0.5: median {:.2?}, min {:.2?}",
-            runs[5], runs[0]
+            "sharpen 4096 at 0.5 ({:?}): median {:.2?}, min {:.2?}",
+            CpuPath::detect(),
+            runs[5],
+            runs[0]
         );
     }
 }
