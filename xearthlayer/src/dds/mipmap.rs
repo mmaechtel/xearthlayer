@@ -321,6 +321,8 @@ pub struct MipmapStream {
     /// in place; lent by the second call, after which the chain goes on in
     /// place over it. `None` unless sharpening is on.
     held: Option<RgbaImage>,
+    /// How long sharpening level 0 took; zero until it has run.
+    sharpen_time: std::time::Duration,
 }
 
 impl MipmapStream {
@@ -337,6 +339,7 @@ impl MipmapStream {
             lent_first: false,
             sharpen: Sharpen::OFF,
             held: None,
+            sharpen_time: std::time::Duration::ZERO,
         }
     }
 
@@ -348,6 +351,12 @@ impl MipmapStream {
     pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
         self.sharpen = sharpen;
         self
+    }
+
+    /// How long sharpening level 0 took: zero with sharpening off, and
+    /// before the first level is lent.
+    pub fn sharpen_time(&self) -> std::time::Duration {
+        self.sharpen_time
     }
 
     /// The next level, largest first: the source on the first call, then
@@ -374,7 +383,9 @@ impl MipmapStream {
             // Its own span (target `profiling`, `run --profile`): the CPU
             // path has no other per-stage timing inside an encode.
             let _span = tracing::debug_span!(target: "profiling", "sharpen").entered();
+            let started = std::time::Instant::now();
             self.sharpen.apply(&mut self.image);
+            self.sharpen_time = started.elapsed();
         }
         self.lent_first = true;
         self.remaining -= 1;
@@ -1198,6 +1209,14 @@ mod tests {
             sharpened_levels(source.clone(), 1, sharpen)[0].as_raw(),
             source.as_raw()
         );
+    }
+
+    /// The sharpening is timed on its own: nothing with it off.
+    #[test]
+    fn an_unsharpened_stream_reports_no_sharpen_time() {
+        let mut stream = MipmapStream::new(noise(16, 16, 3), 3);
+        while stream.next_level().is_some() {}
+        assert_eq!(stream.sharpen_time(), std::time::Duration::ZERO);
     }
 
     #[test]

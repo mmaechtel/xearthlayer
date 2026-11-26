@@ -347,6 +347,7 @@ where
                     tile = ?self.tile,
                     width = image.width(),
                     height = image.height(),
+                    assembly_us = duration_us,
                     "Image assembly complete, starting DDS encoding"
                 );
 

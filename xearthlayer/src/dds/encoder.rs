@@ -30,6 +30,7 @@ use crate::dds::sharpen::Sharpen;
 use crate::dds::types::{DdsError, DdsFormat, DdsHeader};
 use image::RgbaImage;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -465,11 +466,20 @@ pub(crate) fn compress_chain_into(
     payload: &mut [u8],
 ) -> Result<(), DdsError> {
     let mut slots = LevelSlots::new(payload, format);
-    while let Some(level) = levels.next_level() {
+    // Per stage, for the tile's `CPU encode stages` line.
+    let (mut chain, mut kernel) = (Duration::ZERO, Duration::ZERO);
+    loop {
+        let started = Instant::now();
+        let Some(level) = levels.next_level() else {
+            break;
+        };
+        chain += started.elapsed();
         let (width, height) = level.dimensions();
         let slot = slots.next(width, height)?;
         let len = slot.len();
+        let started = Instant::now();
         compress_level_into(compressor, level, format, slot)?;
+        kernel += started.elapsed();
 
         debug!(
             level = slots.written() - 1,
@@ -481,6 +491,15 @@ pub(crate) fn compress_chain_into(
         );
         // The next level is built over this one.
     }
+    // The CPU path's stage times (the GPU worker has its own, #419): the
+    // mip chain without the sharpening, the sharpening, the block kernel.
+    let sharpen = levels.sharpen_time();
+    debug!(
+        mips_us = chain.saturating_sub(sharpen).as_micros() as u64,
+        sharpen_us = sharpen.as_micros() as u64,
+        bc1_us = kernel.as_micros() as u64,
+        "CPU encode stages"
+    );
     slots.finish()
 }
 
