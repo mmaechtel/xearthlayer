@@ -113,7 +113,8 @@ compressor = {}
 ; GPU device selector for gpu compressor: integrated, discrete, or adapter name substring
 gpu_device = {}
 ; Sharpen the full-resolution texture level seen near the ground: 0.0 (off) to 1.0,
-; rounded to the nearest 0.1. Distant levels are never sharpened. 0.5 is recommended for Apple imagery
+; rounded to the nearest 0.1. Distant levels are never sharpened. A matter of taste: on Apple imagery
+; 0.1 is close to neutral, higher values look crisper but move away from the source
 sharpen = {}
 
 [generation]
