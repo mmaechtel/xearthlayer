@@ -371,6 +371,9 @@ impl MipmapStream {
             if self.remaining > 1 && self.image.width() > 1 && self.image.height() > 1 {
                 self.held = Some(MipmapGenerator::downsample_box_2x(&self.image));
             }
+            // Its own span (target `profiling`, `run --profile`): the CPU
+            // path has no other per-stage timing inside an encode.
+            let _span = tracing::debug_span!(target: "profiling", "sharpen").entered();
             self.sharpen.apply(&mut self.image);
         }
         self.lent_first = true;

@@ -96,8 +96,9 @@ impl DdsTextureEncoder {
     }
 
     /// Sharpen level 0 (`texture.sharpen`). With a mipmap compressor (the
-    /// GPU channel) set, every tile is encoded by the image compressor
-    /// instead, which sharpens it.
+    /// GPU channel) set, the GPU worker sharpens by the strength it was
+    /// built with (the same, from `create_encoder`), and the image
+    /// compressor sharpens the tiles the GPU hands back.
     pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
         self.sharpen = sharpen;
         self

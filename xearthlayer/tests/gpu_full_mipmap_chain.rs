@@ -63,6 +63,7 @@ async fn gpu_emits_full_mipmap_chain_for_4096_tile() {
         match xearthlayer::dds::gpu_channel::create_gpu_encoder_channels(
             &gpu_device(),
             xearthlayer::dds::gpu_channel::CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
             shutdown,
         ) {
             Ok(r) => r,
@@ -139,6 +140,7 @@ async fn gpu_worker_survives_sub_block_levels() {
         match xearthlayer::dds::gpu_channel::create_gpu_encoder_channels(
             &gpu_device(),
             xearthlayer::dds::gpu_channel::CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
             shutdown,
         ) {
             Ok(r) => r,
@@ -212,6 +214,7 @@ async fn on_one_worker(images: Vec<RgbaImage>) -> Option<Vec<Vec<u8>>> {
         match xearthlayer::dds::gpu_channel::create_gpu_encoder_channels(
             &gpu_device(),
             xearthlayer::dds::gpu_channel::CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
             shutdown.clone(),
         ) {
             Ok(r) => r,
@@ -277,6 +280,7 @@ async fn sent_at_once(images: &[RgbaImage]) -> Option<(Vec<Vec<u8>>, u64)> {
         match xearthlayer::dds::gpu_channel::create_gpu_encoder_channels(
             &gpu_device(),
             xearthlayer::dds::gpu_channel::CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
             shutdown.clone(),
         ) {
             Ok(r) => r,
@@ -437,6 +441,7 @@ async fn every_tile_carries_its_kernel_time_on_a_device_with_timestamps() {
         xearthlayer::dds::gpu_channel::create_gpu_encoder_channels(
             &gpu_device(),
             xearthlayer::dds::gpu_channel::CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
             shutdown,
         )
         .expect("the GPU that was just opened");

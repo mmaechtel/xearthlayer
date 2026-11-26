@@ -23,15 +23,15 @@ use image::RgbaImage;
 /// encoded without sharpening, so no seam can appear. A 3 px border is not
 /// enough: BC1 picks a 4×4 block's two colours from all 16 pixels, so a
 /// changed fourth column changes how the edge pixels decode.
-const BORDER: usize = 4;
+pub(crate) const BORDER: usize = 4;
 
 /// Pixels over which the strength ramps up inside the border: 1/3, 2/3,
 /// then full.
-const RAMP: usize = 3;
+pub(crate) const RAMP: usize = 3;
 
 /// The Gaussian of σ = 1 px, radius 3, normalised: `exp(-i² / 2)` over
 /// their sum for `i` in -3..=3.
-const KERNEL: [f32; 7] = [
+pub(crate) const KERNEL: [f32; 7] = [
     0.004_433_048,
     0.054_005_582,
     0.242_036_22,
@@ -42,7 +42,7 @@ const KERNEL: [f32; 7] = [
 ];
 
 /// Rec. 709 luma weights on the stored values.
-const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+pub(crate) const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
 /// How strongly level 0 is sharpened, in tenths: 0 (off) to 10 (1.0).
 ///
@@ -80,6 +80,13 @@ impl Sharpen {
     /// key it always had.
     pub fn key_suffix(self) -> Option<String> {
         (!self.is_off()).then(|| format!("s{}", self.0))
+    }
+
+    /// The factor of a pixel `step` (1 to [`RAMP`]) up the border ramp:
+    /// strength × step / RAMP, in f32 and in this order, as `apply` uses it.
+    /// The GPU worker's shader takes its factors from here (`gpu_sharpen`).
+    pub(crate) fn ramp_factor(self, step: usize) -> f32 {
+        f32::from(self.0) / 10.0 * step as f32 / RAMP as f32
     }
 
     /// Sharpens `image` in place, with the widest vector instructions this
@@ -126,14 +133,13 @@ impl Sharpen {
         let stride = 4 * w;
         let raw: &mut [u8] = image;
         let n = w - 2 * BORDER;
-        let strength = f32::from(self.0) / 10.0;
 
         // Per ramp step of a row (1, 2, full), each changed column's
-        // factor: strength × min(row ramp, column ramp) / RAMP.
+        // factor: that of min(row ramp, column ramp).
         let factors: Vec<Vec<f32>> = (1..=RAMP)
             .map(|row_ramp| {
                 (BORDER..w - BORDER)
-                    .map(|x| strength * row_ramp.min(edge_ramp(x, w)) as f32 / RAMP as f32)
+                    .map(|x| self.ramp_factor(row_ramp.min(edge_ramp(x, w))))
                     .collect()
             })
             .collect();

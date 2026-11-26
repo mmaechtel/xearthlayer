@@ -186,6 +186,7 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
             let (channels, worker_handle, selection) = create_gpu_encoder_channels(
                 config.texture().gpu_device(),
                 prefetch_gpu_capacity(config),
+                sharpen,
                 shutdown_token.clone(),
             )
             .map_err(|e| ServiceError::ConfigError(format!("GPU compressor: {e}")))?;
@@ -194,17 +195,6 @@ pub fn create_encoder(config: &ServiceConfig) -> Result<EncoderComponents, Servi
             if let Some(warning) = &decision.warning {
                 tracing::warn!(adapter = %selection.adapter, "{warning}");
             }
-            // The worker builds its mips from the level 0 it uploads, so it
-            // cannot keep the sharpened level 0 out of them: the encoder
-            // hands every tile to ISPC instead (`DdsEncoder::encode_awaiting`).
-            if !sharpen.is_off() {
-                tracing::warn!(
-                    %sharpen,
-                    adapter = %selection.adapter,
-                    "texture.sharpen is on: the GPU encodes no tile, every tile is encoded on ISPC"
-                );
-            }
-
             // The per-minute `GPU encode sample` line of each lane, ended
             // with the worker by the shutdown token or when its channel is
             // dropped (#419, #421).

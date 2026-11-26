@@ -170,6 +170,32 @@ impl KernelTimer {
         }
     }
 
+    /// The timestamp writes that time a run of render passes as dispatch
+    /// `index`: the begin of the first pass and the end of the last. The
+    /// GPU worker's sharpening is two render passes timed as one. `index`
+    /// must be below [`capacity`](Self::capacity).
+    pub fn span_writes(
+        &self,
+        index: u32,
+    ) -> (
+        wgpu::RenderPassTimestampWrites<'_>,
+        wgpu::RenderPassTimestampWrites<'_>,
+    ) {
+        debug_assert!(index < self.capacity);
+        (
+            wgpu::RenderPassTimestampWrites {
+                query_set: &self.query_set,
+                beginning_of_pass_write_index: Some(2 * index),
+                end_of_pass_write_index: None,
+            },
+            wgpu::RenderPassTimestampWrites {
+                query_set: &self.query_set,
+                beginning_of_pass_write_index: None,
+                end_of_pass_write_index: Some(2 * index + 1),
+            },
+        )
+    }
+
     /// Records, into `encoder`, the resolve of the first `dispatches`
     /// dispatches' timestamps and their copy into the readback buffer. The
     /// passes may have been recorded in earlier submissions: a query keeps

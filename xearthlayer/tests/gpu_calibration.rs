@@ -306,14 +306,18 @@ fn calibrate_the_encode_pipelines() {
             continue;
         };
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let (channels, mut worker, _selection) =
-            match create_gpu_encoder_channels(&selector, CHANNEL_CAPACITY, shutdown) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("\nSkipping `{selector}`: {e}");
-                    continue;
-                }
-            };
+        let (channels, mut worker, _selection) = match create_gpu_encoder_channels(
+            &selector,
+            CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
+            shutdown,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("\nSkipping `{selector}`: {e}");
+                continue;
+            }
+        };
         eprintln!("\n== GPU `{selector}`: {} ==", adapter_label(&info));
         let prefetch_channel = Arc::new(channels.prefetch);
         let channel = Arc::new(channels.demand);

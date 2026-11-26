@@ -47,6 +47,8 @@ struct StageWindows {
     gpu_mips: LatencyWindow,
     /// Only the tiles that carried a kernel time (#476).
     gpu_kernel: LatencyWindow,
+    /// Only the tiles that carried a sharpen time (`texture.sharpen`).
+    gpu_sharpen: LatencyWindow,
     readback: LatencyWindow,
     process: LatencyWindow,
     total: LatencyWindow,
@@ -69,6 +71,10 @@ pub struct GpuSample {
     /// device without timestamp queries. Its count can be below the
     /// tiles' when some tiles' timestamps could not be read.
     pub gpu_kernel: Option<LatencySummary>,
+    /// The GPU's own time for each tile's sharpening (`texture.sharpen`),
+    /// from timestamp queries: as [`gpu_mips`](Self::gpu_mips), and `None`
+    /// with sharpening off.
+    pub gpu_sharpen: Option<LatencySummary>,
     pub readback: Option<LatencySummary>,
     /// The worker's whole time per tile, from taking it to its finish
     /// (`GpuTileTiming::process`): under overlap (#425), latency that
@@ -184,6 +190,9 @@ impl GpuEncodeStats {
         if let Some(kernel) = timing.gpu_kernel {
             w.gpu_kernel.record(micros(kernel));
         }
+        if let Some(sharpen) = timing.gpu_sharpen {
+            w.gpu_sharpen.record(micros(sharpen));
+        }
         w.readback.record(micros(timing.readback));
         w.process.record(micros(timing.process));
         w.total.record(micros(total));
@@ -243,6 +252,7 @@ impl GpuEncodeStats {
             gpu: w.gpu.take(),
             gpu_mips: w.gpu_mips.take(),
             gpu_kernel: w.gpu_kernel.take(),
+            gpu_sharpen: w.gpu_sharpen.take(),
             readback: w.readback.take(),
             process: w.process.take(),
             total: w.total.take(),
@@ -277,6 +287,8 @@ impl GpuEncodeStats {
         // Zero, with `gpu_kernel` saying why, when no tile had one.
         let (gpu_mips_p50_ms, gpu_mips_p95_ms, gpu_mips_max_ms) = fig(s.gpu_mips);
         let (gpu_kernel_p50_ms, gpu_kernel_p95_ms, gpu_kernel_max_ms) = fig(s.gpu_kernel);
+        // Zero with sharpening off.
+        let (gpu_sharpen_p50_ms, gpu_sharpen_p95_ms, gpu_sharpen_max_ms) = fig(s.gpu_sharpen);
         // The tiles that carried a kernel time, of `tiles`.
         let gpu_kernel_tiles = s.gpu_kernel.map_or(0, |k| k.count as u64);
         let (readback_p50_ms, readback_p95_ms, readback_max_ms) = fig(s.readback);
@@ -316,6 +328,9 @@ impl GpuEncodeStats {
             gpu_kernel_p50_ms,
             gpu_kernel_p95_ms,
             gpu_kernel_max_ms,
+            gpu_sharpen_p50_ms,
+            gpu_sharpen_p95_ms,
+            gpu_sharpen_max_ms,
             readback_p50_ms,
             readback_p95_ms,
             readback_max_ms,
@@ -389,6 +404,7 @@ mod tests {
             gpu: ms(4 * scale),
             gpu_mips: Some(Duration::from_micros(1_500 * scale)),
             gpu_kernel: Some(Duration::from_micros(2_500 * scale)),
+            gpu_sharpen: Some(Duration::from_micros(700 * scale)),
             readback: ms(5 * scale),
             process: ms(14 * scale),
             overlapped: false,
@@ -400,6 +416,7 @@ mod tests {
         GpuTileTiming {
             gpu_mips: None,
             gpu_kernel: None,
+            gpu_sharpen: None,
             ..timing(scale)
         }
     }
@@ -425,6 +442,7 @@ mod tests {
         assert_eq!(max(s.gpu), Some((8_000, 2)));
         assert_eq!(max(s.gpu_mips), Some((3_000, 2)));
         assert_eq!(max(s.gpu_kernel), Some((5_000, 2)));
+        assert_eq!(max(s.gpu_sharpen), Some((1_400, 2)));
         assert_eq!(max(s.readback), Some((10_000, 2)));
         assert_eq!(max(s.process), Some((28_000, 2)));
         assert_eq!(max(s.total), Some((31_000, 2)));
@@ -508,6 +526,26 @@ mod tests {
         let s = stats.take_sample().expect("a busy sample");
         let mips = s.gpu_mips.expect("one tile built levels");
         assert_eq!((mips.count, mips.max_us), (1, 1_500));
+        assert_eq!(s.gpu_kernel.map(|k| k.count), Some(2));
+    }
+
+    /// With sharpening off a tile has no sharpen time: the sharpen window
+    /// holds only the tiles that carried one.
+    #[test]
+    fn the_sharpen_time_is_summarised_over_the_tiles_that_sharpened() {
+        let stats = GpuEncodeStats::default();
+        stats.record_encoded(&timing(1), ms(16));
+        stats.record_encoded(
+            &GpuTileTiming {
+                gpu_sharpen: None,
+                ..timing(2)
+            },
+            ms(31),
+        );
+
+        let s = stats.take_sample().expect("a busy sample");
+        let sharpen = s.gpu_sharpen.expect("one tile sharpened");
+        assert_eq!((sharpen.count, sharpen.max_us), (1, 700));
         assert_eq!(s.gpu_kernel.map(|k| k.count), Some(2));
     }
 
@@ -629,6 +667,9 @@ mod tests {
             ("gpu_kernel_max_ms", "2.5"),
             ("gpu_mips_p50_ms", "1.5"),
             ("gpu_mips_max_ms", "1.5"),
+            ("gpu_sharpen_p50_ms", "0.7"),
+            ("gpu_sharpen_p95_ms", "0.7"),
+            ("gpu_sharpen_max_ms", "0.7"),
             ("readback_p50_ms", "5.0"),
             ("process_p50_ms", "14.0"),
         ] {
@@ -653,6 +694,7 @@ mod tests {
             ("gpu_kernel_tiles", "0"),
             ("gpu_kernel_p50_ms", "0.0"),
             ("gpu_mips_p50_ms", "0.0"),
+            ("gpu_sharpen_p50_ms", "0.0"),
             ("gpu_p50_ms", "4.0"),
         ] {
             assert_eq!(line.get(field).map(String::as_str), Some(value), "{field}");

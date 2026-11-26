@@ -171,14 +171,18 @@ mod gpu_stress {
         let device = gpu_device();
 
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let (channels, mut worker, selection) =
-            match create_gpu_encoder_channels(&device, CHANNEL_CAPACITY, shutdown) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("Skipping stress test: {e}");
-                    return;
-                }
-            };
+        let (channels, mut worker, selection) = match create_gpu_encoder_channels(
+            &device,
+            CHANNEL_CAPACITY,
+            xearthlayer::dds::Sharpen::OFF,
+            shutdown,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Skipping stress test: {e}");
+                return;
+            }
+        };
 
         let channel = Arc::new(channels.demand);
         let stats = Arc::clone(channel.stats());
@@ -505,6 +509,7 @@ mod gpu_stress {
             device,
             queue,
             compressor,
+            xearthlayer::dds::Sharpen::OFF,
             rx,
             tokio_util::sync::CancellationToken::new(),
             health.clone(),

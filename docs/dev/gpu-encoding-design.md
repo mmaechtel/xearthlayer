@@ -32,19 +32,37 @@ gpu_device = integrated     # integrated | discrete | <name substring>
 
 ### Sharpening (`texture.sharpen`)
 
-The worker builds a tile's mips on the GPU from the level 0 it uploads, so it
-cannot sharpen level 0 without sharpening every level below it, which must
-stay unsharpened (`MipmapStream::with_sharpen`, [DDS
-implementation](dds-implementation.md#level-0-sharpening)). This is a
-provisional rule rather than sharpening in the shader: with `texture.sharpen`
-on (`0.05` and up, rounded to tenths) the GPU encodes no tile. `DdsEncoder` never submits to the
-channel (`encode_awaiting` answers `AwaitedEncode::Cpu` at once, `encode`
-uses the fallback) and the tile is encoded on the CPU with ISPC, the same
-bytes as `texture.compressor = ispc` and the cache key `:s{tenths}`.
-`create_encoder` warns once at start; the Status pane and the single-GPU
-contention warning still describe the GPU as the encoder (a known gap of the
-provisional rule). No sharpening code is in the channel,
-the worker or the shader.
+With `texture.sharpen` on (`0.05` and up, rounded to tenths) the worker
+sharpens level 0 itself (`dds/gpu_sharpen.rs`, `gpu_sharpen.wgsl`), by the
+strength `create_encoder` builds it with (`create_gpu_encoder_channels(…,
+sharpen)`), the same the encoder's CPU fallback uses. In the tile's one
+submission, after the mip pass has read the unsharpened level 0 and before the
+BC1 pass, two render passes run: `blur` writes the horizontal blur of each
+row's luma into an `R32Float` target, `finish` blurs it vertically and writes
+the sharpened level 0 into a texture of its own (`level0_sharp`,
+`Rgba8Unorm`), which BC1 task 0 reads. The mips stay unsharpened, as on the
+CPU (`MipmapStream::with_sharpen`, [DDS
+implementation](dds-implementation.md#level-0-sharpening)). The kernel, luma
+weights, border, ramp and the ramp's factors come from `sharpen.rs` in the
+shader's uniform (`params_bytes`).
+
+The shader is `Sharpen::apply`'s operations in its order. Two things kept it
+off by one step in 29 texels of a 4096 tile on RADV (AMD Radeon Graphics,
+RAPHAEL_MENDOCINO): the shader's own `strength * step / 3` (a GPU division is
+not correctly rounded), now computed on the CPU, and FMA contraction by the
+driver in the luma and both blurs (WGSL cannot forbid it), now prevented by
+passing every product through an XOR with a uniform zero before it is added
+(`rounded`). Each alone left texels off; together the sharpened level 0 is
+byte for byte the CPU's on that adapter, for 4096 tiles, odd and padded sizes
+and strengths 0.1 to 1.0. Other adapters and drivers are not measured, and
+nothing guarantees it there. GPU time for both passes on that adapter: about
+13 ms per 4096 tile (9.5 ms without the rounding guard), against about 9 ms on
+the CPU with AVX-512.
+
+Made only with sharpening on: with it off there is no pipeline, no target, no
+pass and no extra timestamp pair, and the bytes are those of before. Each
+resource set holds the two targets, 64 MiB each for a 4096 tile. A tile the
+GPU hands back is sharpened by the encoder's fallback on the CPU.
 
 ### Error Behaviour
 
@@ -181,7 +199,9 @@ the CPU or uploads them. For each tile it:
    per-call staging), padded to whole blocks as the CPU pads it;
 2. records, in one command encoder: the copy of level 0 into its texture, one
    mip pass (`dds/gpu_mips.rs`, `gpu_mips.wgsl`) that writes every lower level
-   into `Rgba8Unorm` write-only storage textures, one BC1 pass
+   into `Rgba8Unorm` write-only storage textures, with `texture.sharpen` on
+   the two sharpening render passes (see
+   [Sharpening](#sharpening-texturesharpen)), one BC1 pass
    (`block_compression::compress` once, every level at its offset in the
    payload), the copy into the readback buffer and the timer resolve;
 3. submits once, polls once, maps once and copies the payload into its slice
@@ -228,7 +248,9 @@ timer) is kept across tiles of the same size and format and dropped after a
 failed tile (#423). For a 4096 tile a set is about 171 MiB (a 64 MiB upload
 buffer, 85.3 MiB of level textures, two 10.67 MiB output and readback
 buffers); both sets are about 341 MiB, kept for the session once created
-(system memory on an integrated GPU), against about 107 MiB before #424. They
+(system memory on an integrated GPU), against about 107 MiB before #424. With
+`texture.sharpen` on a set adds its two sharpening targets, 128 MiB: about
+299 MiB a set, 597 MiB both. They
 are deliberately not released when the worker goes idle: re-creating a set
 costs about 11 ms, which cut bursts of two tiles from about 115 to about 71
 tiles/s on both GPUs measured, and the memory is small beside a typical
@@ -314,6 +336,7 @@ Each tile's `GpuTileTiming` comes back in its `GpuEncodeReply`:
 | `upload` | Creating the tile's resources when needed, and writing level 0 into the mapped upload buffer (#424) |
 | `gpu` | Recording, the submit and the poll for the whole tile: wall time, driver included. Under #425 the GPU work of a tile mostly runs while the worker uploads the next one, so `gpu` is near zero in bursts |
 | `gpu_mips` | The mip pass alone, from GPU timestamp queries (#424). Under overlap `gpu_mips + gpu_kernel > gpu` is normal |
+| `gpu_sharpen` | The two sharpening render passes together (`texture.sharpen`), the begin of the first to the end of the second, from GPU timestamp queries. `None` with sharpening off, and for a tile of one level (no mip pass recorded, so the pass is not timed) |
 | `gpu_kernel` | The BC1 pass alone (one pass for every level since #424), from GPU timestamp queries (`dds/gpu_timestamps.rs`, #476). Present only where the adapter offers `TIMESTAMP_QUERY` with a usable timestamp period. The sample line gives `gpu_kernel_tiles` (how many of the window's tiles carried a kernel time) and `gpu_kernel = timestamps`, `unavailable` or `no tiles`; `unavailable` means no timestamp feature, an unusable period, the timer dropped after its buffer failed to map (warned once; it returns with the resources a failed tile rebuilds), or no usable ticks in the window |
 | `readback` | Receiving the map, copying out of the mapped range and growing the result `Vec` |
 | `process` | The tile's latency on the worker, from taken to finished. Under a backlog it spans about two tile periods (finishing the tile ahead, beginning the next), so it is not a per-tile cost; `upload`, `gpu_mips`, `gpu_kernel` and `readback` are. The deadline is judged by the tile's own time (see Two tiles in flight) |
@@ -321,7 +344,7 @@ Each tile's `GpuTileTiming` comes back in its `GpuEncodeReply`:
 
 They appear in three places:
 
-- **The profile trace** (`run --profile`): spans `gpu_encode` (caller), `gpu_tile` (worker, with `gpu_kernel_us` and `gpu_mips_us`), and `gpu_buffers`, `gpu_upload`, `gpu_submit`, `gpu_poll` and `gpu_readback`. The debug line `GPU kernel time` gives `bc1_us` and `mips_us` per tile.
+- **The profile trace** (`run --profile`): spans `gpu_encode` (caller), `gpu_tile` (worker, with `gpu_kernel_us`, `gpu_mips_us` and, with sharpening on, `gpu_sharpen_us`), and `gpu_buffers`, `gpu_upload`, `gpu_submit`, `gpu_poll` and `gpu_readback`. The debug line `GPU kernel time` gives `bc1_us`, `mips_us` and `sharpen_us` per tile.
 - **The debug log**: one `GPU encode: tile stages` line per tile. Since #423 the worker writes the levels into the DDS file in place, so there is no header assembly copy.
 - **A `GPU encode sample` line every 60 s** at info, only when the window saw a tile or a failure. It gives p50, p95 and max per stage, tiles, `failed` (every request that came back without a tile: worker errors, a worker not running, a dropped reply), `fallback` (tiles handed back and encoded on ISPC: after a failure, or by the queue-age valve), `health` (`healthy` or `failed`), `overlapped` (tiles begun while another was in flight, #425) and the queue depth, now and the window's maximum. The service builder starts it, so a channel built in a test has no logger taking its samples. A window keeps at most 10,000 tiles (`WINDOW_CAP`) and counts the rest as `unsampled`.
 
@@ -344,7 +367,7 @@ impl MipmapStream {
 
 - Owns the source image; the first call lends it, each later call writes the
   next level over it (`MipmapGenerator::downsample_box_2x_in_place`)
-- `with_sharpen` (CPU encodes only, see [Sharpening](#sharpening-texturesharpen))
+- `with_sharpen` (CPU encodes; the GPU worker sharpens in its own pass, see [Sharpening](#sharpening-texturesharpen))
   builds level 1 from the unsharpened source before the first call lends the
   sharpened level 0, holds it, and lends it second; one extra quarter-size
   level, only with sharpening on

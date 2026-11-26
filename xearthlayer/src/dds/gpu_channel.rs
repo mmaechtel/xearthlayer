@@ -98,10 +98,11 @@ mod inner {
         chain_bytes, chain_plan, gpu_filter, upload_row_bytes, write_level0, LevelPlan, MipChain,
         MipPipeline,
     };
+    use crate::dds::gpu_sharpen::{SharpenPipeline, SharpenTargets};
     use crate::dds::gpu_stats::GpuEncodeStats;
     use crate::dds::gpu_timestamps::{KernelTimer, TimerError};
     use crate::dds::layout;
-    use crate::dds::{DdsError, DdsFormat};
+    use crate::dds::{DdsError, DdsFormat, Sharpen};
 
     /// Bounded channel capacity for the demand lane's GPU encode requests.
     /// The prefetch lane's channel is bounded by its CPU pool instead
@@ -495,6 +496,13 @@ mod inner {
         /// has no timestamp queries (`wgpu::Features::TIMESTAMP_QUERY`) or
         /// the tile's timestamps could not be read.
         pub gpu_kernel: Option<Duration>,
+        /// The sharpening's own time on the GPU (`texture.sharpen`, both
+        /// render passes: the begin of the first to the end of the second),
+        /// from its timestamps: this tile's cost, as
+        /// [`gpu_mips`](Self::gpu_mips). `None` with sharpening off, for a
+        /// tile of one level (no mip pass, so its pass is not timed), and
+        /// when [`gpu_kernel`](Self::gpu_kernel) is `None`.
+        pub gpu_sharpen: Option<Duration>,
         /// Checking the readback's map, and copying the mapped blocks into
         /// the DDS file: the payload's one copy (#423), one copy of the
         /// whole chain since #424.
@@ -1021,6 +1029,8 @@ mod inner {
                 // and the mips for a tile of one level (#424).
                 gpu_mips_us = t.gpu_mips.map(us),
                 gpu_kernel_us = t.gpu_kernel.map(us),
+                // Absent with sharpening off.
+                gpu_sharpen_us = t.gpu_sharpen.map(us),
                 readback_us = us(t.readback),
                 process_us = us(t.process),
                 overlapped = t.overlapped,
@@ -1145,6 +1155,10 @@ mod inner {
     /// The kernel timer's pass for the mip chain, every level below level 0
     /// (#424). Recorded only for a tile of more than one level.
     const MIP_PASS: u32 = 1;
+    /// The kernel timer's pass for the sharpening, both render passes as
+    /// one (`texture.sharpen`). Timed only with sharpening on and a mip
+    /// pass recorded, so the resolved passes are always a prefix.
+    const SHARPEN_PASS: u32 = 2;
 
     /// The GPU resources of one tile size, kept across tiles (#423):
     ///
@@ -1157,8 +1171,12 @@ mod inner {
     /// - the output buffer the BC1 kernel writes every level into, at its
     ///   offset in the DDS payload, and the readback buffer it is copied to,
     ///   each the size of the full chain's blocks;
+    /// - with sharpening on, the sharpening's targets ([`SharpenTargets`]:
+    ///   the blurred rows and the sharpened level 0, 128 MiB for a 4096
+    ///   tile);
     /// - the kernel timer, a timestamp pair for the BC1 pass and one for the
-    ///   mip pass, on a device with timestamp queries (#476).
+    ///   mip pass, and one for the sharpening when it is on, on a device
+    ///   with timestamp queries (#476).
     ///
     /// Held for the session: every tile of a session is the same size, so
     /// they are made once, and again only after a failed tile
@@ -1180,6 +1198,8 @@ mod inner {
         last_submission: Option<wgpu::SubmissionIndex>,
         output: wgpu::Buffer,
         readback: wgpu::Buffer,
+        /// `Some` with sharpening on.
+        sharpen: Option<SharpenTargets>,
         timer: Option<KernelTimer>,
     }
 
@@ -1188,12 +1208,21 @@ mod inner {
             device: &wgpu::Device,
             queue: &wgpu::Queue,
             mips: &MipPipeline,
+            sharpen: Option<&SharpenPipeline>,
             width: u32,
             height: u32,
             format: DdsFormat,
         ) -> Self {
             let chain = MipChain::new(device, queue, mips, width, height, format);
             let level0 = chain.plan()[0];
+            let sharpen = sharpen.map(|pipeline| {
+                SharpenTargets::new(device, queue, pipeline, chain.level(0), &level0)
+            });
+            let timed_passes = if sharpen.is_some() {
+                SHARPEN_PASS + 1
+            } else {
+                MIP_PASS + 1
+            };
             let upload_row_bytes = upload_row_bytes(level0.padded_width);
             let upload = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("tile-upload"),
@@ -1226,7 +1255,8 @@ mod inner {
                 last_submission: None,
                 output,
                 readback,
-                timer: KernelTimer::new(device, queue, MIP_PASS + 1),
+                sharpen,
+                timer: KernelTimer::new(device, queue, timed_passes),
             }
         }
 
@@ -1346,15 +1376,17 @@ mod inner {
     }
 
     /// The production [`PipelinedProcessor`], of depth two (#425): the GPU
-    /// device, its queue, the `block_compression` kernels and the mip
-    /// shader's pipeline, owned by the worker thread, and two resource sets
-    /// (#423), each the resources of the tile size it last encoded, one per
-    /// tile in flight.
+    /// device, its queue, the `block_compression` kernels, the mip shader's
+    /// pipeline and, with `texture.sharpen` on, the sharpening's, owned by
+    /// the worker thread, and two resource sets (#423), each the resources
+    /// of the tile size it last encoded, one per tile in flight.
     pub struct WgpuTileProcessor {
         device: wgpu::Device,
         queue: wgpu::Queue,
         compressor: GpuBlockCompressor,
         mips: MipPipeline,
+        /// `None` with sharpening off: no pipeline, targets or pass.
+        sharpen: Option<SharpenPipeline>,
         sets: [Option<TileResources>; RESOURCE_SETS],
         /// Which sets a begun tile holds.
         busy: [bool; RESOURCE_SETS],
@@ -1365,18 +1397,23 @@ mod inner {
 
     impl WgpuTileProcessor {
         /// The processor for `device`, building the mip chain with the CPU
-        /// chain's filter ([`gpu_filter`]).
+        /// chain's filter ([`gpu_filter`]) and sharpening level 0 by
+        /// `sharpen` (`texture.sharpen`, as the encoder's), the mips built
+        /// from the unsharpened level 0.
         pub fn new(
             device: wgpu::Device,
             queue: wgpu::Queue,
             compressor: GpuBlockCompressor,
+            sharpen: Sharpen,
         ) -> Self {
             let mips = MipPipeline::new(&device, &queue, gpu_filter());
+            let sharpen = SharpenPipeline::new(&device, sharpen);
             Self {
                 device,
                 queue,
                 compressor,
                 mips,
+                sharpen,
                 sets: Default::default(),
                 busy: [false; RESOURCE_SETS],
                 timer_drops: 0,
@@ -1387,8 +1424,11 @@ mod inner {
         /// (#424, #425): writes `image` into that set's upload buffer as
         /// level 0, then records and submits the tile's one submission:
         /// the copy of level 0 into its texture, the mip shader building
-        /// every level below it (one pass), the BC1 kernel compressing every
-        /// level into its place in the payload (one pass), the copy of the
+        /// every level below it (one pass), with sharpening on the
+        /// sharpened level 0 into a texture of its own (two render passes),
+        /// the BC1 kernel compressing every level, level 0 from that
+        /// texture when sharpened, into its place in the payload (one
+        /// pass), the copy of the
         /// blocks into the readback buffer and the kernel timer's resolve;
         /// then asks for the readback, the timer and the upload buffer (for
         /// the next tile) to be mapped. Nothing waits for the GPU here.
@@ -1418,9 +1458,11 @@ mod inner {
                 queue,
                 compressor,
                 mips,
+                sharpen,
                 sets,
                 ..
             } = self;
+            let sharpen = sharpen.as_ref();
             let resources = &mut sets[set];
             if !resources
                 .as_ref()
@@ -1431,7 +1473,7 @@ mod inner {
                     tracing::debug_span!(target: "profiling", "gpu_buffers"),
                     || {
                         *resources = Some(TileResources::new(
-                            device, queue, mips, width, height, format,
+                            device, queue, mips, sharpen, width, height, format,
                         ));
                     },
                 );
@@ -1497,7 +1539,7 @@ mod inner {
                         },
                     );
                     let timer = resources.timer.as_ref();
-                    let passes = if plan.len() > 1 {
+                    let mut passes = if plan.len() > 1 {
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("tile-mips"),
                             timestamp_writes: timer.map(|t| t.pass_writes(MIP_PASS)),
@@ -1507,10 +1549,31 @@ mod inner {
                     } else {
                         BC1_PASS + 1
                     };
+                    // After the mips have read level 0: the sharpened level
+                    // 0 goes to the kernel, the mips stay unsharpened.
+                    let sharp = match (sharpen, &resources.sharpen) {
+                        (Some(pipeline), Some(targets)) => {
+                            let timed = passes == MIP_PASS + 1;
+                            targets.record(
+                                pipeline,
+                                &mut encoder,
+                                timer.filter(|_| timed).map(|t| t.span_writes(SHARPEN_PASS)),
+                            );
+                            if timed && timer.is_some() {
+                                passes = SHARPEN_PASS + 1;
+                            }
+                            Some(targets.level0())
+                        }
+                        _ => None,
+                    };
                     for (index, level) in plan.iter().enumerate() {
+                        let texture = match sharp {
+                            Some(sharp) if index == 0 => sharp,
+                            _ => resources.chain.level(index),
+                        };
                         compressor.add_compression_task(
                             variant,
-                            &resources.chain.level(index).view,
+                            &texture.view,
                             level.padded_width,
                             level.padded_height,
                             &resources.output,
@@ -1642,11 +1705,13 @@ mod inner {
                     Ok(times) => {
                         timing.gpu_kernel = times.get(BC1_PASS as usize).copied();
                         timing.gpu_mips = times.get(MIP_PASS as usize).copied();
+                        timing.gpu_sharpen = times.get(SHARPEN_PASS as usize).copied();
                         if tracing::enabled!(tracing::Level::DEBUG) {
                             let us = |d: Option<Duration>| d.map(|d| d.as_micros() as u64);
                             tracing::debug!(
                                 bc1_us = us(timing.gpu_kernel),
                                 mips_us = us(timing.gpu_mips),
+                                sharpen_us = us(timing.gpu_sharpen),
                                 "GPU kernel time"
                             );
                         }
@@ -2131,6 +2196,7 @@ mod inner {
                 lane = lane.name(),
                 gpu_mips_us = tracing::field::Empty,
                 gpu_kernel_us = tracing::field::Empty,
+                gpu_sharpen_us = tracing::field::Empty,
             );
             // The bound on the begin itself. Its finish gets the deadline
             // that runs from when it becomes the oldest tile
@@ -2218,6 +2284,9 @@ mod inner {
             }
             if let Some(kernel) = timing.gpu_kernel {
                 span.record("gpu_kernel_us", kernel.as_micros() as u64);
+            }
+            if let Some(sharpen) = timing.gpu_sharpen {
+                span.record("gpu_sharpen_us", sharpen.as_micros() as u64);
             }
             drop(span);
 
@@ -2760,12 +2829,13 @@ mod inner {
         device: wgpu::Device,
         queue: wgpu::Queue,
         compressor: GpuBlockCompressor,
+        sharpen: Sharpen,
         queues: impl Into<WorkerQueues>,
         shutdown: CancellationToken,
         health: SharedGpuHealth,
     ) -> Result<GpuWorkerHandle, DdsError> {
         try_spawn_tile_worker(
-            WgpuTileProcessor::new(device, queue, compressor),
+            WgpuTileProcessor::new(device, queue, compressor, sharpen),
             queues,
             shutdown,
             health,
@@ -2783,8 +2853,11 @@ mod inner {
     /// host's other adapters for the encoder policy. Both channels'
     /// [`health`](GpuEncoderChannel::health) is the one the worker and the
     /// device's lost callback publish. The prefetch channel holds
-    /// `prefetch_capacity` requests. Cancelling `shutdown` stops the worker,
-    /// as [`GpuWorkerHandle::stop`] does.
+    /// `prefetch_capacity` requests. The worker sharpens level 0 by
+    /// `sharpen` (`texture.sharpen`): the encoders the channels serve must
+    /// be built with the same, as their CPU fallback sharpens by theirs.
+    /// Cancelling `shutdown` stops the worker, as [`GpuWorkerHandle::stop`]
+    /// does.
     ///
     /// Nothing else is started: the per-minute `GPU encode sample` lines of
     /// the channels' [`stats`](GpuEncoderChannel::stats) are started by the
@@ -2797,6 +2870,7 @@ mod inner {
     pub fn create_gpu_encoder_channels(
         gpu_device: &str,
         prefetch_capacity: usize,
+        sharpen: Sharpen,
         shutdown: CancellationToken,
     ) -> Result<
         (
@@ -2813,7 +2887,8 @@ mod inner {
         tracing::info!(adapter = %selection.adapter, "GPU pipeline worker starting");
 
         let (channels, queues) = gpu_lanes(prefetch_capacity, health.clone(), shutdown.clone());
-        let handle = spawn_gpu_worker(device, queue, compressor, queues, shutdown, health)?;
+        let handle =
+            spawn_gpu_worker(device, queue, compressor, sharpen, queues, shutdown, health)?;
         Ok((channels, handle, selection))
     }
 }
@@ -2829,7 +2904,7 @@ mod tests {
     use crate::dds::gpu_health::{device_lost, GpuHealth, SharedGpuHealth};
     use crate::dds::gpu_stats::GpuEncodeStats;
     use crate::dds::{
-        DdsEncoder, DdsError, DdsFormat, IspcCompressor, MipmapStream, SoftwareCompressor,
+        DdsEncoder, DdsError, DdsFormat, IspcCompressor, MipmapStream, Sharpen, SoftwareCompressor,
     };
     use image::RgbaImage;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -5764,7 +5839,7 @@ mod tests {
     async fn test_create_gpu_encoder_channels_convenience() {
         let shutdown = tokio_util::sync::CancellationToken::new();
         let (channels, worker_handle, _adapter) =
-            match create_gpu_encoder_channels(&test_gpu_device(), 4, shutdown) {
+            match create_gpu_encoder_channels(&test_gpu_device(), 4, Sharpen::OFF, shutdown) {
                 Ok(r) => r,
                 Err(_) => return,
             };
@@ -6690,6 +6765,7 @@ mod tests {
             device,
             queue,
             compressor,
+            Sharpen::OFF,
             rx,
             shutdown.clone(),
             health.clone(),
@@ -6856,8 +6932,9 @@ mod tests {
         let Some((fresh_device, fresh_queue, fresh_compressor)) = gpu_resources_or_skip() else {
             return;
         };
-        let mut worker = WgpuTileProcessor::new(device, queue, compressor);
-        let mut fresh = WgpuTileProcessor::new(fresh_device, fresh_queue, fresh_compressor);
+        let mut worker = WgpuTileProcessor::new(device, queue, compressor, Sharpen::OFF);
+        let mut fresh =
+            WgpuTileProcessor::new(fresh_device, fresh_queue, fresh_compressor, Sharpen::OFF);
         let encode = |processor: &mut WgpuTileProcessor, deadline: Instant| {
             let mut payload =
                 vec![0; crate::dds::layout::chain_len(SIZE, SIZE, levels, DdsFormat::BC1)];
@@ -6895,20 +6972,24 @@ mod tests {
     /// The payload the GPU path wrote before #424, for comparison: the
     /// CPU's chain (`MipmapGenerator`, padded as the CPU pads a level),
     /// each level uploaded as its own texture and compressed by the same
-    /// `block_compression` kernel into its place.
+    /// `block_compression` kernel into its place. With `sharpen` on, level
+    /// 0 is sharpened by `Sharpen::apply` after the chain is built from it,
+    /// as `MipmapStream::with_sharpen` does.
     fn cpu_chain_on_the_gpu_kernel(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         compressor: &mut block_compression::GpuBlockCompressor,
         image: &RgbaImage,
         levels: usize,
+        sharpen: Sharpen,
     ) -> Vec<u8> {
         use crate::dds::compressor::pad_to_block_multiple;
-        let chain: Vec<RgbaImage> =
-            crate::dds::MipmapGenerator::generate_chain_with_count(image, levels)
-                .iter()
-                .map(|l| pad_to_block_multiple(l).into_owned())
-                .collect();
+        let mut chain = crate::dds::MipmapGenerator::generate_chain_with_count(image, levels);
+        sharpen.apply(&mut chain[0]);
+        let chain: Vec<RgbaImage> = chain
+            .iter()
+            .map(|l| pad_to_block_multiple(l).into_owned())
+            .collect();
         let bytes: usize = chain
             .iter()
             .map(|l| crate::dds::layout::level_len(l.width(), l.height(), DdsFormat::BC1))
@@ -6999,7 +7080,8 @@ mod tests {
         };
         let mut reference =
             block_compression::GpuBlockCompressor::new(device.clone(), queue.clone());
-        let mut processor = WgpuTileProcessor::new(device.clone(), queue.clone(), compressor);
+        let mut processor =
+            WgpuTileProcessor::new(device.clone(), queue.clone(), compressor, Sharpen::OFF);
         let full = |w, h| crate::dds::layout::full_chain_levels(w, h) as usize;
         for (w, h, levels) in [
             (4096, 4096, full(4096, 4096)),
@@ -7016,8 +7098,14 @@ mod tests {
             (4, 4, 1),
         ] {
             let image = varied(w, h);
-            let expected =
-                cpu_chain_on_the_gpu_kernel(&device, &queue, &mut reference, &image, levels);
+            let expected = cpu_chain_on_the_gpu_kernel(
+                &device,
+                &queue,
+                &mut reference,
+                &image,
+                levels,
+                Sharpen::OFF,
+            );
             let mut payload = vec![0; expected.len()];
             processor
                 .process(
@@ -7038,6 +7126,99 @@ mod tests {
         }
     }
 
+    /// `texture.sharpen` on the GPU: the processor's tile is the CPU chain
+    /// with level 0 sharpened by `Sharpen::apply`, on the same kernel, byte
+    /// for byte, so level 0 is the BC1 of the CPU-sharpened level 0 and
+    /// every level below it is the unsharpened processor's. Its sharpen
+    /// time is read where the device has timestamps; with sharpening off
+    /// there is none. Measured on the adapter the tests run on; not a
+    /// guarantee for other drivers.
+    #[test]
+    #[ignore] // Requires GPU hardware
+    fn a_sharpened_tile_is_the_cpu_sharpened_level_0_on_the_gpu_kernel() {
+        use crate::dds::gpu_timestamps::KernelTimer;
+        let Some((device, queue, compressor)) = gpu_resources_or_skip() else {
+            eprintln!("Skipping: no usable GPU");
+            return;
+        };
+        let timed = KernelTimer::available(&device, &queue);
+        let sharpen = Sharpen::from_strength(0.2);
+        let mut reference =
+            block_compression::GpuBlockCompressor::new(device.clone(), queue.clone());
+        let mut sharp = WgpuTileProcessor::new(device.clone(), queue.clone(), compressor, sharpen);
+        let mut plain = WgpuTileProcessor::new(
+            device.clone(),
+            queue.clone(),
+            block_compression::GpuBlockCompressor::new(device.clone(), queue.clone()),
+            Sharpen::OFF,
+        );
+        let full = |w, h| crate::dds::layout::full_chain_levels(w, h) as usize;
+        for (w, h, levels) in [
+            (4096, 4096, full(4096, 4096)),
+            (1001, 777, full(1001, 777)),
+            (37, 23, full(37, 23)),
+            (4096, 4096, 5),
+            // Too small to change a texel.
+            (8, 8, full(8, 8)),
+            // One level: no mip pass, the sharpening not timed.
+            (4096, 4096, 1),
+        ] {
+            let image = varied(w, h);
+            let expected = cpu_chain_on_the_gpu_kernel(
+                &device,
+                &queue,
+                &mut reference,
+                &image,
+                levels,
+                sharpen,
+            );
+            let encode = |processor: &mut WgpuTileProcessor| {
+                let mut timing = GpuTileTiming::default();
+                let mut payload = vec![0; expected.len()];
+                processor
+                    .process(
+                        image.clone(),
+                        DdsFormat::BC1,
+                        levels,
+                        Instant::now() + Duration::from_secs(60),
+                        &mut timing,
+                        &mut payload,
+                    )
+                    .unwrap_or_else(|e| panic!("{w}x{h}, {levels} levels: {e}"));
+                (payload, timing)
+            };
+            let (payload, timing) = encode(&mut sharp);
+            let (unsharpened, plain_timing) = encode(&mut plain);
+            let differ = payload
+                .iter()
+                .zip(&expected)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differ, 0, "{w}x{h}, {levels} levels: bytes differ");
+            let level0 = crate::dds::layout::level_len(w, h, DdsFormat::BC1);
+            assert!(
+                payload[level0..] == unsharpened[level0..],
+                "{w}x{h}, {levels} levels: the levels below level 0 are unsharpened"
+            );
+            if w > 8 {
+                assert!(
+                    payload[..level0] != unsharpened[..level0],
+                    "{w}x{h}: level 0 is sharpened"
+                );
+            }
+            assert_eq!(plain_timing.gpu_sharpen, None, "off: no sharpen time");
+            assert_eq!(
+                timing.gpu_sharpen.is_some(),
+                timed && levels > 1,
+                "{w}x{h}, {levels} levels: sharpen time {:?}",
+                timing.gpu_sharpen
+            );
+            if levels > 1 && timed {
+                assert!(timing.gpu_mips.is_some() && timing.gpu_kernel.is_some());
+            }
+        }
+    }
+
     /// The acceptance test of #425's byte identity, on the processor: two
     /// tiles begun at once, each on its own resource set, are each the
     /// tile encoded alone; an abandoned tile leaves its set to fresh
@@ -7052,7 +7233,8 @@ mod tests {
         };
         let mut reference =
             block_compression::GpuBlockCompressor::new(device.clone(), queue.clone());
-        let mut processor = WgpuTileProcessor::new(device.clone(), queue.clone(), compressor);
+        let mut processor =
+            WgpuTileProcessor::new(device.clone(), queue.clone(), compressor, Sharpen::OFF);
         let levels = |w: u32| crate::dds::layout::full_chain_levels(w, w) as usize;
         let tile = |size: u32, seed: u32| {
             RgbaImage::from_fn(size, size, |x, y| {
@@ -7069,6 +7251,7 @@ mod tests {
                 &mut reference,
                 image,
                 levels(image.width()),
+                Sharpen::OFF,
             )
         };
         let (want_a, want_b, want_c) = (expected(&a), expected(&b), expected(&c));

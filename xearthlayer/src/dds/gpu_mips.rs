@@ -202,7 +202,7 @@ fn bytes_of(words: &[u32]) -> Vec<u8> {
 /// its next submission. Never mapped: on a lost or destroyed device the
 /// buffer is invalid and the tile using it fails, where a mapping would
 /// have to be refused here (#420).
-fn buffer_with(
+pub(crate) fn buffer_with(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,

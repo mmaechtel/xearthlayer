@@ -100,12 +100,12 @@ impl DdsEncoder {
         }
     }
 
-    /// Sharpen level 0 (`texture.sharpen`). A [`MipmapCompressor`] builds
-    /// its mips from the level 0 it is given and cannot keep a sharpened
-    /// level 0 out of them, so with sharpening on it is never asked: every
-    /// tile is encoded by the fallback [`ImageCompressor`]
-    /// ([`encode`](Self::encode), [`encode_awaiting`](Self::encode_awaiting)),
-    /// byte for byte what `ispc` alone makes.
+    /// Sharpen level 0 (`texture.sharpen`), with the levels below it built
+    /// from the unsharpened image. An [`ImageCompressor`] backend, and the
+    /// fallback for an image a [`MipmapCompressor`] hands back, sharpen on
+    /// the CPU ([`MipmapStream::with_sharpen`]). A [`MipmapCompressor`] is
+    /// given the unsharpened image and sharpens by its own setting: the GPU
+    /// worker is built with the same strength (`create_gpu_encoder_channels`).
     pub fn with_sharpen(mut self, sharpen: Sharpen) -> Self {
         self.sharpen = sharpen;
         self
@@ -186,9 +186,6 @@ impl DdsEncoder {
         let (width, height) = image.dimensions();
         let count = self.levels_for(width, height)?;
         match &self.backend {
-            CompressorBackend::Mipmap { fallback, .. } if !self.sharpen.is_off() => {
-                self.encode_mipmap_stream(fallback.as_ref(), image, width, height, count)
-            }
             CompressorBackend::Mipmap {
                 compressor,
                 fallback,
@@ -215,10 +212,8 @@ impl DdsEncoder {
     /// cancelled job, or handed it back after the job was cancelled, when
     /// the CPU encode it would need is not paid for either.
     ///
-    /// With an image backend, or with sharpening on (`texture.sharpen`, see
-    /// [`with_sharpen`](Self::with_sharpen)), nothing is checked here and the
-    /// backend is not asked: [`encode_on_cpu`] checks as
-    /// [`encode`](Self::encode) does.
+    /// With an image backend nothing is checked here: [`encode_on_cpu`]
+    /// checks as [`encode`](Self::encode) does.
     ///
     /// [`encode_on_cpu`]: Self::encode_on_cpu
     pub async fn encode_awaiting(
@@ -229,11 +224,6 @@ impl DdsEncoder {
         let CompressorBackend::Mipmap { compressor, .. } = &self.backend else {
             return Ok(AwaitedEncode::Cpu(image));
         };
-        // Sharpened: the backend would put level 0's sharpening into its
-        // mips, so it never sees the image; `encode_on_cpu` sharpens it.
-        if !self.sharpen.is_off() {
-            return Ok(AwaitedEncode::Cpu(image));
-        }
         let (width, height) = image.dimensions();
         let count = self.levels_for(width, height)?;
         debug!(
@@ -942,13 +932,15 @@ mod tests {
         );
     }
 
-    /// With sharpening on, a mipmap backend is never asked: it would build
-    /// its mips from a sharpened level 0. The tile is the ISPC encode with
-    /// the same sharpening, byte for byte (the bytes the cache key
-    /// `:s{tenths}` names), on every way in: `encode`, `encode_awaiting`
-    /// with `encode_on_cpu`.
+    /// With sharpening on, a mipmap backend is asked as with it off: the
+    /// GPU worker sharpens level 0 itself, by the strength it was built
+    /// with. An image it hands back is the ISPC encode with the encoder's
+    /// sharpening, byte for byte (the bytes the cache key `:s{tenths}`
+    /// names), on every way in: `encode`, `encode_awaiting` with
+    /// `encode_on_cpu`.
     #[test]
-    fn with_sharpen_on_a_mipmap_backend_is_never_asked_and_the_tile_is_the_sharpened_ispc_encode() {
+    fn with_sharpen_on_a_mipmap_backend_is_asked_and_a_returned_tile_is_the_sharpened_ispc_encode()
+    {
         let sharpen = Sharpen::from_strength(0.5);
         let ispc: Arc<dyn ImageCompressor> = Arc::new(IspcCompressor);
         for (w, h) in [(64, 64), (37, 21), (4, 4)] {
@@ -972,21 +964,25 @@ mod tests {
                 .with_sharpen(sharpen);
 
             assert_eq!(encoder.encode(image.clone()).unwrap(), expected, "{w}x{h}");
+            assert_eq!(
+                backend.0.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{w}x{h}: `encode` asked the backend"
+            );
 
             let cancel = CancellationToken::new();
             let awaited =
                 futures::executor::block_on(encoder.encode_awaiting(image.clone(), &cancel))
                     .unwrap();
             let AwaitedEncode::Cpu(handed) = awaited else {
-                panic!("{w}x{h}: the image goes to the CPU");
+                panic!("{w}x{h}: the returned image goes to the CPU");
             };
-            assert_eq!(handed, image, "{w}x{h}: the image is untouched");
+            assert_eq!(handed, image, "{w}x{h}: the image comes back untouched");
             assert_eq!(encoder.encode_on_cpu(handed).unwrap(), expected, "{w}x{h}");
-
             assert_eq!(
                 backend.0.load(std::sync::atomic::Ordering::SeqCst),
-                0,
-                "{w}x{h}: the backend was never asked"
+                2,
+                "{w}x{h}: `encode_awaiting` asked the backend"
             );
         }
     }

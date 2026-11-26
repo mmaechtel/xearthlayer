@@ -26,6 +26,7 @@ xearthlayer/src/dds/
 ├── gpu_channel.rs  - GpuEncoderChannel (GPU worker)
 ├── mipmap.rs       - Mipmap chain generation, box filter in linear light
 ├── sharpen.rs      - Sharpen: level 0 unsharp mask (`texture.sharpen`)
+├── gpu_sharpen.rs  - The same mask in the GPU worker (`gpu_sharpen.wgsl`)
 ├── encoder.rs      - Main DDS encoder API
 └── mod.rs          - Public API exports
 ```
@@ -289,24 +290,32 @@ exactly and names a cache key without floating point.
   two neighbouring tiles are byte for byte those of the unsharpened tile
   (`the_border_is_unchanged_and_its_bc1_blocks_too`). A 3 px border is not
   enough: BC1 picks a block's two colours from all 16 pixels.
-- **CPU backends, never the GPU worker.** `DdsEncoder` is the one place the
-  strength is held (`with_sharpen`, set by `create_encoder` from
-  `TextureConfig::sharpen`; `DdsTextureEncoder` passes its own on). The GPU
-  worker builds its mips in a shader from the level 0 it uploads, so it
-  cannot keep a sharpened level 0 out of them, and no sharpening is built into
-  the channel, the worker or the shader (a provisional rule). With sharpening
-  on, a `MipmapCompressor` (`texture.compressor = gpu`) is therefore never
-  asked: `DdsEncoder::encode` encodes on the fallback, and `encode_awaiting`
-  answers `AwaitedEncode::Cpu` with the image at once, the way it does for a
-  tile the GPU hands back, so the task's `encode_on_cpu` runs the fallback's
-  `MipmapStream::with_sharpen` encode on a blocking thread. Every tile encoded
-  this way is the tile `texture.compressor = ispc` makes with the same
-  strength (`with_sharpen_on_a_mipmap_backend_is_never_asked_...` compares
-  them, with a backend that counts its calls). The cache key `:s{tenths}`
-  names the strength, not the compressor, as the unsharpened key always has:
-  a tile `software` cached is served as it is. `create_encoder` warns
-  once at start that the GPU encodes nothing. A GPU that is on but idle is the
-  cost; a sharpening shader would end it.
+- **Every backend, the GPU worker included.** `DdsEncoder` holds the strength
+  for the CPU (`with_sharpen`, set by `create_encoder` from
+  `TextureConfig::sharpen`; `DdsTextureEncoder` passes its own on), and the
+  GPU worker is built with the same (`create_gpu_encoder_channels(…, sharpen)`
+  to `WgpuTileProcessor::new`, from the same `create_encoder`); no request
+  carries it. A `MipmapCompressor` is asked with sharpening on as with it off.
+  The worker builds the mips from the unsharpened level 0, then sharpens level
+  0 into a texture of its own (`dds/gpu_sharpen.rs`, two render passes, see
+  [GPU encoding](gpu-encoding-design.md#sharpening-texturesharpen)), which the
+  BC1 kernel reads for level 0. A tile the GPU hands back is encoded by the
+  fallback's `MipmapStream::with_sharpen` on the CPU, the tile
+  `texture.compressor = ispc` makes with the same strength
+  (`with_sharpen_on_a_mipmap_backend_is_asked_...`). The shader's level 0 is
+  `Sharpen::apply`'s byte for byte on the adapter measured (AMD Radeon
+  Graphics, RADV; `the_gpu_sharpens_level_0_as_the_cpu_does`,
+  `a_sharpened_tile_is_the_cpu_sharpened_level_0_on_the_gpu_kernel`), not
+  guaranteed on other drivers. Open, not decided: the cache key `:s{tenths}`
+  names the strength, not the compressor, so it carries tiles from the CPU
+  (ISPC, the fallback) and from the GPU alike. Their level 0 is the same image
+  only where the shader is byte for byte the CPU's, measured on one adapter;
+  BC1 itself differs between ISPC and the GPU kernel, as it always has for
+  unsharpened tiles.
+- **CPU stage time.** The CPU path's per-tile metrics time the assembly and
+  the whole encode. `MipmapStream` opens a `profiling` span `sharpen` around
+  `Sharpen::apply`, so `run --profile` (a build with `--features profiling`)
+  shows the sharpening apart in the Chrome trace; no log line gives it.
 - **Memory.** A ring of seven rows of luma and their horizontal blur, with the
   per-row scratch about 330 KB for a 4096 tile, never a second full-size image (#227).
 - **Same bytes everywhere.** The arithmetic is f32 and every sum runs in a
