@@ -96,12 +96,12 @@ pub fn best_variant(rows: &[Row], provider: &str) -> usize {
 pub fn write_csv(rows: &[Row], path: &Path) -> std::io::Result<()> {
     let mut out = String::from(
         "provider,location,content,variant,ssim_pre,ssim_linear_pre,psnr_pre,butteraugli_pre,\
-         ssim_post,ssim_linear_post,psnr_post,butteraugli_post\n",
+         ssim_post,ssim_linear_post,psnr_post,butteraugli_post,detail_pre,detail_post\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{},{},{},{:.6},{:.6},{:.3},{:.4},{:.6},{:.6},{:.3},{:.4}",
+            "{},{},{},{},{:.6},{:.6},{:.3},{:.4},{:.6},{:.6},{:.3},{:.4},{:.4},{:.4}",
             r.provider,
             r.location,
             r.content,
@@ -114,6 +114,8 @@ pub fn write_csv(rows: &[Row], path: &Path) -> std::io::Result<()> {
             r.post.ssim_linear,
             r.post.psnr,
             r.post.butteraugli,
+            r.pre.detail,
+            r.post.detail,
         );
     }
     fs::write(path, out)
@@ -147,8 +149,8 @@ pub fn summary(rows: &[Row], notes: &str) -> String {
     }
 
     let _ = writeln!(s, "## Dataset\n");
-    let _ = writeln!(s, "| Provider | Tiles | JPEG quality (estimate) | Chroma | Baseline SSIM before BC1 | after BC1 | Baseline PSNR after BC1 |");
-    let _ = writeln!(s, "|---|---|---|---|---|---|---|");
+    let _ = writeln!(s, "| Provider | Tiles | JPEG quality (estimate) | Chroma | Detail vs truth | Baseline SSIM before BC1 | after BC1 | Baseline PSNR after BC1 |");
+    let _ = writeln!(s, "|---|---|---|---|---|---|---|---|");
     for p in &names {
         let base: Vec<&Row> = rows
             .iter()
@@ -170,16 +172,23 @@ pub fn summary(rows: &[Row], notes: &str) -> String {
         let col = |f: fn(&Row) -> f64| mean(&base.iter().map(|r| f(r)).collect::<Vec<_>>());
         let _ = writeln!(
             s,
-            "| {p} | {} | {quality} | {} | {:.4} | {:.4} | {:.2} dB |",
+            "| {p} | {} | {quality} | {} | {:.2} | {:.4} | {:.4} | {:.2} dB |",
             base.len(),
             chroma.join(", "),
+            col(|r| r.pre.detail),
             col(|r| r.pre.ssim),
             col(|r| r.post.ssim),
             col(|r| r.post.psnr),
         );
     }
 
-    let _ = writeln!(s, "\n## Results per provider\n");
+    let _ = writeln!(
+        s,
+        "\n\"Detail vs truth\" is the gradient energy of the untreated ZL16 divided by the \
+         truth's. Below 1 the provider's ZL16 is softer than its own ZL18 reduced to the same \
+         size, which is the case where sharpening can gain; JPEG artifacts push it up.\n"
+    );
+    let _ = writeln!(s, "## Results per provider\n");
     let _ = writeln!(
         s,
         "Differences to the baseline of the same tile, measured against the ZL18 truth. \
@@ -196,8 +205,8 @@ pub fn summary(rows: &[Row], notes: &str) -> String {
         let pre = deltas(rows, keep, |r| r.pre.ssim);
         let best = best_variant(rows, p);
         let _ = writeln!(s, "### {p}\n");
-        let _ = writeln!(s, "| Variant | SSIM after BC1, mean | median | Linear-light SSIM, mean | PSNR, mean | Butteraugli, mean | SSIM before BC1, mean | Tiles better | Time |");
-        let _ = writeln!(s, "|---|---|---|---|---|---|---|---|---|");
+        let _ = writeln!(s, "| Variant | SSIM after BC1, mean | median | Linear-light SSIM, mean | PSNR, mean | Butteraugli, mean | SSIM before BC1, mean | Detail vs truth | Tiles better | Time |");
+        let _ = writeln!(s, "|---|---|---|---|---|---|---|---|---|---|");
         for (i, v) in VARIANTS.iter().enumerate() {
             let times: Vec<f64> = rows
                 .iter()
@@ -205,6 +214,11 @@ pub fn summary(rows: &[Row], notes: &str) -> String {
                 .map(|r| r.filter_ms)
                 .collect();
             let better = ssim[i].iter().filter(|d| **d > 0.0).count();
+            let detail: Vec<f64> = rows
+                .iter()
+                .filter(|r| keep(r) && r.variant == i)
+                .map(|r| r.post.detail)
+                .collect();
             let mark = if i == best && i != 0 {
                 " **(best)**"
             } else {
@@ -212,7 +226,7 @@ pub fn summary(rows: &[Row], notes: &str) -> String {
             };
             let _ = writeln!(
                 s,
-                "| {}{mark} | {:+.4} | {:+.4} | {:+.4} | {:+.2} dB | {:+.3} | {:+.4} | {}/{} | {:.0} ms |",
+                "| {}{mark} | {:+.4} | {:+.4} | {:+.4} | {:+.2} dB | {:+.3} | {:+.4} | {:.2} | {}/{} | {:.0} ms |",
                 v.name,
                 mean(&ssim[i]),
                 median(&ssim[i]),
@@ -220,6 +234,7 @@ pub fn summary(rows: &[Row], notes: &str) -> String {
                 mean(&psnr[i]),
                 mean(&butter[i]),
                 mean(&pre[i]),
+                mean(&detail),
                 better,
                 ssim[i].len(),
                 median(&times),
@@ -388,6 +403,7 @@ mod tests {
             psnr: 30.0,
             ssim_linear: ssim,
             butteraugli: 1.0,
+            detail: 1.0,
         };
         Row {
             provider: "p".to_string(),

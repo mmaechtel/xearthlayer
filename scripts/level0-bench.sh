@@ -6,7 +6,8 @@
 #   scripts/level0-bench.sh probe   test one chunk per provider
 #
 # Chunks are cached under level0-bench/data (gitignored), so a second
-# run fetches nothing. Results go to level0-bench/results.
+# run fetches nothing. Real results go to level0-bench/results, synthetic
+# ones to level0-bench/results-synth.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -18,13 +19,15 @@ case "${1:-synth}" in
         "${bench[@]}" probe
         ;;
     synth)
+        rm -rf "$tool/data-synth"
         "${bench[@]}" synth --data "$tool/data-synth"
-        "${bench[@]}" run --data "$tool/data-synth" --out "$tool/results" \
-            --notes "$tool/NOTES.md"
+        "${bench[@]}" run --data "$tool/data-synth" --out "$tool/results-synth" \
+            --notes "$tool/NOTES-synth.md"
         ;;
     real)
-        "${bench[@]}" fetch --data "$tool/data"
-        "${bench[@]}" run --data "$tool/data" --out "$tool/results-real"
+        "${bench[@]}" fetch --data "$tool/data" --providers bing,arcgis,apple
+        "${bench[@]}" run --data "$tool/data" --out "$tool/results" \
+            --notes "$tool/NOTES.md"
         ;;
     *)
         echo "usage: $0 [synth|real|probe]" >&2

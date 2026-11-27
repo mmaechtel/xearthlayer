@@ -15,6 +15,10 @@ pub struct Scores {
     pub ssim_linear: f64,
     /// Butteraugli 3-norm (lower is better).
     pub butteraugli: f64,
+    /// Gradient energy of the candidate's luma divided by the truth's:
+    /// below 1 the candidate is softer than the truth, above 1 it has more
+    /// local contrast (detail, or artifacts and oversharpening).
+    pub detail: f64,
 }
 
 /// A truth image with everything precomputed that every comparison reuses.
@@ -24,6 +28,7 @@ pub struct Truth {
     luma: Vec<f32>,
     linear: Vec<f32>,
     rgb: Vec<RGB8>,
+    gradient: f64,
 }
 
 impl Truth {
@@ -31,6 +36,7 @@ impl Truth {
         Self {
             width: image.width() as usize,
             height: image.height() as usize,
+            gradient: gradient_energy(&luma(image), image.width() as usize),
             luma: luma(image),
             linear: linear_luminance(image),
             rgb: rgb8(image),
@@ -54,6 +60,7 @@ impl Truth {
             psnr: psnr(&y, &self.luma),
             ssim_linear: ssim(&lin, &self.linear, self.width, self.height),
             butteraugli,
+            detail: gradient_energy(&y, self.width) / self.gradient,
         }
     }
 }
@@ -85,6 +92,21 @@ fn linear_luminance(image: &RgbaImage) -> Vec<f32> {
                     + 0.0722 * table[usize::from(p[2])])
         })
         .collect()
+}
+
+/// Mean absolute difference between horizontally and vertically
+/// neighbouring pixels.
+fn gradient_energy(luma: &[f32], width: usize) -> f64 {
+    let mut sum = 0.0f64;
+    for (i, &v) in luma.iter().enumerate() {
+        if (i + 1) % width != 0 {
+            sum += f64::from((luma[i + 1] - v).abs());
+        }
+        if let Some(&below) = luma.get(i + width) {
+            sum += f64::from((below - v).abs());
+        }
+    }
+    sum / luma.len() as f64
 }
 
 fn psnr(a: &[f32], b: &[f32]) -> f64 {
@@ -187,6 +209,15 @@ mod tests {
         assert!((scores.ssim_linear - 1.0).abs() < 1e-6);
         assert!(scores.psnr.is_infinite());
         assert!(scores.butteraugli < 1e-6);
+        assert!((scores.detail - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_blurred_image_has_less_detail_than_the_truth() {
+        let truth = gradient(0);
+        let blurred = image::imageops::blur(&truth, 1.5);
+        let scores = Truth::new(&truth).score(&blurred);
+        assert!(scores.detail < 0.9, "{}", scores.detail);
     }
 
     #[test]

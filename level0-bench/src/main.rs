@@ -56,9 +56,16 @@ enum Command {
         /// JPEG qualities, one synthetic provider each.
         #[arg(long, value_delimiter = ',', default_value = "60,75,90")]
         qualities: Vec<u8>,
-        /// JPEG qualities of extra providers whose ZL16 is softened.
-        #[arg(long, value_delimiter = ',', default_value = "75")]
-        soft: Vec<u8>,
+        /// Softness sweep: Gaussian sigmas, in ZL16 pixels, of extra
+        /// providers whose ZL16 is blurred (one provider per sigma).
+        #[arg(long, value_delimiter = ',', default_value = "0.4,0.7,1.0")]
+        soft_sigmas: Vec<f32>,
+        /// JPEG quality of the softness sweep.
+        #[arg(long, default_value_t = 75)]
+        soft_quality: u8,
+        /// Leave out `synth-mixed`, whose JPEG quality changes per chunk.
+        #[arg(long)]
+        no_mixed: bool,
         #[arg(long, default_value_t = 4)]
         side: u32,
     },
@@ -93,13 +100,15 @@ fn main() -> ExitCode {
         Command::Synth {
             data,
             qualities,
-            soft,
+            soft_sigmas,
+            soft_quality,
+            no_mixed,
             side,
-        } => {
-            let sharp = qualities.iter().map(|&q| (q, false));
-            let profiles: Vec<(u8, bool)> = sharp.chain(soft.iter().map(|&q| (q, true))).collect();
-            dataset::write_synthetic(&data, &profiles, side)
-        }
+        } => dataset::write_synthetic(
+            &data,
+            &synth_profiles(&qualities, &soft_sigmas, soft_quality, !no_mixed),
+            side,
+        ),
         Command::Run { data, out, notes } => run(&data, &out, notes.as_deref()),
     };
     match result {
@@ -109,6 +118,34 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The synthetic providers of a `synth` run: one per quality, one per
+/// sigma of the softness sweep, and the mixed-quality provider.
+fn synth_profiles(
+    qualities: &[u8],
+    soft_sigmas: &[f32],
+    soft_quality: u8,
+    mixed: bool,
+) -> Vec<synth::Profile> {
+    let fixed = |quality: u8, sigma_tenths: u32| synth::Profile {
+        quality: synth::Quality::Fixed(quality),
+        sigma_tenths,
+    };
+    let mut profiles: Vec<synth::Profile> = qualities.iter().map(|&q| fixed(q, 0)).collect();
+    for sigma in soft_sigmas {
+        let tenths = (sigma * 10.0).round() as u32;
+        if tenths > 0 {
+            profiles.push(fixed(soft_quality, tenths));
+        }
+    }
+    if mixed {
+        profiles.push(synth::Profile {
+            quality: synth::Quality::Mixed,
+            sigma_tenths: 0,
+        });
+    }
+    profiles
 }
 
 /// Milliseconds scaled from an image of `pixels` to a 4096 x 4096 tile.
@@ -209,4 +246,36 @@ fn run(data: &Path, out: &Path, notes: Option<&Path>) -> Result<(), String> {
     fs::write(out.join("index.html"), report::contact_sheet(&crops)).map_err(io)?;
     println!("wrote {}", out.join("summary.md").display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_synth_run_has_three_qualities_a_sweep_and_the_mixed_provider() {
+        let names: Vec<String> = synth_profiles(&[60, 75, 90], &[0.4, 0.7, 1.0], 75, true)
+            .iter()
+            .map(synth::Profile::name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "synth-q60",
+                "synth-q75",
+                "synth-q90",
+                "synth-q75-s04",
+                "synth-q75-s07",
+                "synth-q75-s10",
+                "synth-mixed"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_zero_sigma_adds_no_provider_and_mixed_can_be_left_out() {
+        let profiles = synth_profiles(&[75], &[0.0], 75, false);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name(), "synth-q75");
+    }
 }

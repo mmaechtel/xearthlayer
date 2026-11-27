@@ -1,53 +1,49 @@
 ## Recommendation
 
-**No PR yet. The synthetic data cannot say whether sharpening helps; only a run on real provider tiles can.**
-What the synthetic run does establish:
+**No level 0 sharpening PR. On real tiles from Bing, ArcGIS and Apple, every sharpening variant moves
+level 0 away from the ZL18 truth, and deblocking gains almost nothing.**
 
-1. **Whether unsharp masking helps depends on one property of the provider, not on the filter.**
-   Where the provider's ZL16 is a plain average of its ZL18 (`synth-q60`, `q75`, `q90`), every unsharp
-   strength loses on every tile (0.3: about -0.012 SSIM and -1.2 to -1.7 dB). Where the ZL16 is softer
-   than that (`synth-q75-soft`, a 1-2-1 blur, sigma about 0.7 pixel), unsharp gains on every tile
-   (0.3: +0.009 SSIM; 0.6 with q-deblock: +0.014 SSIM, +0.55 dB, butteraugli -0.37). The sign flips
-   with the softness, so the first thing the real run has to answer, per provider, is how soft its
-   ZL16 is against its own ZL18.
-2. **Deblocking before sharpening is worth its cost when sharpening is on.** On the soft provider,
-   `D q-deblock + usm 0.6` beats `B usm 0.6` (+0.0141 against +0.0131, and 12 of 12 tiles better against
-   10 of 12). Farmland is where it matters: plain usm 0.6 gains nothing there (+0.0000), with q-deblock
-   it gains +0.0031.
-3. **Taking the strength from the quantisation tables does what it should.** At quality 90 the fixed
-   threshold (C) is better on only 5 of 12 tiles and slightly negative on average, the table-driven
-   one (D) is neutral. At quality 60 D
-   gains more than C (+0.0014 against +0.0010). D never needs a per-provider setting.
-4. **Deblocking alone is a small gain**: +0.001 SSIM at quality 60, +0.0005 at 75, nothing at 90.
-   Farmland gains most (+0.004 at quality 60), forest loses (-0.002): fine texture has real steps at
-   block edges that are below the threshold.
-5. **Deringing is content-dependent and the most expensive stage.** At quality 60 it adds +0.004 on
-   farmland and town and costs -0.006 on forest; at quality 90 it does nothing. Butteraugli gets
-   slightly worse with it at quality 60 (+0.010) while SSIM improves. Not worth a first PR.
-6. **BC1 does not eat the gain.** BC1 costs the baseline about 0.02 SSIM, but the differences between
-   variants before and after BC1 agree to within 0.002 in every row.
+1. **Unsharp masking loses on all 36 tiles at every strength**, by SSIM, linear-light SSIM and PSNR,
+   before and after BC1. 0.3 costs about -0.016 SSIM and -1.1 to -1.5 dB; even 0.1 loses on 36 of 36
+   (about -0.0035 SSIM, -0.3 dB). Mountains and town lose most, farmland and coast least.
+2. **The reason is in the `Detail vs truth` column.** The providers' ZL16 has 0.95 to 0.97 of the
+   gradient energy of their own ZL18 reduced to the same size: it is barely softer than the truth.
+   The synthetic softness sweep (`results-synth`) puts the break-even far below that: sharpening
+   still loses at 0.89 and only gains at 0.66. Unsharp 0.1 brings the real tiles to a ratio of about
+   1.0 and still loses, so what is missing is not contrast an unsharp mask can restore.
+3. **Butteraugli disagrees mildly.** Its 3-norm improves with unsharp 0.1 to 0.6 (0.3: -0.12 to -0.20)
+   and gets worse at 1.0. So a light sharpen may look closer to the truth to a perceptual metric
+   while being further away pixel for pixel. That is a taste setting, not a fidelity gain, and it
+   is not enough to make it a default.
+4. **Deblocking is neutral.** The table-driven deblock (D) changes SSIM by at most +0.0003 and is
+   better on 25 of 36 tiles; the fixed threshold (C) is better on 23 and slightly negative on Apple
+   and Bing. At JPEG quality 79 to 85 there is little blocking to remove.
+5. **Deringing adds +0.0002 to +0.0006** on 30 of 36 tiles, most on Bing forest (+0.0019). Real, but
+   below anything visible, and it is the most expensive stage.
+6. **Quantisation-aware sharpening (F) is worse than plain sharpening here**, because every real
+   chunk is at or above the reference quality, so the rule only ever raises the strength.
+7. **BC1 does not eat or add anything**: differences before and after BC1 agree to within 0.002.
 
-If the real run confirms that a provider's ZL16 is soft, the variant to propose is
-**`D q-deblock + usm`, off by default, with unsharp 0.3 as the default strength when enabled**: on the
-soft provider 0.3 is better on 12 of 12 tiles, and on a provider that turns out not to be soft it does
-the least damage of the sharpening variants. 0.6 gains more where it applies (+0.014 against +0.009)
-but 1.0 already loses on coast and farmland, so 0.6 is the ceiling. For a provider whose ZL16 is not
-soft, the only candidate is `D q-deblock` alone, and its gain is small enough that it has to be
-weighed against its cost.
+If anything from this is worth carrying forward, it is the measuring tool and the `Detail vs truth`
+figure, not a filter. A sharpening option could still be offered as an explicit taste setting
+(off by default, 0.1 to 0.3, never above 0.6), but the data does not support calling it an
+improvement in accuracy. The table-driven deblock would only pay off for a provider that serves
+clearly lower quality than the three measured here.
 
 ## Caveats per provider
 
-Nothing here is measured on a real provider. What to look for when the real tiles are in:
-
-- **Bing, Google (GO2), Apple**: recompressed pyramids; quality and softness per zoom are unknown
-  until fetched. The manifest records the tables of every tile, and `Dataset` above shows whether a
-  provider's quality varies between tiles (then D's per-chunk thresholds matter more than here,
-  where every chunk of a provider has the same table).
-- **ArcGIS, USGS**: mosaics of different sources and dates. ZL18 can be a different capture than
-  ZL16, in which case the truth is not the same picture and every score is noise. Check the crops
-  before trusting the table. USGS covers the US only, so it gets 6 of the 12 locations.
-- **Any provider**: a ZL18 that is itself upsampled from coarser imagery makes the truth soft and
-  rewards blur. Compare the truth crop with the baseline crop: the truth must show more detail.
+- **Bing** (quality 79, 4:2:0): the most uniform of the three. Nothing gains.
+- **ArcGIS** (quality 75 to 85, mixed 4:2:0 and 4:4:4): the only provider where the fixed deblock is
+  better on 12 of 12 tiles, by +0.0007. It is a mosaic, so the ZL16 and ZL18 of a location can come
+  from different captures; the baseline SSIM is the lowest (0.898 after BC1), which fits that.
+- **Apple** (quality 80, 4:2:0): closest to its truth (detail 0.97) and the provider where sharpening
+  costs most.
+- **USGS** is not measured: the service has no ZL18, so there is no truth. **GO2** is not measured:
+  XEL fetches it over plain HTTP, which the sandbox this ran in does not route.
+- **Twelve locations, one ZL16 area of 1024 pixels each.** Enough to see that the sign is the same
+  everywhere, not enough to rank content types finely.
+- **The truth is the provider's own ZL18**, itself a JPEG. It is the best available reference, not
+  the ground.
 
 ## Method and choices made along the way
 
@@ -58,40 +54,27 @@ Nothing here is measured on a real provider. What to look for when the real tile
   `tasks::chunk_image::decode` runs (zune-jpeg with `image`'s options); XEL's fast path
   `decode_into` is tested to give the same bytes. That function is `pub(crate)`, so the tool calls
   the decoder it wraps rather than the function itself.
+- **Fetching** goes through `xearthlayer::provider` (`ProviderFactory`), so URLs, headers and the
+  Apple token flow are XEL's own.
 - **Chroma upsampling (idea 4).** zune-jpeg 0.5.13 already upsamples 4:2:0 chroma with the
-  triangle filter (3:1 weights, libjpeg's "fancy upsampling") in both directions, not nearest
-  neighbour. There is nothing cheap left to gain there, so it is not a variant.
+  triangle filter (3:1 weights, libjpeg's "fancy upsampling"), not nearest neighbour. Nothing cheap
+  is left to gain there, so it is not a variant.
 - **Tile size.** A benchmark tile is 4 x 4 ZL16 chunks (1024 pixels) against 16 x 16 ZL18 chunks,
-  not a full 4096 tile: a full tile needs 4,096 ZL18 chunks per location and provider. Timings are
+  not a full 4096 tile, which would need 4,096 ZL18 chunks per location and provider. Timings are
   scaled by pixel count to 4096 x 4096.
 - **Filters** work on stored sRGB bytes, R, G and B independently, with integer arithmetic. The
   deblocker uses the luminance table for all three channels. Thresholds: C fixed at 8 levels; D at
   1.5 times the step the chunk's table can cause (`JpegInfo::block_step`: 3, 7 and 12 levels at
-  quality 90, 75 and 60);
-  E adds a 3x3 sigma filter in blocks whose luma range is at least 32, up to 1.5 times the table's
-  ringing amplitude (1, 3 and 4 levels). Unsharp is a 5x5 binomial blur (sigma about 1 pixel).
-- **Not done:** quantisation-aware sharpening (idea 5), reconstruction as an upper bound (idea 6;
-  zune-jpeg does not expose DCT coefficients) and a slower BC1 profile (idea 7). With one table per
-  synthetic provider, idea 5 would only be a per-provider strength here; it needs real tiles with
-  mixed quality to be tested.
+  quality 90, 75 and 60); E adds a 3x3 sigma filter in blocks whose luma range is at least 32, up
+  to 1.5 times the table's ringing amplitude. Unsharp is a 5x5 binomial blur (sigma about 1 pixel).
+  F scales the unsharp amount per chunk by `clamp(step at quality 75 / chunk step, 0.25, 1.5)`.
+  G (unsharp 0.1) was added after the first real run showed 0.3 overshooting.
+- **Detail vs truth** is the mean absolute difference between neighbouring luma pixels of an image
+  divided by the truth's. It is a softness indicator, not a quality score: artifacts raise it too.
+- **Not done:** reconstruction as an upper bound (idea 6; zune-jpeg does not expose DCT
+  coefficients) and a slower BC1 profile (idea 7). With no filter gaining before BC1, there was no
+  cleaned-up input to test a slower profile on.
 - **Butteraugli** is the pure-Rust `butteraugli` crate (0.9, a port of libjxl's), 3-norm.
-- **Synthetic scenes** are stationary: the two or three scenes of a content type score almost
-  identically, so "12 tiles" is closer to 5 independent samples. The scenes are also cleaner than
-  real imagery (no sensor noise, no haze, no resampling history).
-- **Time.** The filters are unoptimised scalar code and far above the "few ms per tile" a shipped
-  version needs: deblocking about 90 ms, unsharp about 240 ms, deringing about 270 to 560 ms per
-  4096 tile on one core of this machine, against 37 ms for the BC1 encode of level 0. A shipped
-  deblocker would touch only pixels beside block edges that fail the flatness test, and the blur
-  vectorises well. Treat the times as an upper bound and as relative to each other.
-
-## Network
-
-Every tile server was refused by the sandbox's network policy when one chunk per provider was tried:
-`ecn.t0.tiles.virtualearth.net` (Bing), `server.arcgisonline.com` (ArcGIS),
-`basemap.nationalmap.gov` (USGS) and `duckduckgo.com` (Apple's token) answered with a proxy 403, and
-`mt0.google.com` (GO2, plain HTTP) did not resolve. No workaround was tried. The repository has no
-real imagery either (only eleven JPEG decoder fixtures), hence the synthetic dataset.
-
-To run on real tiles: `scripts/level0-bench.sh probe`, then `scripts/level0-bench.sh real`. That
-fetches 272 chunks per location and provider through `xearthlayer::provider`, caches them under
-`level0-bench/data` and writes `level0-bench/results-real`.
+- **Time.** Scalar Rust, one core: deblock about 40 ms, unsharp about 70 ms, deringing about 150 ms
+  per 4096 tile on this machine, against 36 ms for the BC1 encode of level 0. Still above the few
+  milliseconds a shipped filter should cost.

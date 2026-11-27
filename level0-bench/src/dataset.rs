@@ -383,14 +383,23 @@ pub fn fetch(data: &Path, providers: &[String], side: u32) -> Result<(), String>
 }
 
 /// Writes the synthetic dataset: every scene of [`synth::SCENES`] for each
-/// profile, a JPEG quality and whether the provider's ZL16 is soft. The
-/// provider is named `synth-q<quality>` or `synth-q<quality>-soft`.
-pub fn write_synthetic(data: &Path, profiles: &[(u8, bool)], side: u32) -> Result<(), String> {
+/// profile, as a provider named by [`synth::Profile::name`].
+pub fn write_synthetic(data: &Path, profiles: &[synth::Profile], side: u32) -> Result<(), String> {
+    write_scenes(data, profiles, side, &synth::SCENES)
+}
+
+/// [`write_synthetic`] for a chosen set of scenes.
+fn write_scenes(
+    data: &Path,
+    profiles: &[synth::Profile],
+    side: u32,
+    scenes: &[(&str, Content, u32)],
+) -> Result<(), String> {
     let io = |e: std::io::Error| e.to_string();
-    for &(quality, soft) in profiles {
-        let provider = format!("synth-q{quality}{}", if soft { "-soft" } else { "" });
+    for profile in profiles {
+        let provider = profile.name();
         let mut tiles = Vec::new();
-        for (index, (name, content, seed)) in synth::SCENES.iter().enumerate() {
+        for (index, (name, content, seed)) in scenes.iter().enumerate() {
             let source = Grid {
                 zoom: SOURCE_ZOOM,
                 row0: 1000 + index as u32 * 100,
@@ -399,15 +408,13 @@ pub fn write_synthetic(data: &Path, profiles: &[(u8, bool)], side: u32) -> Resul
             };
             let truth = truth_grid(source);
             let scene = synth::render(*content, *seed, truth.side * CHUNK_PX);
-            let mut small = synth::provider_downsample_4x(&scene);
-            if soft {
-                small = synth::soften(&small);
-            }
+            let small = synth::soften(&synth::provider_downsample_4x(&scene), profile.sigma_tenths);
             for (grid, image) in [(source, &small), (truth, &scene)] {
                 let chunks: Vec<(u32, u32)> = grid.chunks().collect();
                 chunks.par_iter().try_for_each(|&(row, col)| {
                     let path = chunk_path(data, &provider, name, grid.zoom, row, col);
                     fs::create_dir_all(path.parent().expect("chunk has a folder")).map_err(io)?;
+                    let quality = profile.quality_at(row, col);
                     let bytes =
                         synth::encode_chunk(image, col - grid.col0, row - grid.row0, quality);
                     fs::write(path, bytes).map_err(io)
@@ -421,10 +428,7 @@ pub fn write_synthetic(data: &Path, profiles: &[(u8, bool)], side: u32) -> Resul
                 synthetic: true,
                 lat: None,
                 lon: None,
-                url_pattern: format!(
-                    "synthetic scene, seed {seed}, libjpeg quality {quality}, 4:2:0{}",
-                    if soft { ", ZL16 softened 1-2-1" } else { "" }
-                ),
+                url_pattern: format!("synthetic scene, seed {seed}, {}", profile.describe()),
                 source,
                 truth,
                 source_jpeg: summarise(data, &provider, name, source),
@@ -524,7 +528,11 @@ mod tests {
     #[test]
     fn a_synthetic_tile_round_trips_through_disk() {
         let dir = std::env::temp_dir().join(format!("level0-bench-test-{}", std::process::id()));
-        write_synthetic(&dir, &[(75, false)], 1).unwrap();
+        let profile = synth::Profile {
+            quality: synth::Quality::Fixed(75),
+            sigma_tenths: 0,
+        };
+        write_synthetic(&dir, &[profile], 1).unwrap();
         let tiles = read_manifests(&dir).unwrap();
         assert_eq!(tiles.len(), synth::SCENES.len());
         let summary = tiles[0].source_jpeg.as_ref().unwrap();
@@ -533,6 +541,32 @@ mod tests {
         assert_eq!(tile.source.dimensions(), (256, 256));
         assert_eq!(tile.truth.dimensions(), (256, 256));
         assert_eq!(tile.chunk_info.len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_mixed_provider_has_different_tables_inside_one_tile() {
+        let dir = std::env::temp_dir().join(format!("level0-bench-mixed-{}", std::process::id()));
+        let profile = synth::Profile {
+            quality: synth::Quality::Mixed,
+            sigma_tenths: 5,
+        };
+        write_scenes(&dir, &[profile], 2, &synth::SCENES[..1]).unwrap();
+        let tiles = read_manifests(&dir).unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].provider, "synth-mixed-s05");
+        assert!(tiles[0].url_pattern.contains("sigma 0.5 px"));
+        assert!(!tiles[0].source_jpeg.as_ref().unwrap().uniform);
+        assert!(!tiles[0].truth_jpeg.as_ref().unwrap().uniform);
+        let tile = load(&dir, &tiles[0]).unwrap();
+        let mut qualities: Vec<u8> = tile
+            .chunk_info
+            .iter()
+            .map(|i| i.as_ref().unwrap().quality_estimate)
+            .collect();
+        qualities.sort_unstable();
+        qualities.dedup();
+        assert_eq!(qualities, synth::MIXED_QUALITIES);
         fs::remove_dir_all(dir).unwrap();
     }
 }

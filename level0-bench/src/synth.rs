@@ -314,24 +314,125 @@ pub fn provider_downsample_4x(scene: &RgbImage) -> RgbImage {
     })
 }
 
-/// A 1-2-1 blur in each direction (sigma about 0.7 pixel): a provider whose
+/// JPEG quality of a synthetic provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    /// Every chunk at this libjpeg quality.
+    Fixed(u8),
+    /// The quality changes from chunk to chunk ([`MIXED_QUALITIES`]), so
+    /// one tile holds chunks with different quantisation tables.
+    Mixed,
+}
+
+/// The qualities a [`Quality::Mixed`] provider cycles through.
+pub const MIXED_QUALITIES: [u8; 3] = [55, 75, 90];
+
+/// One synthetic provider: how it compresses and how soft its ZL16 is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Profile {
+    pub quality: Quality,
+    /// Sigma, in tenths of a ZL16 pixel, of the Gaussian blur applied to
+    /// the provider's ZL16 after its 4x4 average. Zero is no blur.
+    pub sigma_tenths: u32,
+}
+
+impl Profile {
+    /// The provider name: `synth-q75`, `synth-q75-s05` (sigma 0.5) or
+    /// `synth-mixed`.
+    pub fn name(&self) -> String {
+        let base = match self.quality {
+            Quality::Fixed(q) => format!("synth-q{q}"),
+            Quality::Mixed => "synth-mixed".to_string(),
+        };
+        if self.sigma_tenths == 0 {
+            base
+        } else {
+            format!("{base}-s{:02}", self.sigma_tenths)
+        }
+    }
+
+    /// The JPEG quality of the chunk at absolute chunk coordinates.
+    ///
+    /// A mixed provider takes it from `(row + col) mod 3`, so any 2 x 2
+    /// block of chunks holds all three qualities.
+    pub fn quality_at(&self, row: u32, col: u32) -> u8 {
+        match self.quality {
+            Quality::Fixed(q) => q,
+            Quality::Mixed => MIXED_QUALITIES[((row + col) % 3) as usize],
+        }
+    }
+
+    /// What the manifest says about the profile.
+    pub fn describe(&self) -> String {
+        let quality = match self.quality {
+            Quality::Fixed(q) => format!("libjpeg quality {q}"),
+            Quality::Mixed => format!("libjpeg quality {MIXED_QUALITIES:?} by (row + col) mod 3"),
+        };
+        format!(
+            "{quality}, 4:2:0, ZL16 Gaussian blur sigma {}.{} px",
+            self.sigma_tenths / 10,
+            self.sigma_tenths % 10
+        )
+    }
+}
+
+/// Fixed-point scale of the blur kernel: its weights sum to this.
+const KERNEL_ONE: u64 = 1 << 12;
+
+/// One half of a Gaussian kernel (centre first) in 12-bit fixed point,
+/// reaching 3 sigma. The weights of the full kernel sum to exactly
+/// [`KERNEL_ONE`]; the centre absorbs the rounding.
+fn gaussian_kernel(sigma_tenths: u32) -> Vec<u64> {
+    let sigma = f64::from(sigma_tenths) / 10.0;
+    let radius = (3.0 * sigma).ceil() as usize;
+    let raw: Vec<f64> = (0..=radius)
+        .map(|i| (-((i * i) as f64) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let total = raw[0] + 2.0 * raw[1..].iter().sum::<f64>();
+    let mut kernel: Vec<u64> = raw
+        .iter()
+        .map(|w| (w / total * KERNEL_ONE as f64).round() as u64)
+        .collect();
+    let sides: u64 = 2 * kernel[1..].iter().sum::<u64>();
+    kernel[0] = KERNEL_ONE - sides;
+    kernel
+}
+
+/// Gaussian blur with sigma `sigma_tenths / 10` pixels: a provider whose
 /// ZL16 is softer than a plain average of its ZL18, as resampling with a
 /// wider kernel or imagery from a coarser capture would be.
-pub fn soften(image: &RgbImage) -> RgbImage {
-    let (w, h) = image.dimensions();
-    RgbImage::from_fn(w, h, |x, y| {
-        let mut acc = [0u32; 3];
-        for (j, wy) in [1, 2, 1].iter().enumerate() {
-            for (i, wx) in [1, 2, 1].iter().enumerate() {
-                let sx = (x + i as u32).saturating_sub(1).min(w - 1);
-                let sy = (y + j as u32).saturating_sub(1).min(h - 1);
-                let p = image.get_pixel(sx, sy);
-                for c in 0..3 {
-                    acc[c] += wx * wy * u32::from(p[c]);
-                }
+///
+/// Separable, in integers, edges clamped; zero returns the image unchanged.
+pub fn soften(image: &RgbImage, sigma_tenths: u32) -> RgbImage {
+    if sigma_tenths == 0 {
+        return image.clone();
+    }
+    let kernel = gaussian_kernel(sigma_tenths);
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let src = image.as_raw();
+    // Taps of the full kernel as (offset from -radius, weight).
+    let radius = kernel.len() - 1;
+    let tap = |i: usize| kernel[i.abs_diff(radius)];
+    let clamp = |pos: usize, i: usize, len: usize| (pos + i).saturating_sub(radius).min(len - 1);
+    let mut rows = vec![0u64; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                rows[(y * w + x) * 3 + c] = (0..=2 * radius)
+                    .map(|i| tap(i) * u64::from(src[(y * w + clamp(x, i, w)) * 3 + c]))
+                    .sum();
             }
         }
-        Rgb(acc.map(|v| ((v + 8) / 16) as u8))
+    }
+    let half = KERNEL_ONE * KERNEL_ONE / 2;
+    RgbImage::from_fn(w as u32, h as u32, |x, y| {
+        let (x, y) = (x as usize, y as usize);
+        Rgb([0, 1, 2].map(|c| {
+            let acc: u64 = (0..=2 * radius)
+                .map(|i| tap(i) * rows[(clamp(y, i, h) * w + x) * 3 + c])
+                .sum();
+            ((acc + half) / (KERNEL_ONE * KERNEL_ONE)) as u8
+        }))
     })
 }
 
@@ -374,13 +475,82 @@ mod tests {
         assert_eq!(info.subsampling, "4:2:0");
     }
 
+    fn edge() -> RgbImage {
+        RgbImage::from_fn(24, 8, |x, _| Rgb([if x < 12 { 0 } else { 200 }, 9, 9]))
+    }
+
+    /// Pixels of a row that are neither of the edge's two levels.
+    fn spread(image: &RgbImage) -> usize {
+        (0..image.width())
+            .filter(|&x| !matches!(image.get_pixel(x, 4)[0], 0 | 200))
+            .count()
+    }
+
     #[test]
-    fn softening_keeps_flat_areas_and_spreads_an_edge() {
-        let image = RgbImage::from_fn(8, 8, |x, _| Rgb([if x < 4 { 0 } else { 160 }, 9, 9]));
-        let soft = soften(&image);
-        assert_eq!(soft.get_pixel(1, 4).0, [0, 9, 9]);
-        assert_eq!(soft.get_pixel(3, 4).0, [40, 9, 9]);
-        assert_eq!(soft.get_pixel(4, 4).0, [120, 9, 9]);
+    fn sigma_zero_is_the_identity() {
+        let scene = render(Content::Town, 11, 64);
+        assert_eq!(soften(&scene, 0), scene);
+    }
+
+    #[test]
+    fn softening_keeps_flat_areas_and_the_mean() {
+        let soft = soften(&edge(), 7);
+        assert_eq!(soft.get_pixel(2, 4).0, [0, 9, 9]);
+        assert_eq!(soft.get_pixel(21, 4).0, [200, 9, 9]);
+        // Symmetric about the edge: the two pixels beside it sum to the step.
+        assert_eq!(soft.get_pixel(11, 4)[0] + soft.get_pixel(12, 4)[0], 200);
+    }
+
+    #[test]
+    fn a_larger_sigma_spreads_an_edge_further() {
+        let image = edge();
+        let (narrow, mid, wide) = (soften(&image, 4), soften(&image, 7), soften(&image, 10));
+        assert!(spread(&narrow) > 0);
+        assert!(spread(&narrow) < spread(&mid));
+        assert!(spread(&mid) < spread(&wide));
+        assert!(narrow.get_pixel(12, 4)[0] > wide.get_pixel(12, 4)[0]);
+    }
+
+    #[test]
+    fn kernels_sum_to_one_and_fall_off() {
+        for tenths in [4, 5, 7, 10, 15] {
+            let kernel = gaussian_kernel(tenths);
+            assert_eq!(kernel[0] + 2 * kernel[1..].iter().sum::<u64>(), KERNEL_ONE);
+            assert!(kernel.windows(2).all(|w| w[0] >= w[1]), "{kernel:?}");
+        }
+    }
+
+    #[test]
+    fn profiles_are_named_after_quality_and_sigma() {
+        let name = |quality, sigma_tenths| {
+            Profile {
+                quality,
+                sigma_tenths,
+            }
+            .name()
+        };
+        assert_eq!(name(Quality::Fixed(75), 0), "synth-q75");
+        assert_eq!(name(Quality::Fixed(75), 5), "synth-q75-s05");
+        assert_eq!(name(Quality::Fixed(60), 10), "synth-q60-s10");
+        assert_eq!(name(Quality::Mixed, 0), "synth-mixed");
+    }
+
+    #[test]
+    fn a_mixed_profile_uses_every_quality_in_any_2x2_block() {
+        let mixed = Profile {
+            quality: Quality::Mixed,
+            sigma_tenths: 0,
+        };
+        for (row, col) in [(0, 0), (1000, 2000), (7, 12)] {
+            let mut seen: Vec<u8> = [(0, 0), (0, 1), (1, 0), (1, 1)]
+                .iter()
+                .map(|(r, c)| mixed.quality_at(row + r, col + c))
+                .collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen, MIXED_QUALITIES);
+        }
+        assert!(mixed.describe().contains("sigma 0.0 px"));
     }
 
     #[test]
