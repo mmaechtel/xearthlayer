@@ -215,6 +215,20 @@ zzXEL_ortho (consolidated mount)
 | Other DDS | `*.dds` | ENOENT (not an orthophoto) |
 | Unknown | `*` | Passthrough if exists, else ENOENT |
 
+### Terrain Files (`.ter`)
+
+A `.ter` file is a plain passthrough: the mount has no hook that changes its content.
+
+- **Not indexed.** `terrain/` and `textures/` are registered as empty directories and never scanned, so `readdir` lists nothing in them. X-Plane reaches a `.ter` by `lookup` alone.
+- **Resolved lazily.** `resolve_lazy_geo` tries patch sources first for names that parse as a tile in a patched region, then every source in priority order; `OrthoUnionIndex::resolve_lazy` returns the first `source/terrain/<name>` that exists. It returns the path only, not which source matched.
+- **Attributes from the real file.** `lookup` and `getattr` resolve the path again on every call and take size and times from the file's metadata. Nothing is cached in XEarthLayer; the kernel TTL is 1 s.
+- **Read by path.** `open` keeps no file descriptor. Each `read` resolves the path, takes a disk I/O permit, opens the file, seeks and reads.
+- **Page cache on every platform.** Passthrough files open with flags 0, on Linux and macOS alike. Only virtual DDS files differ.
+
+The other readers of `.ter` files (scenery index, prewarm scanner, package sizes, publisher dedupe) read the package directories on disk, not the mount. A change made in the mount would not reach them.
+
+Serving a changed `.ter` has one hard constraint: the size answered by `lookup` and `getattr` must equal the bytes `read` serves, and it is asked before the file is opened. The lit texture seam (`LitTextureSource`: `size` and `read` with that same contract, injected by `with_lit_source`) is the pattern to follow. See [Ortho Texture Quality: Findings](ortho-texture-quality-findings.md) for the decal proposal this was analysed for.
+
 ### DDS Pattern Recognition
 
 Orthophoto DDS files follow the Ortho4XP naming convention:

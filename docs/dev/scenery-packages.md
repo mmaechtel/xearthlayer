@@ -87,6 +87,44 @@ These files reference:
 - DDS texture files for land (generated on-demand by XEarthLayer)
 - PNG mask files for water bodies (included in package)
 
+A land file and a sea overlay file from the NA-GREENLAND package, version 0.5.1:
+
+```
+A
+800
+TERRAIN
+
+LOAD_CENTER 77.12783 -71.14746 2179 4096
+BASE_TEX_NOWRAP ../textures/10000_19808_GO216.dds
+NO_ALPHA
+TEXTURE_LIT ../textures/10000_19808_GO216_LIT.dds
+LUMINANCE 600
+```
+
+```
+A
+800
+TERRAIN
+
+LOAD_CENTER 77.12783 -71.14746 2179 4096
+BASE_TEX_NOWRAP ../textures/10000_19808_GO216.dds
+LOAD_CENTER_BORDER 77.12783 -71.14746 2179 1024
+BORDER_TEX ../textures/10000_19808_ZL16.png
+WET
+NO_SHADOW
+```
+
+A complete read of two packages of version 0.5.1 (NA-GREENLAND, 218,783 files, and EU-WEST, 439,849 files) found these directives and no others:
+
+| Directive | Where |
+|---|---|
+| `LOAD_CENTER`, `BASE_TEX_NOWRAP` | every file |
+| `NO_ALPHA`, `TEXTURE_LIT`, `LUMINANCE` | land files |
+| `BORDER_TEX`, `WET`, `NO_SHADOW` | `_sea_overlay` files |
+| `LOAD_CENTER_BORDER` | some `_sea_overlay` files: 32,320 of 209,829 in EU-WEST |
+
+No file carries a decal directive (`DECAL_LIB`, `DECAL`, ...). The publisher copies `.ter` files unchanged from the Ortho4XP output, so this reflects Ortho4XP's default `use_decal_on_terrain = False`. Why most sea overlays lack `LOAD_CENTER_BORDER` is not known.
+
 ### textures/
 
 Contains only water mask PNG files (e.g., `25264_10912_ZL16.png`). These define water boundaries for coastal and lake areas.
