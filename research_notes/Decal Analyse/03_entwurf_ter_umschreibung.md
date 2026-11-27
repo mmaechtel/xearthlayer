@@ -107,8 +107,8 @@ Builds on (a); the suffix is still one constant per session.
 - X-Plane's parser: position of the decal line, trailing blank lines, duplicate decal lines. If
   position matters, the design falls back to reading at lookup (one extra open and read, or a
   bounded cache; an unbounded one would be about 55 MB for 218,783 files).
-- Existing decal lines were checked in one package only (NA-GREENLAND, none found); the EU-WEST
-  scan is recorded in `01_eu_west_ter_scan.md` once it has finished.
+- Existing decal lines were checked in two packages (NA-GREENLAND, 218,783 files, and EU-WEST,
+  439,849 files; none found, see `01_eu_west_ter_scan.md`). The other 15 regions are unchecked.
 - Size before open holds only while the suffix is constant for the life of the mount.
 - macOS is untested; macFUSE may hold pages for the life of the vnode (inference), harmless with
   fixed content.
