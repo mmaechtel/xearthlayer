@@ -1,0 +1,20 @@
+[package]
+name = "level0-bench"
+description = "Offline benchmark for level-0 deblocking, deringing and sharpening of ortho imagery (research tool, not shipped)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+xearthlayer = { path = "../xearthlayer" }
+image = "0.25"
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+jpeg-encoder = "0.7"
+butteraugli = "0.9"

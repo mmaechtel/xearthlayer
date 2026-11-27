@@ -6,6 +6,7 @@ members = [
     "xearthlayer-package",
     "xearthlayer-publisher",
     "xearthlayer-publish",
+    "level0-bench",
 ]
 
 [workspace.package]

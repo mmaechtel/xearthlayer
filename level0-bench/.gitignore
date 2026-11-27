@@ -1,0 +1,6 @@
+# Raw chunks (fetched or synthetic) and the bulky parts of the results.
+/data/
+/data-synth/
+/results/crops/
+/results/index.html
+/results-real/
