@@ -1146,6 +1146,99 @@ mod inner {
     /// (#424). Recorded only for a tile of more than one level.
     const MIP_PASS: u32 = 1;
 
+    /// MESSPROBE (#484, not for merge): the native BC1 prototype kernel of
+    /// `tests/support/bc1_native.wgsl` in place of `block_compression`'s,
+    /// chosen by `XEL_PROBE_BC1` (`fit` or `fit_refine`). The shader gets
+    /// the level's offset in the payload (in u32 words) in its params.
+    struct NativeBc1 {
+        pipeline: wgpu::ComputePipeline,
+    }
+
+    impl NativeBc1 {
+        fn from_env(device: &wgpu::Device) -> Option<Self> {
+            let entry = match std::env::var("XEL_PROBE_BC1").ok()?.as_str() {
+                "fit" => "bc1_fit",
+                "fit_refine" => "bc1_fit_refine",
+                _ => return None,
+            };
+            let source = include_str!("../../tests/support/bc1_native.wgsl");
+            assert!(
+                source.contains("_pad0: u32")
+                    && source.contains("let at = (gid.y * bw + gid.x) * 2u;")
+            );
+            let source = source.replace("_pad0: u32", "offset: u32").replace(
+                "let at = (gid.y * bw + gid.x) * 2u;",
+                "let at = params.offset + (gid.y * bw + gid.x) * 2u;",
+            );
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("bc1-native-probe"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            eprintln!("MESSPROBE: BC1 kernel = native {entry}");
+            Some(Self { pipeline })
+        }
+
+        /// One bind group per level: its texture, the whole output buffer,
+        /// its padded size and its offset in the payload.
+        fn binds(
+            &self,
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            chain: &MipChain,
+            output: &wgpu::Buffer,
+        ) -> Vec<wgpu::BindGroup> {
+            chain
+                .plan()
+                .iter()
+                .enumerate()
+                .map(|(index, level)| {
+                    let words = [
+                        level.padded_width,
+                        level.padded_height,
+                        (level.offset / 4) as u32,
+                        0,
+                    ];
+                    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    let params = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("bc1-native-params"),
+                        size: 16,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    queue.write_buffer(&params, 0, &bytes);
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bc1-native"),
+                        layout: &self.pipeline.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &chain.level(index).view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: output.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: params.as_entire_binding(),
+                            },
+                        ],
+                    })
+                })
+                .collect()
+        }
+    }
+
     /// The GPU resources of one tile size, kept across tiles (#423):
     ///
     /// - the upload buffer, persistently mapped (#424): written at creation
@@ -1181,6 +1274,8 @@ mod inner {
         output: wgpu::Buffer,
         readback: wgpu::Buffer,
         timer: Option<KernelTimer>,
+        /// MESSPROBE: the native kernel's bind group per level.
+        native_binds: Vec<wgpu::BindGroup>,
     }
 
     impl TileResources {
@@ -1188,6 +1283,7 @@ mod inner {
             device: &wgpu::Device,
             queue: &wgpu::Queue,
             mips: &MipPipeline,
+            native: Option<&NativeBc1>,
             width: u32,
             height: u32,
             format: DdsFormat,
@@ -1215,7 +1311,10 @@ mod inner {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
+            let native_binds =
+                native.map_or_else(Vec::new, |n| n.binds(device, queue, &chain, &output));
             Self {
+                native_binds,
                 width,
                 height,
                 format,
@@ -1355,6 +1454,7 @@ mod inner {
         queue: wgpu::Queue,
         compressor: GpuBlockCompressor,
         mips: MipPipeline,
+        native: Option<NativeBc1>,
         sets: [Option<TileResources>; RESOURCE_SETS],
         /// Which sets a begun tile holds.
         busy: [bool; RESOURCE_SETS],
@@ -1373,6 +1473,7 @@ mod inner {
         ) -> Self {
             let mips = MipPipeline::new(&device, &queue, gpu_filter());
             Self {
+                native: NativeBc1::from_env(&device),
                 device,
                 queue,
                 compressor,
@@ -1418,9 +1519,11 @@ mod inner {
                 queue,
                 compressor,
                 mips,
+                native,
                 sets,
                 ..
             } = self;
+            let native = native.as_ref();
             let resources = &mut sets[set];
             if !resources
                 .as_ref()
@@ -1431,7 +1534,7 @@ mod inner {
                     tracing::debug_span!(target: "profiling", "gpu_buffers"),
                     || {
                         *resources = Some(TileResources::new(
-                            device, queue, mips, width, height, format,
+                            device, queue, mips, native, width, height, format,
                         ));
                     },
                 );
@@ -1507,18 +1610,32 @@ mod inner {
                     } else {
                         BC1_PASS + 1
                     };
-                    for (index, level) in plan.iter().enumerate() {
-                        compressor.add_compression_task(
-                            variant,
-                            &resources.chain.level(index).view,
-                            level.padded_width,
-                            level.padded_height,
-                            &resources.output,
-                            None,
-                            Some(level.offset as u32),
-                        );
-                    }
-                    {
+                    if let Some(native) = native {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("tile-bc1-native"),
+                            timestamp_writes: timer.map(|t| t.pass_writes(BC1_PASS)),
+                        });
+                        pass.set_pipeline(&native.pipeline);
+                        for (index, level) in plan.iter().enumerate() {
+                            pass.set_bind_group(0, &resources.native_binds[index], &[]);
+                            pass.dispatch_workgroups(
+                                (level.padded_width / 4).div_ceil(8),
+                                (level.padded_height / 4).div_ceil(8),
+                                1,
+                            );
+                        }
+                    } else {
+                        for (index, level) in plan.iter().enumerate() {
+                            compressor.add_compression_task(
+                                variant,
+                                &resources.chain.level(index).view,
+                                level.padded_width,
+                                level.padded_height,
+                                &resources.output,
+                                None,
+                                Some(level.offset as u32),
+                            );
+                        }
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("tile-bc1"),
                             timestamp_writes: timer.map(|t| t.pass_writes(BC1_PASS)),

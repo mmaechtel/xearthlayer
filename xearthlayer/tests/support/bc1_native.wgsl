@@ -90,7 +90,7 @@ fn refit(px: ptr<function, array<vec3<f32>, 16>>, bits: u32, e0: ptr<function, v
     *e1 = clamp((bp * aa - ap * ab) / det, vec3<f32>(0.0), vec3<f32>(255.0));
 }
 
-fn encode(gid: vec3<u32>, refine: bool) {
+fn encode(gid: vec3<u32>, refines: u32) {
     let bw = (params.width + 3u) / 4u;
     let bh = (params.height + 3u) / 4u;
     if (gid.x >= bw || gid.y >= bh) {
@@ -164,7 +164,7 @@ fn encode(gid: vec3<u32>, refine: bool) {
     var bits = 0u;
     if (p0 != p1) {
         bits = assign(&px, p0, p1);
-        if (refine) {
+        for (var r = 0u; r < refines; r++) {
             var r0 = expand565(p0);
             var r1 = expand565(p1);
             refit(&px, bits, &r0, &r1);
@@ -179,6 +179,8 @@ fn encode(gid: vec3<u32>, refine: bool) {
                 p0 = q0;
                 p1 = q1;
                 bits = assign(&px, p0, p1);
+            } else {
+                break;
             }
         }
     }
@@ -192,11 +194,17 @@ fn encode(gid: vec3<u32>, refine: bool) {
 @compute
 @workgroup_size(8, 8)
 fn bc1_fit(@builtin(global_invocation_id) gid: vec3<u32>) {
-    encode(gid, false);
+    encode(gid, 0u);
 }
 
 @compute
 @workgroup_size(8, 8)
 fn bc1_fit_refine(@builtin(global_invocation_id) gid: vec3<u32>) {
-    encode(gid, true);
+    encode(gid, 1u);
+}
+
+@compute
+@workgroup_size(8, 8)
+fn bc1_fit_refine2(@builtin(global_invocation_id) gid: vec3<u32>) {
+    encode(gid, 2u);
 }

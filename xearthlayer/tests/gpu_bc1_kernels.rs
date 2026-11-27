@@ -41,10 +41,12 @@ enum Kernel {
     NativeFit,
     /// The native prototype with one least-squares refit.
     NativeFitRefine,
+    NativeFitRefine2,
 }
 
 impl Kernel {
-    const ALL: [Kernel; 3] = [
+    const ALL: [Kernel; 4] = [
+        Kernel::NativeFitRefine2,
         Kernel::BlockCompression,
         Kernel::NativeFit,
         Kernel::NativeFitRefine,
@@ -55,6 +57,7 @@ impl Kernel {
             Kernel::BlockCompression => "block_compression BC1",
             Kernel::NativeFit => "native fit",
             Kernel::NativeFitRefine => "native fit+refine",
+            Kernel::NativeFitRefine2 => "native fit+refine x2",
         }
     }
 }
@@ -149,6 +152,7 @@ impl KernelRun {
 struct Native {
     fit: wgpu::ComputePipeline,
     refine: wgpu::ComputePipeline,
+    refine2: wgpu::ComputePipeline,
 }
 
 impl Native {
@@ -161,7 +165,12 @@ impl Native {
             });
         let fit = pipeline(gpu, &module, "bc1_fit");
         let refine = pipeline(gpu, &module, "bc1_fit_refine");
-        Self { fit, refine }
+        let refine2 = pipeline(gpu, &module, "bc1_fit_refine2");
+        Self {
+            fit,
+            refine,
+            refine2,
+        }
     }
 }
 
@@ -188,9 +197,11 @@ fn run_kernel(
                 bc.add_compression_task(CompressionVariant::BC1, &view, w, h, &out, None, None);
                 bc.compress(pass);
             }),
-            Kernel::NativeFit | Kernel::NativeFitRefine => {
+            Kernel::NativeFit | Kernel::NativeFitRefine | Kernel::NativeFitRefine2 => {
                 let pipe = if kernel == Kernel::NativeFit {
                     &native.fit
+                } else if kernel == Kernel::NativeFitRefine2 {
+                    &native.refine2
                 } else {
                     &native.refine
                 };
